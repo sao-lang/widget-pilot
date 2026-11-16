@@ -1,0 +1,34 @@
+[project]
+name = "widgetpilot"
+version = "1.0.0"
+description = "WidgetPilot monorepo 根工程（M01 §3.3：uv workspace，依赖层缓存与 lockfile 确定性）"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "alembic>=1.14",
+    "asyncpg>=0.30",
+    "psycopg[binary]>=3.2",
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
+    # 以下为各模块 §2 技术栈已定稿的运行期基础库（M01 §11.7 差异核对补入）
+    "tiktoken>=0.8",        # M03/M07/M10：纯 token 计数
+    "Pillow>=11.0",         # M05：图片只读解码
+    "jsonschema>=4.23",     # M06/M02：JSON Schema 校验器
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "testcontainers[postgres]>=4.8",
+    "ruff>=0.8",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

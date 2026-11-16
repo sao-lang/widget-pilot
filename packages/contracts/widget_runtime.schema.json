@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://widgetpilot.dev/schemas/widget_runtime.schema.json",
+  "title": "WidgetRuntime",
+  "description": "M02 §4.3.3 渲染协议。iframe.sandbox 恰为 [allow-scripts]（不含 allow-same-origin/top-navigation/forms/popups）；bridge_messages 窄协议非任意 JSON-RPC；capability_bridge = manifest.capabilities ∩ 白名单，未声明调用拒绝并上报。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["card", "iframe", "bridge_messages", "capability_bridge", "limits"],
+  "properties": {
+    "card": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["grid", "px"],
+      "properties": {
+        "grid": { "enum": ["2x2", "2x4", "4x2", "4x4", "2x1", "1x2"] },
+        "px": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["w", "h"],
+          "properties": {
+            "w": { "type": "integer", "minimum": 1, "description": "真实比例宽度（cell=80px，§6.3）" },
+            "h": { "type": "integer", "minimum": 1 }
+          }
+        }
+      }
+    },
+    "iframe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sandbox", "csp", "srcdoc_ref"],
+      "properties": {
+        "sandbox": {
+          "const": ["allow-scripts"],
+          "description": "隔离硬约束：不含 allow-same-origin / top-navigation / forms / popups"
+        },
+        "csp": { "type": "string", "minLength": 1, "description": "禁外联脚本、禁 eval、禁网络" },
+        "srcdoc_ref": { "type": "string", "minLength": 1, "description": "指向 compiled 产物（对象存储 key + hash）" }
+      }
+    },
+    "bridge_messages": {
+      "const": ["widget:ready", "widget:resize", "widget:error", "host:theme", "host:locale", "host:tick", "host:data"],
+      "description": "窄协议，7 条，非任意 JSON-RPC"
+    },
+    "capability_bridge": {
+      "type": "array",
+      "items": { "enum": ["date", "timer", "local_storage", "static_data", "theme", "locale"] },
+      "description": "= manifest.capabilities ∩ 白名单；未声明调用拒绝并上报"
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["render_timeout_ms", "max_message_rate"],
+      "properties": {
+        "render_timeout_ms": { "type": "integer", "minimum": 1 },
+        "max_message_rate": { "type": "integer", "minimum": 1, "description": "每秒消息条数上限" }
+      }
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "@widgetpilot/sdk",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "M02 生成的 TS 客户端（types.ts / schemas.ts / client.ts 均为生成物，禁止手改）",
+  "main": "ts/client.ts",
+  "types": "ts/types.ts",
+  "scripts": {
+    "build": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@widgetpilot/contracts": "workspace:*",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}

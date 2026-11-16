@@ -1,0 +1,77 @@
+# M01 §3.4 CI 容器策略（R8）：
+# - 单元测试不起容器（快）
+# - 集成测试用 testcontainers-python（进程内起一次性容器，随测试销毁）
+# - 端到端冒烟用 compose services（复用 docker-compose.dev.yml core 组，CI 与开发者行为一致）
+# 隔离：每 job 独立 COMPOSE_PROJECT_NAME；job 结束 compose down -v，无残留。
+name: ci-containers
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  # ---- 单元测试：无容器 ----
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - run: uv run pytest tests/unit -q
+
+  # ---- 集成测试：testcontainers（真实 PG / MinIO，M04 租约并发、M05 对象存储）----
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+      # Ryuk 自动回收容器；每 worker 一个 template database（M01 §3.4 隔离规则）
+      - run: uv run pytest tests/integration -q --timeout=600
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: "false"
+
+  # ---- 端到端冒烟：compose core + Fake DecisionSource（§3.4）----
+  e2e-smoke:
+    runs-on: ubuntu-latest
+    env:
+      COMPOSE_PROJECT_NAME: ci-${{ github.run_id }}-${{ github.job }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 起依赖栈（core，healthcheck 全绿才算成功）
+        run: |
+          cp .env.example .env
+          docker compose --profile core up -d --wait --wait-timeout 120
+      - name: seed 最小集（--ci，控制 job 时长）
+        run: bash infra/dev/seed/run_seed.sh --ci
+      - name: 冒烟断言（依赖端点可达）
+        run: |
+          docker compose ps
+          docker compose exec -T postgres pg_isready -U widgetpilot -d widgetpilot
+      - name: 清理（job 结束无残留容器 / volume）
+        if: always()
+        run: docker compose down -v --remove-orphans
+
+  # ---- 沙箱测试 job（并发=1；普通 Docker runtime 时标注「隔离强度降级」）----
+  sandbox:
+    runs-on: ubuntu-latest
+    # §3.4：防资源互踩，沙箱 job 设并发 = 1
+    concurrency:
+      group: sandbox-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 构建 wp-sandbox 镜像（M08 仓库当前定义；缺失时跳过并提示）
+        run: |
+          if [ -f infra/sandbox/Dockerfile ]; then
+            docker build -t wp-sandbox:dev -f infra/sandbox/Dockerfile infra/sandbox
+          else
+            echo "SKIP: infra/sandbox 未就绪（归 M08），沙箱 job 跳过"
+          fi
+      # 单容器约束：cpus=2, memory=2g, pids-limit=256；不挂 docker.sock；不申请 privileged
+      - name: 沙箱用例（M08 落地后接入）
+        run: echo "沙箱断言用例由 M08 提供；本 job 固定资源约束模板"

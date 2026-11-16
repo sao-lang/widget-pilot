@@ -1,0 +1,19 @@
+# M01 §6.4：.dockerignore 基线清单（仓库根，服务级可覆写追加）
+.git
+.env
+.env.*
+!.env.example
+**/__pycache__
+**/.venv
+**/node_modules
+**/dist
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+docs/
+tests/
+*.md
+!README.md
+infra/dev/seed/
+.github/
+.workbuddy/

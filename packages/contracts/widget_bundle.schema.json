@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://widgetpilot.dev/schemas/widget_bundle.schema.json",
+  "title": "WidgetBundle",
+  "description": "M02 §4.3.2 产物协议。同一份 manifest 贯穿四处：生成侧产码 → 静态校验比对能力声明 → 沙箱测试按声明放行 → 运行时 bridge 按声明放行 → 评测按声明出判据。所有 *_ref 约束为对象存储 key 字符串且带 hash（基线 §9）。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "bundle_id", "user_id", "session_id", "spec", "source", "compiled",
+    "manifest", "static_check", "sandbox_test", "state", "hash", "created_at"
+  ],
+  "properties": {
+    "bundle_id": { "type": "string", "minLength": 1 },
+    "user_id": { "type": "string", "minLength": 1 },
+    "session_id": { "type": "string", "minLength": 1 },
+    "spec": { "$ref": "widget_spec.schema.json" },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "content_ref", "language"],
+      "properties": {
+        "path": { "const": "widget.tsx" },
+        "content_ref": { "type": "string", "minLength": 1, "description": "对象存储 key（如 code/{session_id}/{run_id}/widget.tsx），读取时校验 hash" },
+        "language": { "const": "tsx" }
+      }
+    },
+    "compiled": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["content_ref", "hash"],
+      "properties": {
+        "content_ref": { "type": "string", "minLength": 1 },
+        "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "sha256 hex，防篡改" }
+      }
+    },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "spec_version", "spec_hash", "grid", "widget_type", "capabilities",
+        "import_allowlist", "exports", "props", "recipe_version",
+        "retrieval_snapshot", "model", "prompt_version", "model_tier"
+      ],
+      "properties": {
+        "spec_version": { "type": "string", "minLength": 1 },
+        "spec_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "grid": { "enum": ["2x2", "2x4", "4x2", "4x4", "2x1", "1x2"] },
+        "widget_type": { "enum": ["calendar", "clock", "alarm", "task", "custom"] },
+        "capabilities": { "type": "array", "items": { "enum": ["date", "timer", "local_storage", "static_data", "theme", "locale"] }, "description": "与 spec 一致，静态校验比对" },
+        "import_allowlist": { "type": "array", "items": { "type": "string" }, "const": ["react", "@widget/bridge"] },
+        "exports": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["default"],
+          "properties": { "default": { "const": "Widget" } }
+        },
+        "props": { "type": "array", "items": { "type": "string" } },
+        "recipe_version": { "type": "string", "minLength": 1, "description": "所用规程版本" },
+        "retrieval_snapshot": { "type": "string", "minLength": 1, "description": "所用检索快照与引用，保证可复现（D7）" },
+        "model": { "type": "string", "minLength": 1 },
+        "prompt_version": { "type": "string", "minLength": 1 },
+        "model_tier": { "enum": ["cheap", "standard", "frontier"] }
+      }
+    },
+    "static_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["passed", "violations"],
+      "properties": {
+        "passed": { "type": "boolean" },
+        "violations": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "sandbox_test": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["passed", "cases", "log_ref"],
+      "properties": {
+        "passed": { "type": "boolean" },
+        "cases": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "passed", "detail_ref"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "passed": { "type": "boolean" },
+              "detail_ref": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "log_ref": { "type": "string", "minLength": 1, "description": "如 evidence/{session_id}/{run_id}/sandbox.log" },
+        "snapshot_ref": { "type": "string" }
+      }
+    },
+    "state": { "enum": ["GENERATED", "INSTALLED", "DELETED"], "description": "BundleState（M09 拥有状态机）" },
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "整包摘要，防篡改" },
+    "created_at": { "type": "string", "format": "date-time" }
+  }
+}

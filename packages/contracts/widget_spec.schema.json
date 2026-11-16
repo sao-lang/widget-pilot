@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://widgetpilot.dev/schemas/widget_spec.schema.json",
+  "title": "WidgetSpec",
+  "description": "M02 §4.3.1 生成协议。grid 由用户显式选择不推断；能力声明式，渲染侧按此放行；import_allowlist 字面量唯一允许 import（I5 逐字段一致）。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "spec_version", "widget_id", "grid", "widget_type", "intent", "attachments",
+    "layout_slots", "capabilities", "data_contract", "style", "constraints",
+    "language", "react_version", "import_allowlist", "export_contract", "props_contract"
+  ],
+  "properties": {
+    "spec_version": { "type": "string", "minLength": 1, "description": "版本化，索引与 manifest 均绑定" },
+    "widget_id": { "type": "string", "minLength": 1 },
+    "grid": { "enum": ["2x2", "2x4", "4x2", "4x4", "2x1", "1x2"], "description": "用户显式选择，不推断" },
+    "widget_type": { "enum": ["calendar", "clock", "alarm", "task", "custom"] },
+    "intent": { "type": "string", "minLength": 1, "description": "归一化后的描述" },
+    "attachments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["attachment_id", "role", "insight_ref"],
+        "properties": {
+          "attachment_id": { "type": "string", "minLength": 1 },
+          "role": { "enum": ["visual_reference", "content_extraction", "data_source", "style_reference"], "description": "由描述决定，可在前端纠偏" },
+          "insight_ref": { "type": "string", "description": "AttachmentInsight 对象引用（对象存储 key + hash）" }
+        }
+      }
+    },
+    "layout_slots": {
+      "type": "array",
+      "description": "受 grid 信息密度约束",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["slot", "content"],
+        "properties": {
+          "slot": { "type": "string", "minLength": 1 },
+          "content": { "type": "string" }
+        }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "items": { "enum": ["date", "timer", "local_storage", "static_data", "theme", "locale"] },
+      "description": "声明式能力，渲染侧按此放行"
+    },
+    "data_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sources", "storage_namespace"],
+      "properties": {
+        "sources": { "type": "array", "items": { "enum": ["time", "local_storage", "static"] } },
+        "storage_namespace": { "type": "string", "minLength": 1, "description": "按 user + widget 隔离" }
+      }
+    },
+    "style": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "palette": { "type": "array", "items": { "type": "string" } },
+        "radius": { "type": "number" },
+        "font_scale": { "type": "number" }
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["forbidden", "max_elements"],
+      "properties": {
+        "forbidden": { "type": "array", "items": { "type": "string" } },
+        "max_elements": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "language": { "const": "tsx" },
+    "react_version": { "type": "string", "minLength": 1 },
+    "import_allowlist": { "const": ["react", "@widget/bridge"], "description": "唯一允许 import（I7）" },
+    "export_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["default"],
+      "properties": { "default": { "const": "Widget" } }
+    },
+    "props_contract": {
+      "const": ["grid", "theme", "locale", "tick", "data"]
+    }
+  }
+}

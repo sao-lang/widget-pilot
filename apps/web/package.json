@@ -1,0 +1,29 @@
+{
+  "name": "@widgetpilot/web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "React 控制面（M13–M12 拥有 UI；本骨架仅保证 dev/full 模式可起、契约类型可消费）",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.62.0",
+    "@tanstack/react-virtual": "^3.11.0",
+    "@widgetpilot/sdk": "workspace:*",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "recharts": "^2.15.0",
+    "zod": "^3.24.0",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "widgetpilot-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "pnpm workspace root（M01/M02 monorepo；真实包在 apps/* 与 packages/*）",
+  "scripts": {
+    "contracts:check": "pnpm --filter @widgetpilot/contracts run contracts:check",
+    "gen:all": "pnpm --filter @widgetpilot/contracts run gen:all"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}

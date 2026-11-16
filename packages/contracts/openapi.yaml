@@ -1,0 +1,646 @@
+# ============================================================
+# M02 §4.4 REST 全表 —— 单一事实来源（各 Mxx 实现，M02 维护）
+# OpenAPI 3.1；统一响应 ApiResponse{code,message,traceId,retryable,evidenceRef?,data?}
+# code 合法值域 = "OK" ∪ ReasonCode ∪ HttpReasonCode（§9 Q1 扩充定稿【推导·需评审】）
+# 权限：公开 / 本人 / 审核员(curator) / 管理员(curator 承载，Q2)
+# 变更流程：改本文件 → pnpm gen:* → contracts:check → docs/adr/ 记录
+# ============================================================
+openapi: 3.1.0
+info:
+  title: WidgetPilot REST API
+  version: 1.0.0
+  description: |
+    前后端契约 REST 全表（M02 §4.4 / §4.1.4）。权限边界：服务端按 user_id
+    对每个 REST 请求与每条 SSE 事件做权限校验；前端隐藏按钮只是体验（§6.9）。
+servers:
+  - url: http://127.0.0.1:8000
+    description: dev 本机直连 control-plane
+tags:
+  - name: auth          # M04
+  - name: sessions      # M04 / M13 / M14
+  - name: attachments   # M05
+  - name: events        # M04 / M15
+  - name: bundles       # M09 / M16
+  - name: corpus        # M10
+  - name: ops           # M10 / M11
+  - name: bff           # M02（可选 BFF，不做鉴权判定）
+
+paths:
+  # ---------- auth（M04）----------
+  /api/auth/register:
+    post:
+      tags: [auth]
+      summary: 注册（邮箱 + 密码），签发 JWT
+      security: []
+      operationId: register
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8 }
+      responses:
+        "200":
+          $ref: "#/components/responses/AuthOk"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+  /api/auth/login:
+    post:
+      tags: [auth]
+      summary: 登录，签发 JWT（短时 + refresh，D1）
+      security: []
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        "200":
+          $ref: "#/components/responses/AuthOk"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /api/auth/refresh:
+    post:
+      tags: [auth]
+      summary: 刷新 JWT（M02 §9 Q3 定稿【契约约定】：补入 refresh 路径）
+      security: []
+      operationId: refreshToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string }
+      responses:
+        "200":
+          $ref: "#/components/responses/AuthOk"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ---------- sessions（M04 / M13 / M14，权限：本人）----------
+  /api/sessions:
+    get:
+      tags: [sessions]
+      summary: 会话列表
+      operationId: listSessions
+      responses:
+        "200":
+          $ref: "#/components/responses/SessionListOk"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      tags: [sessions]
+      summary: 新建会话（含 grid，用户显式选择）
+      operationId: createSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [grid]
+              properties:
+                grid: { $ref: "#/components/schemas/GridSpec" }
+      responses:
+        "200":
+          $ref: "#/components/responses/SessionOk"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+  /api/sessions/{session_id}:
+    get:
+      tags: [sessions]
+      summary: 会话快照 + 产物引用
+      operationId: getSession
+      parameters: [{ $ref: "#/components/parameters/SessionId" }]
+      responses:
+        "200":
+          $ref: "#/components/responses/SessionOk"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/sessions/{session_id}/messages:
+    post:
+      tags: [sessions]
+      summary: 提交描述 + attachment_ids + grid
+      operationId: postMessage
+      parameters: [{ $ref: "#/components/parameters/SessionId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [description]
+              properties:
+                description: { type: string }
+                attachment_ids: { type: array, items: { type: string } }
+                grid: { $ref: "#/components/schemas/GridSpec" }
+      responses:
+        "202":
+          description: 异步任务已受理（不把 202 当成功语义外泄，前端按事件流驱动）
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiResponse" }
+        "422":
+          $ref: "#/components/responses/Unprocessable"
+  /api/sessions/{session_id}/interrupt:
+    post:
+      tags: [sessions]
+      summary: 打断（幂等键约定由 M04 遵守）
+      operationId: interruptSession
+      parameters: [{ $ref: "#/components/parameters/SessionId" }]
+      responses:
+        "200": { $ref: "#/components/responses/ApiOk" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/sessions/{session_id}/resume:
+    post:
+      tags: [sessions]
+      summary: 继续
+      operationId: resumeSession
+      parameters: [{ $ref: "#/components/parameters/SessionId" }]
+      responses:
+        "200": { $ref: "#/components/responses/ApiOk" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/sessions/{session_id}/cancel:
+    post:
+      tags: [sessions]
+      summary: 取消
+      operationId: cancelSession
+      parameters: [{ $ref: "#/components/parameters/SessionId" }]
+      responses:
+        "200": { $ref: "#/components/responses/ApiOk" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/sessions/{session_id}/attachment-roles:
+    patch:
+      tags: [sessions]
+      summary: 纠偏附件 role（M05 / M14）
+      operationId: patchAttachmentRoles
+      parameters: [{ $ref: "#/components/parameters/SessionId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [roles]
+              properties:
+                roles:
+                  type: array
+                  items:
+                    type: object
+                    required: [attachment_id, role]
+                    properties:
+                      attachment_id: { type: string }
+                      role: { $ref: "#/components/schemas/AttachmentRole" }
+      responses:
+        "200": { $ref: "#/components/responses/ApiOk" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  # ---------- attachments（M05）----------
+  /api/attachments:
+    post:
+      tags: [attachments]
+      summary: 附件上传（传输层校验 → 对象存储 att/{user_id}/{session_id}/{attachment_id}/original），返回 attachment_id
+      operationId: uploadAttachment
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+                session_id: { type: string }
+      responses:
+        "200":
+          description: OK——返回 attachment_id
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          attachment_id: { type: string }
+                          hash: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  # ---------- events（M04 / M15，SSE 长连接）----------
+  /api/sessions/{session_id}/events:
+    get:
+      tags: [events]
+      summary: SSE 事件流（Last-Event-ID 续传 + runId；本人 + 短期 ticket，§9 Q4 窗口 N=500 影子校准中）
+      operationId: streamEvents
+      parameters:
+        - { $ref: "#/components/parameters/SessionId" }
+        - name: runId
+          in: query
+          schema: { type: string }
+        - name: Last-Event-ID
+          in: header
+          schema: { type: string }
+        - name: ticket
+          in: query
+          description: BFF 签发的短期 SSE ticket（不做鉴权判定，仅换票）
+          schema: { type: string }
+      responses:
+        "200":
+          description: text/event-stream；事件 schema 见 events.schema.json；显式 done/error 结束，无 done 视为截断
+          content:
+            text/event-stream:
+              schema: { $ref: "#/components/schemas/AgentEvent" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  # ---------- bundles（M09 / M16，权限：本人）----------
+  /api/bundles:
+    get:
+      tags: [bundles]
+      summary: 当前用户控件包列表
+      operationId: listBundles
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/WidgetBundleSummary" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/bundles/{bundle_id}/install:
+    post:
+      tags: [bundles]
+      summary: 安装（幂等键；DELETED 后重装语义由 M09 定义）
+      operationId: installBundle
+      parameters: [{ $ref: "#/components/parameters/BundleId" }]
+      responses:
+        "200": { $ref: "#/components/responses/ApiOk" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/bundles/{bundle_id}/delete:
+    post:
+      tags: [bundles]
+      summary: 删除（软删 → BundleState=DELETED 终态）
+      operationId: deleteBundle
+      parameters: [{ $ref: "#/components/parameters/BundleId" }]
+      responses:
+        "200": { $ref: "#/components/responses/ApiOk" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/bundles/{bundle_id}/rollback:
+    post:
+      tags: [bundles]
+      summary: 回滚
+      operationId: rollbackBundle
+      parameters: [{ $ref: "#/components/parameters/BundleId" }]
+      responses:
+        "200": { $ref: "#/components/responses/ApiOk" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/bundles/{bundle_id}/preview:
+    get:
+      tags: [bundles]
+      summary: 受限 iframe 渲染所需编译产物引用（WidgetRuntime）
+      operationId: previewBundle
+      parameters: [{ $ref: "#/components/parameters/BundleId" }]
+      responses:
+        "200":
+          description: OK——WidgetRuntime 结构（widget_runtime.schema.json）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiResponse"
+                  - type: object
+                    properties:
+                      data: { type: object }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/bundles/{bundle_id}/evidence:
+    get:
+      tags: [bundles]
+      summary: manifest / 静态校验 / 沙箱测试 / trace 证据钻取
+      operationId: bundleEvidence
+      parameters: [{ $ref: "#/components/parameters/BundleId" }]
+      responses:
+        "200":
+          description: OK——各证据对象引用（evidence/ 前缀，带 hash）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiResponse"
+                  - type: object
+                    properties:
+                      data: { type: object }
+
+  # ---------- corpus（M10，权限：审核员）----------
+  /api/corpus:
+    get:
+      tags: [corpus]
+      summary: 公共语料检索（内部）
+      operationId: searchCorpus
+      responses:
+        "200":
+          description: OK——检索结果标注为不可信数据字段（§7：禁止当可信代码）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiResponse"
+                  - type: object
+                    properties:
+                      data: { type: array, items: { type: object } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/corpus/{corpus_id}/revoke:
+    post:
+      tags: [corpus]
+      summary: 语料撤回（可撤回，D-1）
+      operationId: revokeCorpus
+      parameters:
+        - name: corpus_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/ApiOk" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  # ---------- ops（M10 / M11，权限：管理员=curator 承载 Q2）----------
+  /api/evals:
+    get:
+      tags: [ops]
+      summary: 评测结果
+      operationId: listEvals
+      responses:
+        "200": { $ref: "#/components/responses/ApiOk" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/metrics:
+    get:
+      tags: [ops]
+      summary: 指标
+      operationId: getMetrics
+      responses:
+        "200": { $ref: "#/components/responses/ApiOk" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/audit:
+    get:
+      tags: [ops]
+      summary: 审计（只追加）
+      operationId: queryAudit
+      responses:
+        "200": { $ref: "#/components/responses/ApiOk" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  # ---------- BFF（M02 可选层，不做鉴权判定【契约约定】路径）----------
+  /api/bff/sse-ticket:
+    post:
+      tags: [bff]
+      summary: JWT session → 短期 SSE ticket（BFF 不做鉴权判定；ticket 绑定 session_id 短期有效）
+      operationId: issueSseTicket
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [session_id]
+              properties:
+                session_id: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [ticket, expires_at, events_url]
+                        properties:
+                          ticket: { type: string }
+                          expires_at: { type: string, format: date-time }
+                          events_url: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /api/bff/bootstrap:
+    get:
+      tags: [bff]
+      summary: 首屏聚合（user / sessions / metrics_summary；不做鉴权判定）
+      operationId: bootstrap
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          user: { type: object }
+                          sessions: { type: array, items: { type: object } }
+                          metrics_summary: { type: object }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /api/bff/health:
+    get:
+      tags: [bff]
+      summary: BFF 健康探针（公开）
+      security: []
+      operationId: bffHealth
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApiResponse" }
+
+components:
+  securitySchemes:
+    bearerJWT:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    SessionId:
+      name: session_id
+      in: path
+      required: true
+      schema: { type: string }
+    BundleId:
+      name: bundle_id
+      in: path
+      required: true
+      schema: { type: string }
+  responses:
+    ApiOk:
+      description: 统一响应（code=OK）
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiResponse" }
+    AuthOk:
+      description: 登录/注册/刷新成功——签发 JWT
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/ApiResponse"
+              - type: object
+                properties:
+                  data:
+                    type: object
+                    required: [access_token, refresh_token, expires_in]
+                    properties:
+                      access_token: { type: string }
+                      refresh_token: { type: string }
+                      expires_in: { type: integer }
+    SessionOk:
+      description: 会话快照
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/ApiResponse"
+              - type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      session_id: { type: string }
+                      state: { $ref: "#/components/schemas/SessionState" }
+                      grid: { $ref: "#/components/schemas/GridSpec" }
+                      resume_hint: { type: string }
+                      bundle_refs: { type: array, items: { type: string } }
+    SessionListOk:
+      description: 会话列表
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/ApiResponse"
+              - type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        session_id: { type: string }
+                        state: { $ref: "#/components/schemas/SessionState" }
+                        grid: { $ref: "#/components/schemas/GridSpec" }
+    BadRequest:
+      description: 输入不合法 / 规格冲突（INPUT_INVALID / SPEC_CONFLICT，retryable=false）
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiResponse" }
+    Unauthorized:
+      description: 401 未登录 / JWT 失效（UNAUTHORIZED，Q1 扩充定稿【推导·需评审】）
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiResponse" }
+    Forbidden:
+      description: 403 越权访问他人会话/包/语料（FORBIDDEN，Q1；服务端按 user_id 裁决）
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiResponse" }
+    Conflict:
+      description: 409 状态冲突（终态重复 resume / 重复安装；CONFLICT，Q1）
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiResponse" }
+    Unprocessable:
+      description: 422 语义校验 / 护栏命中（GUARD_INPUT_HIT / INTENT_OUT_OF_SCOPE）
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiResponse" }
+    NotFound:
+      description: 404 资源不存在
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiResponse" }
+  schemas:
+    ApiResponse:
+      type: object
+      description: 统一响应（M02 §4.4/§6.9）；code 与 ReasonCode 对齐；失败必带 evidenceRef，前端不显示裸「失败」
+      required: [code, message, traceId, retryable]
+      properties:
+        code:
+          type: string
+          description: 成功 "OK"；失败为 ReasonCode / HttpReasonCode（Q1）
+          enum:
+            - OK
+            - INPUT_INVALID
+            - INTENT_OUT_OF_SCOPE
+            - GUARD_INPUT_HIT
+            - GUARD_OUTPUT_HIT
+            - SPEC_CONFLICT
+            - CAPABILITY_DENIED
+            - CONTRACT_MISMATCH
+            - COMPILE_FAILED
+            - SANDBOX_TEST_FAILED
+            - RETRY_EXHAUSTED
+            - BUDGET_EXHAUSTED
+            - SANDBOX_UNAVAILABLE
+            - HUMAN_REQUIRED
+            - MODEL_ERROR
+            - UNAUTHORIZED
+            - FORBIDDEN
+            - CONFLICT
+        message: { type: string, minLength: 1 }
+        traceId: { type: string, minLength: 1 }
+        retryable: { type: boolean }
+        evidenceRef: { type: string, description: 失败时指向证据引用 }
+        data: {}
+    SessionState:
+      type: string
+      enum: [DRAFT, RUNNING, PAUSED, AWAITING_INPUT, VALIDATING, COMPLETED, FAILED, CANCELLED]
+    GridSpec:
+      type: string
+      enum: ["2x2", "2x4", "4x2", "4x4", "2x1", "1x2"]
+    AttachmentRole:
+      type: string
+      enum: [visual_reference, content_extraction, data_source, style_reference]
+    AgentEvent:
+      type: object
+      description: 完整结构见 packages/contracts/events.schema.json（单一事实来源）
+      required: [seq, sessionId, runId, ts, kind, phase, payload, traceId]
+      properties:
+        seq: { type: integer }
+        sessionId: { type: string }
+        runId: { type: string }
+        ts: { type: string, format: date-time }
+        kind: { type: string }
+        phase: { $ref: "#/components/schemas/SessionState" }
+        payload: {}
+        traceId: { type: string }
+    WidgetBundleSummary:
+      type: object
+      description: 完整结构见 packages/contracts/widget_bundle.schema.json
+      properties:
+        bundle_id: { type: string }
+        state: { type: string, enum: [GENERATED, INSTALLED, DELETED] }
+        hash: { type: string }
+        created_at: { type: string, format: date-time }

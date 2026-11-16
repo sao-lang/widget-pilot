@@ -1,0 +1,19 @@
+{
+  "name": "@widgetpilot/bff",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "M02 可选 BFF 占位：SSO / 首屏聚合 / 短期 SSE ticket / 统一错误映射；硬约束——不做鉴权判定（I8 静态扫描无 user_id 裁决分支）",
+  "scripts": {
+    "dev": "tsx server.ts"
+  },
+  "dependencies": {
+    "@widgetpilot/sdk": "workspace:*",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "name": "@widgetpilot/contracts",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "M02 单一事实来源：openapi.yaml + 4 份 schema.json + enums；生成物全部由此产出",
+  "scripts": {
+    "gen:openapi": "tsx scripts/generate.ts gen:openapi",
+    "gen:zod": "tsx scripts/generate.ts gen:zod",
+    "gen:enums": "tsx scripts/generate.ts gen:enums",
+    "gen:python": "python scripts/gen_python.py",
+    "gen:all": "tsx scripts/generate.ts gen:all && python scripts/gen_python.py",
+    "contracts:check": "tsx scripts/check.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "openapi-typescript": "^7.6.1",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "zod": "^3.24.0"
+  }
+}

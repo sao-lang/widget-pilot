@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://widgetpilot.dev/schemas/events.schema.json",
+  "title": "AgentEvent",
+  "description": "M02 §4.5 实时事件协议。可靠性约定：Last-Event-ID 续传 + 服务端保留最近 N 条（Q4 定稿 500，影子校准中）、超窗先拉快照；心跳保活；显式 done/error（无 done 视为截断）；前端按 seq 去重与乱序丢弃。未知 kind 容忍扩展（I6，前端 reducer 忽略而非报错）。",
+  "type": "object",
+  "required": ["seq", "sessionId", "runId", "ts", "kind", "phase", "payload", "traceId"],
+  "additionalProperties": false,
+  "properties": {
+    "seq": { "type": "integer", "minimum": 0, "description": "每会话单调递增；续传/去重游标" },
+    "sessionId": { "type": "string", "minLength": 1 },
+    "runId": { "type": "string", "minLength": 1, "description": "重连与跨天恢复的锚点" },
+    "ts": { "type": "string", "format": "date-time", "description": "UTC 带时区" },
+    "kind": {
+      "description": "AgentEventKind；未知值容忍（向前兼容）",
+      "enum": ["run", "plan", "spec", "attachment", "skill", "routing", "code", "guard", "validation", "sandbox", "artifact", "cost", "checkpoint", "interrupted", "notice", "error", "done"]
+    },
+    "phase": {
+      "description": "SessionState 权威状态",
+      "enum": ["DRAFT", "RUNNING", "PAUSED", "AWAITING_INPUT", "VALIDATING", "COMPLETED", "FAILED", "CANCELLED"]
+    },
+    "payload": {
+      "description": "按 kind 收窄（discriminated union）；final spec 用 widget_spec.schema.json 严格校验；partial tolerant",
+      "oneOf": [
+        { "type": "object", "properties": { "runId": { "type": "string" }, "phase": { "type": "string" }, "grid": { "enum": ["2x2", "2x4", "4x2", "4x4", "2x1", "1x2"] }, "attempt_no": { "type": "integer", "minimum": 0 } }, "required": ["runId", "phase", "grid"] },
+        { "type": "string", "description": "plan：结论式短句（不是思维链）" },
+        { "type": "object", "description": "spec：逐步逼近完整的 WidgetSpec JSON（partial）" },
+        { "type": "object", "properties": { "role": { "enum": ["visual_reference", "content_extraction", "data_source", "style_reference"] }, "insight_ref": { "type": "string" } } },
+        { "type": "object", "properties": { "skill_id": { "type": "string" }, "model_tier": { "enum": ["cheap", "standard", "frontier"] }, "threshold_hit": { "type": "boolean" } } },
+        { "type": "object", "properties": { "patches": { "type": "array", "items": { "type": "object", "properties": { "from_line": { "type": "integer", "minimum": 0 }, "to_line": { "type": "integer", "minimum": 0 }, "text": { "type": "string" } }, "required": ["from_line", "to_line", "text"] } } } },
+        { "type": "object", "properties": { "passed_items": { "type": "array", "items": { "type": "string" } }, "hit_items": { "type": "array", "items": { "type": "string" } }, "reason_code": { "$ref": "#/$defs/reasonCode" } } },
+        { "type": "object", "properties": { "bundle_id": { "type": "string", "minLength": 1 }, "preview_ref": { "type": "string" } }, "required": ["bundle_id"] },
+        { "type": "object", "properties": { "amount": { "type": "number" }, "ledger_ref": { "type": "string" } } },
+        { "type": "object", "properties": { "rev": { "type": "integer" }, "node": { "type": "string" }, "state_blob_ref": { "type": "string" } } },
+        { "type": "object", "properties": { "reason": { "type": "string" } } },
+        { "type": "object", "properties": { "message": { "type": "string" } } },
+        { "type": "object", "properties": { "code": { "$ref": "#/$defs/reasonCode" }, "message": { "type": "string" }, "evidenceRef": { "type": "string", "description": "失败时指向证据引用" } }, "required": ["code"] }
+      ]
+    },
+    "traceId": { "type": "string", "minLength": 1 }
+  },
+  "$defs": {
+    "reasonCode": {
+      "description": "ReasonCode 全集（M02 §5.3）；error.code 必须属于此枚举",
+      "enum": ["INPUT_INVALID", "INTENT_OUT_OF_SCOPE", "GUARD_INPUT_HIT", "GUARD_OUTPUT_HIT", "SPEC_CONFLICT", "CAPABILITY_DENIED", "CONTRACT_MISMATCH", "COMPILE_FAILED", "SANDBOX_TEST_FAILED", "RETRY_EXHAUSTED", "BUDGET_EXHAUSTED", "SANDBOX_UNAVAILABLE", "HUMAN_REQUIRED", "MODEL_ERROR"]
+    }
+  }
+}
