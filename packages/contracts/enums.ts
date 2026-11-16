@@ -26,10 +26,10 @@ export type UserRole =
   | "user" | "curator";
 
 export type AgentEventKind =
-  | "run" | "plan" | "spec" | "attachment" | "skill" | "routing" | "code" | "guard" | "validation" | "sandbox" | "artifact" | "cost" | "checkpoint" | "interrupted" | "notice" | "error" | "done";
+  | "run" | "plan" | "spec" | "attachment" | "skill" | "routing" | "code" | "guard" | "validation" | "sandbox" | "artifact" | "cost" | "checkpoint" | "interrupted" | "notice" | "error" | "done" | "ask_user";
 
 export type ReasonCode =
-  | "INPUT_INVALID" | "INTENT_OUT_OF_SCOPE" | "GUARD_INPUT_HIT" | "GUARD_OUTPUT_HIT" | "SPEC_CONFLICT" | "CAPABILITY_DENIED" | "CONTRACT_MISMATCH" | "COMPILE_FAILED" | "SANDBOX_TEST_FAILED" | "RETRY_EXHAUSTED" | "BUDGET_EXHAUSTED" | "SANDBOX_UNAVAILABLE" | "HUMAN_REQUIRED" | "MODEL_ERROR";
+  | "INPUT_INVALID" | "INTENT_OUT_OF_SCOPE" | "GUARD_INPUT_HIT" | "GUARD_OUTPUT_HIT" | "SPEC_CONFLICT" | "CAPABILITY_DENIED" | "CONTRACT_MISMATCH" | "COMPILE_FAILED" | "SANDBOX_TEST_FAILED" | "RETRY_EXHAUSTED" | "BUDGET_EXHAUSTED" | "SANDBOX_UNAVAILABLE" | "HUMAN_REQUIRED" | "MODEL_ERROR" | "SPEC_MISSING" | "CLARIFICATION_REQUIRED" | "CLARIFICATION_LIMIT";
 
 export type ContractPhase =
   | "DRAFT" | "GENERATED" | "VERIFIED" | "PUBLISHED" | "REJECTED" | "DEPRECATED";
@@ -41,6 +41,7 @@ export const IFRAME_SANDBOX = ["allow-scripts"] as const;
 export const CELL_PX = 80 as const;
 export const MAX_ITER = 12 as const;
 export const MAX_REPAIR = 2 as const;
+export const MAX_CLARIFY = 2 as const;
 export const Q1_401_403_409 = {"decision":"扩充枚举","codes":["UNAUTHORIZED","FORBIDDEN","CONFLICT"],"$comment":"M02 §9 Q1 定稿【推导·需评审】：扩充 3 个码进入 ReasonCode 值域之外的扩展集 http_reason_codes"} as const;
 export const Q2_ADMIN_ROLE = {"decision":"复用 curator 扩展能力","$comment":"M02 §9 Q2 定稿【推导·需评审】：UserRole 维持两角色，管理员能力由 curator 承载，/api/evals|metrics|audit 权限标注 curator"} as const;
 export const Q3_REFRESH_PATH = "POST /api/auth/refresh" as const;

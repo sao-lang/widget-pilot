@@ -20,12 +20,12 @@ class BundleState(StrEnum):
     DELETED = "DELETED"
 
 class GridSpec(StrEnum):
-    2X2 = "2x2"
-    2X4 = "2x4"
-    4X2 = "4x2"
-    4X4 = "4x4"
-    2X1 = "2x1"
-    1X2 = "1x2"
+    _2X2 = "2x2"
+    _2X4 = "2x4"
+    _4X2 = "4x2"
+    _4X4 = "4x4"
+    _2X1 = "2x1"
+    _1X2 = "1x2"
 
 class WidgetType(StrEnum):
     CALENDAR = "calendar"
@@ -75,6 +75,7 @@ class AgentEventKind(StrEnum):
     NOTICE = "notice"
     ERROR = "error"
     DONE = "done"
+    ASK_USER = "ask_user"
 
 class ReasonCode(StrEnum):
     INPUT_INVALID = "INPUT_INVALID"
@@ -91,6 +92,9 @@ class ReasonCode(StrEnum):
     SANDBOX_UNAVAILABLE = "SANDBOX_UNAVAILABLE"
     HUMAN_REQUIRED = "HUMAN_REQUIRED"
     MODEL_ERROR = "MODEL_ERROR"
+    SPEC_MISSING = "SPEC_MISSING"
+    CLARIFICATION_REQUIRED = "CLARIFICATION_REQUIRED"
+    CLARIFICATION_LIMIT = "CLARIFICATION_LIMIT"
 
 class ContractPhase(StrEnum):
     DRAFT = "DRAFT"
@@ -107,6 +111,7 @@ IFRAME_SANDBOX = ("allow-scripts",)
 CELL_PX = 80
 MAX_ITER = 12
 MAX_REPAIR = 2
+MAX_CLARIFY = 2
 Q1_401_403_409 = {"decision":"扩充枚举","codes":["UNAUTHORIZED","FORBIDDEN","CONFLICT"],"$comment":"M02 §9 Q1 定稿【推导·需评审】：扩充 3 个码进入 ReasonCode 值域之外的扩展集 http_reason_codes"}
 Q2_ADMIN_ROLE = {"decision":"复用 curator 扩展能力","$comment":"M02 §9 Q2 定稿【推导·需评审】：UserRole 维持两角色，管理员能力由 curator 承载，/api/evals|metrics|audit 权限标注 curator"}
 Q3_REFRESH_PATH = "POST /api/auth/refresh"

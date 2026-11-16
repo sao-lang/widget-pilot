@@ -97,7 +97,11 @@ function pyConst(v: any): string {
   return JSON.stringify(v);
 }
 function snake(s: string): string {
-  return s.replace(/[^A-Za-z0-9]+/g, "_").replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase();
+  let out = s.replace(/[^A-Za-z0-9]+/g, "_").replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase();
+  // Python 标识符不能以数字开头（如 GridSpec 的 "2x2" → "2X2" 非法），
+  // 补前导下划线生成合法成员名（值集合不变，契约语义不受影响）。
+  if (/^[0-9]/.test(out)) out = "_" + out;
+  return out;
 }
 
 export function generateEnums(srcPath: string, tsOut: string, pyOut: string): void {
