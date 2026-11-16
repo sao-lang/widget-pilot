@@ -606,6 +606,9 @@ components:
             - SANDBOX_UNAVAILABLE
             - HUMAN_REQUIRED
             - MODEL_ERROR
+            - SPEC_MISSING
+            - CLARIFICATION_REQUIRED
+            - CLARIFICATION_LIMIT
             - UNAUTHORIZED
             - FORBIDDEN
             - CONFLICT
