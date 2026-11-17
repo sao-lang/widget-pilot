@@ -5,11 +5,12 @@
 """
 from __future__ import annotations
 
-from packages.agent_core.types import EvalCase, Score, Trajectory
+from packages.agent_core.types import EvalCase, Score, ScoreDimensions, Trajectory
 
 
 def rubric(case: EvalCase, traj: Trajectory) -> Score:
-    dims: dict[str, float] = {
+    """七维度失败模式评分（确定性断言，不用裁判模型）。"""
+    dims: ScoreDimensions = {
         "task_success": 0.0,
         "first_pass": 0.0,
         "self_correction": 0.0,

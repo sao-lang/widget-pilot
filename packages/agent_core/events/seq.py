@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from packages.agent_core.injection import EventBus
-from packages.agent_core.types import AgentEvent, Decision, State
+from packages.agent_core.types import AgentEvent, Decision, JsonValue, State
 
 
 def next_seq(events: list[AgentEvent], session_id: str) -> int:
@@ -16,7 +16,7 @@ def next_seq(events: list[AgentEvent], session_id: str) -> int:
     return max(seqs) + 1 if seqs else 0
 
 
-def decision_to_kind(decision: Decision, state: State) -> str:
+def decision_to_kind(decision: Decision, state: State | None = None) -> str:
     """Decision → AgentEventKind（kind 属于契约枚举，18 种之一）。"""
     k = decision.kind
     if k == "DONE":
@@ -43,7 +43,7 @@ def emit(
     session_id: str,
     run_id: str,
     trace_id: str,
-    payload: object = None,
+    payload: JsonValue = None,
     now: datetime | None = None,
     kind: str | None = None,
 ) -> AgentEvent:
@@ -53,7 +53,7 @@ def emit(
         session_id=session_id,
         run_id=run_id,
         ts=(now or datetime.now(UTC)).isoformat(),
-        kind=kind or decision_to_kind(decision, None),  # type: ignore[arg-type]
+        kind=kind or decision_to_kind(decision),
         phase=str(phase),
         payload=payload if payload is not None else {"decision": decision.kind},
         trace_id=trace_id,

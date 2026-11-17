@@ -31,9 +31,9 @@ def test_T3_model_only_called_on_call_model_branch(
     fake_model, checkpoint_store, idem_store, event_bus, clock, tracer, lease_provider
 ):
     """非 CALL_MODEL 分支（AWAIT_INPUT）跑一个 super-step，模型调用数 = 0。"""
-    from packages.agent_core.types import State
+    from packages.agent_core.types import SpecState, State
     s = State.initial("s-await", "run-await", "x")
-    s.spec = {"intent": "x", "__signal": "AWAIT_INPUT", "__reason": "SPEC_MISSING"}
+    s.spec = SpecState(intent="x", signal="AWAIT_INPUT", reason="SPEC_MISSING")
     checkpoint_store.states["run-await"] = s
     deps = make_deps(fake_model, checkpoint_store, idem_store, event_bus, clock, tracer, lease_provider)
     out = run("s-await", "run-await", "x", deps)

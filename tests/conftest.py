@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TypedDict, Unpack, cast
 
 import pytest
 
+from packages.agent_core.errors import CoreError
 from packages.agent_core.injection import NoOpTracer
+from packages.agent_core.state.checkpoint import CheckpointRow
 from packages.agent_core.types import (
     AgentEvent,
     Message,
@@ -20,6 +22,39 @@ from packages.agent_core.types import (
     State,
     Usage,
 )
+from packages.contracts.enums import ModelTier
+
+
+class TimedeltaArgs(TypedDict, total=False):
+    """FakeClock.advance 的时间增量参数（确定键，取自 datetime.timedelta）。"""
+
+    days: float
+    seconds: float
+    microseconds: int
+    milliseconds: float
+    minutes: float
+    hours: float
+    weeks: float
+
+
+class ModelCall(TypedDict):
+    """FakeModel 记录的一次调用（确定键）。"""
+
+    messages: list[Message]
+    tier: str
+    stream: bool
+
+
+class RaiseSpec(TypedDict):
+    """脚本项 ``{"raise": {...}}`` 的异常描述（确定键）。"""
+
+    code: str
+    message: str
+    retryable: bool | None
+
+
+type ScriptItem = ModelOutput | Exception | str | dict[str, object]
+"""FakeModel 脚本项：预置输出 / 异常 / 文本 / 原始 dict（含 {"raise": ...}）。"""
 
 
 class FakeClock:
@@ -31,7 +66,7 @@ class FakeClock:
     def now(self) -> datetime:
         return self._now
 
-    def advance(self, **kwargs: Any) -> None:
+    def advance(self, **kwargs: Unpack[TimedeltaArgs]) -> None:
         self._now += timedelta(**kwargs)
 
     def freeze(self, at: datetime) -> None:
@@ -71,7 +106,7 @@ class InMemoryCheckpointStore:
     """dict[run_id, list[(rev, node, state_ref, prev_hash)]] + state blob。"""
 
     def __init__(self, objects: FakeObjectStore | None = None) -> None:
-        self.rows: dict[str, list[dict[str, Any]]] = {}
+        self.rows: dict[str, list[CheckpointRow]] = {}
         self.states: dict[str, State] = {}
         self.objects = objects or FakeObjectStore()
 
@@ -149,32 +184,40 @@ class FakeModel:
     记录调用次数，供 T1/T3/T22「模型只在 CALL_MODEL 出现」断言。
     """
 
-    def __init__(self, script: list[Any] | None = None) -> None:
-        self.script = list(script or [])
-        self.calls: list[dict[str, Any]] = []
+    def __init__(self, script: list[ScriptItem] | None = None) -> None:
+        self.script: list[ScriptItem] = list(script or [])
+        self.calls: list[ModelCall] = []
 
-    def set_script(self, script: list[Any]) -> FakeModel:
+    def set_script(self, script: list[ScriptItem]) -> FakeModel:
+        """预置脚本项队列（FIFO），返回自身便于链式调用。"""
         self.script = list(script)
         return self
 
     def complete(self, messages: list[Message], tier: str = "standard", stream: bool = True) -> ModelOutput:
+        """按脚本弹出一项；记录本次调用参数供断言。"""
         self.calls.append({"messages": list(messages), "tier": tier, "stream": stream})
+        model_tier = cast(ModelTier, tier)
         if not self.script:
-            return ModelOutput(content="{}", usage=Usage(), tier=tier)
+            return ModelOutput(content="{}", usage=Usage(), tier=model_tier)
         item = self.script.pop(0)
         if isinstance(item, Exception):
             raise item
         if isinstance(item, ModelOutput):
             return item
         if isinstance(item, str):
-            return ModelOutput(content=item, usage=Usage(input_tokens=10, output_tokens=5), tier=tier)
-        if isinstance(item, dict) and "raise" in item:
-            from packages.agent_core.errors import CoreError
-            meta = item["raise"]
-            raise CoreError(meta["code"], meta.get("message", ""), retryable=meta.get("retryable"))
+            return ModelOutput(content=item, usage=Usage(input_tokens=10, output_tokens=5), tier=model_tier)
+        if "raise" in item:
+            # {"raise": {"code", "message", "retryable"}} → 抛指定 CoreError
+            raw_meta = item["raise"]
+            meta = cast(RaiseSpec, raw_meta)
+            raise CoreError(
+                meta.get("code", "MODEL_ERROR"),
+                meta.get("message", ""),
+                retryable=meta.get("retryable"),
+            )
         # dict → 作为 raw 内容
         import json
-        return ModelOutput(content=json.dumps(item), usage=Usage(), tier=tier)
+        return ModelOutput(content=json.dumps(item), usage=Usage(), tier=model_tier)
 
     @property
     def call_count(self) -> int:

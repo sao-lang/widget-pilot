@@ -94,6 +94,6 @@ def test_repair_feedback_writes_signal_and_increments(sample_state):
     errors = [RepairError(field="grid", expected="4x4", got="8x8")]
     out = feedback(sample_state, [e.as_dict() for e in errors])
     assert out.repair_count == sample_state.repair_count + 1
-    assert (out.spec or {})["__signal"] == "CALL_MODEL"  # 回边完成，下轮重生成
-    assert (out.spec or {})["__errors"] == [{"field": "grid", "expected": "4x4", "got": "8x8"}]
+    assert out.spec.signal == "CALL_MODEL"  # 回边完成，下轮重生成
+    assert out.spec.errors == [{"field": "grid", "expected": "4x4", "got": "8x8"}]
     assert out.last_error_fingerprint is not None

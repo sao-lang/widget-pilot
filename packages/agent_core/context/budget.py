@@ -21,7 +21,7 @@ def count_tokens(text: str) -> int:
 def compress_tool_messages(state: State, max_chars: int = 2000) -> str:
     """压缩 tool message 文本，但保留 excluded_approaches（不丢已排除方案）。"""
     preserved = "；已排除方案：" + "、".join(state.excluded_approaches) if state.excluded_approaches else ""
-    spec_text = str(state.spec or {})
+    spec_text = str(state.spec.model_dump())
     budget = max(0, max_chars - len(preserved))
     clipped = spec_text[:budget]
     return clipped + preserved

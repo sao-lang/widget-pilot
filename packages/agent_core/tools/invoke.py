@@ -13,7 +13,7 @@ from pydantic import ValidationError
 
 from packages.agent_core.errors import CoreError
 from packages.agent_core.tools.registry import REGISTRY
-from packages.agent_core.types import ToolResult
+from packages.agent_core.types import Decision, ToolResult, ToolSpec
 
 
 def truncate(text: str, max_chars: int) -> tuple[str, bool]:
@@ -23,7 +23,7 @@ def truncate(text: str, max_chars: int) -> tuple[str, bool]:
     return text[:max_chars], True
 
 
-def policy_check(surface: str, spec) -> None:
+def policy_check(surface: str, spec: ToolSpec) -> None:
     """§11.11：越权调用在策略层被拒（确定性授权，不靠提示）。"""
     if surface not in spec.surfaces:
         raise CoreError.business(
@@ -32,8 +32,8 @@ def policy_check(surface: str, spec) -> None:
         )
 
 
-def invoke(d) -> ToolResult:
-    """§11.6 逐字五步。"""
+def invoke(d: Decision) -> ToolResult:
+    """§11.6 逐字五步（d 为 CALL_TOOL 决策）。"""
     # ① 未注册直接拒绝
     spec = REGISTRY.get(d.tool)
     if spec is None:

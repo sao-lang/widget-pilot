@@ -1,18 +1,34 @@
 """M03 T1/T2/T4/T5/T6/T7 + v1.3 澄清分支：decide() 纯函数判定树。
 
 §8.2 第一层：decide() 全分支、状态迁移、终止边、回边计数、纯函数性。
+类型改造后：测试用 :class:`SpecState` 显式字段构造可信结论槽位，
+不再用 ``spec["__signal"]`` 动态键。
 """
 from __future__ import annotations
+
+from typing import TypedDict, Unpack
 
 import pytest
 
 from packages.agent_core.constants import MAX_CLARIFY, MAX_ITER, MAX_REPAIR
 from packages.agent_core.loop.decide import decide
-from packages.agent_core.types import Decision, State
+from packages.agent_core.types import Decision, SpecState, State
 from packages.contracts.enums import SessionState
 
 
-def base_state(**overrides) -> State:
+class StateOverrides(TypedDict, total=False):
+    """base_state 可覆盖字段全集（确定键，取代无类型 **overrides）。"""
+
+    phase: SessionState
+    iteration: int
+    repair_count: int
+    clarify_count: int
+    clarification_answer: str | None
+    spec: SpecState
+
+
+def base_state(**overrides: Unpack[StateOverrides]) -> State:
+    """构造一个默认 State 并覆盖指定字段（类型确定）。"""
     s = State.initial("sess-1", "run-1", "做一个日历", "4x4")
     for k, v in overrides.items():
         setattr(s, k, v)
@@ -33,14 +49,14 @@ def test_T1_decide_is_pure(fake_model, sample_state):
     "state,kind",
     [
         (base_state(), "CALL_MODEL"),
-        (base_state(spec={"intent": "x", "__signal": "CALL_TOOL", "__tool": "get_time"}), "CALL_TOOL"),
-        (base_state(spec={"intent": "x", "__signal": "REPAIR", "__errors": ["bad"]}), "REPAIR"),
-        (base_state(spec={"intent": "x", "__signal": "AWAIT_INPUT", "__reason": "SPEC_MISSING"}), "AWAIT_INPUT"),
-        (base_state(spec={"intent": "x", "__signal": "ASK_USER"}), "ASK_USER"),
+        (base_state(spec=SpecState(intent="x", signal="CALL_TOOL", tool="get_time")), "CALL_TOOL"),
+        (base_state(spec=SpecState(intent="x", signal="REPAIR", errors=["bad"])), "REPAIR"),
+        (base_state(spec=SpecState(intent="x", signal="AWAIT_INPUT", reason="SPEC_MISSING")), "AWAIT_INPUT"),
+        (base_state(spec=SpecState(intent="x", signal="ASK_USER")), "ASK_USER"),
         (base_state(phase=SessionState.AWAITING_INPUT, clarification_answer="4x4"), "RESUME_FROM_CLARIFICATION"),
-        (base_state(spec={"intent": "x", "__signal": "DONE", "__bundle_ref": "bundle-1"}), "DONE"),
-        (base_state(spec={"intent": "x", "__signal": "FAILED", "__reason": "MODEL_ERROR", "__evidence": "ev-1"}), "FAILED"),
-        (base_state(spec={"intent": "x", "__signal": "HANDOFF", "__reason": "HUMAN_REQUIRED", "__evidence": "ev-2"}), "HANDOFF"),
+        (base_state(spec=SpecState(intent="x", signal="DONE", bundle_ref="bundle-1")), "DONE"),
+        (base_state(spec=SpecState(intent="x", signal="FAILED", reason="MODEL_ERROR", evidence="ev-1")), "FAILED"),
+        (base_state(spec=SpecState(intent="x", signal="HANDOFF", reason="HUMAN_REQUIRED", evidence="ev-2")), "HANDOFF"),
     ],
 )
 def test_T2_all_decision_kinds(state, kind):
@@ -59,13 +75,13 @@ def test_T4_max_iter_boundary():
 
 # ---- T5/T6：repair 回边计数与上限 ----
 def test_T5_repair_signal_when_under_limit():
-    d = decide(base_state(repair_count=1, spec={"intent": "x", "__signal": "REPAIR", "__errors": ["bad"]}))
+    d = decide(base_state(repair_count=1, spec=SpecState(intent="x", signal="REPAIR", errors=["bad"])))
     assert d.kind == "REPAIR"
     assert d.errors == ["bad"]
 
 
 def test_T6_repair_exhausted_goes_handoff():
-    d = decide(base_state(repair_count=MAX_REPAIR, spec={"intent": "x", "__signal": "REPAIR", "__errors": ["bad"]}))
+    d = decide(base_state(repair_count=MAX_REPAIR, spec=SpecState(intent="x", signal="REPAIR", errors=["bad"])))
     assert d.kind == "HANDOFF"
     assert d.reason_code == "RETRY_EXHAUSTED"
 
@@ -77,23 +93,23 @@ def test_T6_repair_exhausted_goes_handoff():
     ("FAILED", "MODEL_ERROR", "ev-2"),
 ])
 def test_T7_terminal_decision_fields(kind, reason, evidence):
-    spec = {"intent": "x", "__signal": kind}
-    if reason:
-        spec["__reason"] = reason
-    if evidence:
-        spec["__evidence"] = evidence
-    if kind == "DONE":
-        spec["__bundle_ref"] = "bundle-1"
+    spec = SpecState(
+        intent="x",
+        signal=kind,
+        reason=reason,
+        evidence=evidence,
+        bundle_ref="bundle-1" if kind == "DONE" else None,
+    )
     d = decide(base_state(spec=spec))
     assert d.kind == kind
     assert d.reason_code == reason
     if kind != "DONE":
-        assert "__evidence" in spec  # 调用方据此写 Terminal.evidence_ref
+        assert spec.evidence == evidence  # 调用方据此写 Terminal.evidence_ref
 
 
 # ---- v1.3 ASK_USER 分支（含纯函数性）----
 def test_ask_user_branch_is_pure_and_increments():
-    s = base_state(spec={"intent": "x", "__signal": "ASK_USER", "__question": "选哪种规格？"})
+    s = base_state(spec=SpecState(intent="x", signal="ASK_USER", question="选哪种规格？"))
     d = decide(s)
     assert d.kind == "ASK_USER"
     assert d.reason_code == "CLARIFICATION_REQUIRED"
@@ -101,7 +117,7 @@ def test_ask_user_branch_is_pure_and_increments():
 
 
 def test_ask_user_limit_goes_handoff():
-    s = base_state(clarify_count=MAX_CLARIFY, spec={"intent": "x", "__signal": "ASK_USER"})
+    s = base_state(clarify_count=MAX_CLARIFY, spec=SpecState(intent="x", signal="ASK_USER"))
     d = decide(s)
     assert d.kind == "HANDOFF"
     assert d.reason_code == "CLARIFICATION_LIMIT"
@@ -116,6 +132,6 @@ def test_resume_from_clarification_only_with_answer():
 
 # ---- T3：非 CALL_MODEL 分支不含模型消息（run 层断言模型调用数=0，这里断言 decision 形态）----
 def test_T3_non_model_branches_carry_no_model_call_marker():
-    d = decide(base_state(spec={"intent": "x", "__signal": "REPAIR", "__errors": ["e"]}))
+    d = decide(base_state(spec=SpecState(intent="x", signal="REPAIR", errors=["e"])))
     assert d.kind != "CALL_MODEL"
     assert d.messages == []

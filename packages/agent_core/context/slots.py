@@ -55,7 +55,7 @@ def fuse_retrieval(
 
 def assemble(state: State, slots: SlotConfig) -> list[Message]:
     """固定槽位装配（顺序固定，保住 prompt caching）。"""
-    spec = state.spec or {}
+    spec = state.spec
     messages: list[Message] = [
         Message("system", "系统契约：仅生成符合 WidgetSpec 的 TSX/React 控件，import 仅限白名单。"),
     ]
@@ -70,7 +70,7 @@ def assemble(state: State, slots: SlotConfig) -> list[Message]:
     if slots.include_memory:
         messages.append(Message("system", "用户记忆：仅注入高置信偏好。"))
     # 会话结论（含 excluded_approaches，压缩时必须保留）
-    conclusions = dict(spec)
+    conclusions = spec.model_dump()
     if state.excluded_approaches:
         conclusions["excluded_approaches"] = list(state.excluded_approaches)
     import json

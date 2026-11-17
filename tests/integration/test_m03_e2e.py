@@ -46,10 +46,12 @@ def test_T25_end_to_end_generate_interrupt_resume_done(
     # 关键：暂停态的 state 未写终态，clarification_answer 已注入；
     # 重新跑时 resume 分支把 phase 回 RUNNING 后下一轮生成。
     # 直接构造一个带 DONE signal 的续跑 state 放入 checkpoint，模拟沙箱已通过。
-    spec = dict(resumed_state.spec or {})
-    spec["__signal"] = "DONE"
-    spec["__bundle_ref"] = "bundle-e2e-1"
-    resumed_state = resumed_state.bump(spec=spec)
+    resumed_state = resumed_state.bump(
+        spec=resumed_state.spec.model_copy(update={
+            "signal": "DONE",
+            "bundle_ref": "bundle-e2e-1",
+        })
+    )
     checkpoint_store.states["run-e2e"] = resumed_state
 
     # 阶段 3：resume → 抢租约、从 rev 恢复 → DONE

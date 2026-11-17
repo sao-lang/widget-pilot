@@ -6,21 +6,26 @@
 from __future__ import annotations
 
 from packages.agent_core.constants import FINGERPRINT_PARTS
-from packages.agent_core.types import AgentEvent, Trajectory
+from packages.agent_core.types import (
+    AgentEvent,
+    FingerprintInfo,
+    JsonObject,
+    Trajectory,
+)
 
 
-def fingerprint_of(traj: Trajectory) -> tuple:
+def fingerprint_of(traj: Trajectory) -> tuple[str, ...]:
     """复现指纹的可哈希表示（顺序固定）。"""
     return tuple(traj.fingerprint.get(p, "") for p in FINGERPRINT_PARTS)
 
 
 def build_trajectory(
     events: list[AgentEvent],
-    terminal: dict | None = None,
-    fingerprint: dict[str, str] | None = None,
+    terminal: JsonObject | None = None,
+    fingerprint: FingerprintInfo | None = None,
 ) -> Trajectory:
     """从事件序列构建确定性轨迹：只保留可断言字段，按 seq 排序。"""
-    serialized = [e.to_dict() for e in sorted(events, key=lambda x: x.seq)]
+    serialized: list[JsonObject] = [e.to_dict() for e in sorted(events, key=lambda x: x.seq)]
     return Trajectory(events=serialized, terminal=terminal, fingerprint=dict(fingerprint or {}))
 
 

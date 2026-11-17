@@ -2,6 +2,9 @@
 
 模型只在 CALL_MODEL 分支出现；每个 super-step：decide → 动作 → checkpoint.save
 → events.emit → budget.check → lease.heartbeat；finally 释放租约。
+
+类型改造后：模型输出的可信结论写入 :class:`SpecState` 显式字段（不再用
+``spec["__xxx"]`` 动态键）；所有函数参数、闭包默认值均有明确类型。
 """
 from __future__ import annotations
 
@@ -14,8 +17,23 @@ from packages.agent_core.events import seq as events_seq
 from packages.agent_core.injection import Deps, Lease
 from packages.agent_core.loop.decide import decide
 from packages.agent_core.state.checkpoint import save_checkpoint
-from packages.agent_core.types import Decision, ModelOutput, State, Usage
+from packages.agent_core.types import (
+    Decision,
+    Input,
+    JsonObject,
+    JsonValue,
+    ModelOutput,
+    SpecState,
+    State,
+    Usage,
+)
 from packages.contracts.enums import SessionState
+
+# 模型 final JSON 中会被认定为「可信结论」并写入 SpecState 的字段白名单。
+# 键为 JSON 字段名，值为 SpecState 上的目标属性名；白名单之外一律忽略。
+_TRUSTED_SIGNAL_KEYS: tuple[str, ...] = (
+    "signal", "reason", "bundle_ref", "evidence", "question", "tool", "args", "tier",
+)
 
 
 def _persist(state: State, deps: Deps, node: str) -> State:
@@ -35,39 +53,46 @@ def _persist(state: State, deps: Deps, node: str) -> State:
 def apply_model_output(state: State, out: ModelOutput) -> State:
     """把「唯一不可信变量」转成可断言的状态迁移。
 
-    final JSON 严格解析；解析出的 signal / bundle_ref / evidence 作为可信结论
-    写入 spec 保留字段；usage 计入本 super-step（由 run 在调用处 add）。
+    final JSON 严格解析；白名单内的字段写入 SpecState 的显式槽位作为可信结论；
+    usage 计入本 super-step（由 run 在调用处 add）。
     半截 JSON 不在此触发副作用——本内核只解析 final（partial 归 structured）。
     """
-    spec = dict(state.spec or {})
-    try:
-        payload = json.loads(out.content) if out.content else {}
-    except (json.JSONDecodeError, TypeError):
-        payload = {}
+    payload: JsonValue = json.loads(out.content) if out.content else {}
+    trusted: JsonObject = {}
     if isinstance(payload, dict):
-        for key in ("signal", "reason", "bundle_ref", "evidence", "question", "tool", "args", "tier"):
+        # 只拷贝白名单字段，杜绝模型输出污染整个 spec（含 extras）的动态键注入
+        for key in _TRUSTED_SIGNAL_KEYS:
             if key in payload:
-                spec["__" + key] = payload[key]
+                trusted[key] = payload[key]
+    # 合并现有槽位与本次可信结论后整体校验（model_validate 会校验全部字段），
+    # 模型输出的非法 tier / args 会在写入点被 Pydantic 拒绝（fail fast）。
+    merged = {**state.spec.model_dump(), **trusted}
+    spec = SpecState.model_validate(merged)
     return state.bump(spec=spec)
 
 
 def apply_tool_result(state: State, result_ref: str | None) -> State:
-    spec = dict(state.spec or {})
-    spec["__tool_result_ref"] = result_ref
-    spec["__signal"] = "CALL_MODEL"  # 工具结果回灌后继续生成
+    """工具结果对象引用回灌：写入 tool_result_ref 并把信号切回 CALL_MODEL。"""
+    spec = state.spec.model_copy(update={
+        "tool_result_ref": result_ref,
+        "signal": "CALL_MODEL",  # 工具结果回灌后继续生成
+    })
     return state.bump(spec=spec)
 
 
 def _acquire(deps: Deps, run_id: str) -> Lease | None:
+    """抢对象式租约；未注入 LeaseProvider 时返回 None（单测/简化运行）。"""
     if deps.lease_provider is None:
         return None
     return deps.lease_provider.acquire(run_id, deps.owner, LEASE_TTL_S)
 
 
-def run(session_id: str, run_id: str, user_input, deps: Deps) -> State:
+def run(session_id: str, run_id: str, user_input: Input | str, deps: Deps) -> State:
     """§11.3 原文签名（追加 deps 注入参数；user_input 可为 Input 或 str）。"""
-    text = getattr(user_input, "text", user_input) or ""
-    grid = getattr(user_input, "grid", None)
+    if isinstance(user_input, Input):
+        text, grid = user_input.text, user_input.grid
+    else:
+        text, grid = user_input, None
 
     # 1. 装载状态（checkpoint.load 优先）
     state = deps.checkpoint_store.load(run_id)
@@ -119,8 +144,8 @@ def run(session_id: str, run_id: str, user_input, deps: Deps) -> State:
                 state = state.terminate(
                     decision,
                     now=now,
-                    bundle_ref=(state.spec or {}).get("__bundle_ref"),
-                    evidence_ref=(state.spec or {}).get("__evidence"),
+                    bundle_ref=state.spec.bundle_ref,
+                    evidence_ref=state.spec.evidence,
                 )
 
             # 6. 每 super-step 同步落盘（rev 单调 + prev_hash 链）
@@ -131,7 +156,13 @@ def run(session_id: str, run_id: str, user_input, deps: Deps) -> State:
             # 每个事件独立递增 seq（I8：连续、无重复、无倒序）
             cur_seq = seq_no
 
-            def send(kind: str, payload: object = None, _state=state, _decision=decision) -> None:
+            def send(
+                kind: str,
+                payload: JsonValue = None,
+                _state: State = state,
+                _decision: Decision = decision,
+            ) -> None:
+                """发一条事件并把当前 seq 前进一位（闭包捕获循环内状态快照）。"""
                 nonlocal cur_seq
                 events_seq.emit(
                     cur_seq, _state.phase, _decision, bus=deps.event_bus,
@@ -146,7 +177,7 @@ def run(session_id: str, run_id: str, user_input, deps: Deps) -> State:
                 send("done" if state.terminal.kind == "DONE" else "error",
                      {"terminal": state.snapshot()["terminal"]})
             elif decision.kind == "ASK_USER":
-                send("ask_user", {"question": (state.spec or {}).get("__question", "")})
+                send("ask_user", {"question": state.spec.question})
             elif decision.kind == "AWAIT_INPUT":
                 send("interrupted", {"reason_code": decision.reason_code})
             state = state.bump(seq=cur_seq - 1)
@@ -171,7 +202,7 @@ def run(session_id: str, run_id: str, user_input, deps: Deps) -> State:
             state = _persist(state, deps, "final")
         return state
     finally:
-        # 11. 释放租约
+        # 11. 释放租约（异常路径同样释放，防止租约泄漏）
         if lease is not None:
             lease.release()
             if deps.lease_provider is not None:

@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import re
 
-from packages.agent_core.types import PartialObject
+from packages.agent_core.types import JsonObject, PartialObject
 
 
 def _close_json(text: str) -> str:
@@ -93,8 +93,9 @@ def _balanced(text: str) -> bool:
     return depth == 0 and not in_string
 
 
-def _best_effort(text: str) -> dict:
-    result: dict = {}
+def _best_effort(text: str) -> JsonObject:
+    """尽力从非法文本中提取 key-value 对（结构不确定，用 JsonObject 聚集）。"""
+    result: JsonObject = {}
     for m in re.finditer(r'"([^"\\]+)"\s*:\s*("(?:[^"\\]|\\.)*"|true|false|null|-?\d+(?:\.\d+)?)', text):
         key, raw = m.group(1), m.group(2)
         try:

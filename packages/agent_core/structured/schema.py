@@ -6,10 +6,11 @@ prompt-first + partial + final 严格校验：仅 final 用 JSON Schema（jsonsc
 from __future__ import annotations
 
 import json
+from typing import cast
 
 import jsonschema
 
-from packages.agent_core.types import RepairError, ValidationResult
+from packages.agent_core.types import JsonObject, RepairError, ValidationResult
 
 
 def _errors_from(exc: jsonschema.ValidationError) -> list[RepairError]:
@@ -25,8 +26,8 @@ def _errors_from(exc: jsonschema.ValidationError) -> list[RepairError]:
     return errors
 
 
-def validate(payload: str, schema: dict) -> ValidationResult:
-    """final 严格校验：payload 是 JSON 字符串，schema 是 JSON Schema dict。"""
+def validate(payload: str, schema: JsonObject) -> ValidationResult:
+    """final 严格校验：payload 是 JSON 字符串，schema 是 JSON Schema 对象。"""
     try:
         data = json.loads(payload)
     except (json.JSONDecodeError, TypeError) as e:
@@ -44,10 +45,11 @@ def validate(payload: str, schema: dict) -> ValidationResult:
         for e in errors:
             flat.extend(_errors_from(e))
         return ValidationResult(ok=False, errors=flat, code="CONTRACT_MISMATCH")
-    return ValidationResult(ok=True, data=data)
+    # WidgetSpec schema 的顶层为 object；校验通过后收口为 JsonObject
+    return ValidationResult(ok=True, data=cast(JsonObject, data))
 
 
-def validate_manifest(spec: dict, manifest: dict) -> ValidationResult:
+def validate_manifest(spec: JsonObject, manifest: JsonObject) -> ValidationResult:
     """T12：manifest.capabilities 必须与 spec.capabilities 一致；否则 CONTRACT_MISMATCH。"""
     errors: list[RepairError] = []
     spec_caps = set(spec.get("capabilities", []))
