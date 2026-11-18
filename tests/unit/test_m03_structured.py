@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
+from typing import cast
 
 import pytest
 
 from packages.agent_core.structured.partial import parse as partial_parse
 from packages.agent_core.structured.repair import feedback
 from packages.agent_core.structured.schema import validate, validate_manifest
-from packages.agent_core.types import RepairError
+from packages.agent_core.types import RepairError, RepairIssue
 
 SCHEMA_DIR = "packages/contracts"
 
@@ -92,7 +93,7 @@ def test_T12_manifest_match():
 # ---- repair.feedback：结构化回灌 {field, expected, got} ----
 def test_repair_feedback_writes_signal_and_increments(sample_state):
     errors = [RepairError(field="grid", expected="4x4", got="8x8")]
-    out = feedback(sample_state, [e.as_dict() for e in errors])
+    out = feedback(sample_state, cast(list[RepairIssue], [e.as_dict() for e in errors]))
     assert out.repair_count == sample_state.repair_count + 1
     assert out.spec.signal == "CALL_MODEL"  # 回边完成，下轮重生成
     assert out.spec.errors == [{"field": "grid", "expected": "4x4", "got": "8x8"}]

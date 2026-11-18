@@ -22,28 +22,38 @@ def _close_json(text: str) -> str:
     escaped = False
     stack: list[str] = []
     for ch in text:
+        # 逐字符扫描：先分流字符串内/外，避免把括号、引号误判
         if in_string:
+            # 字符串内部只关心转义与结束引号，其余原样保留
             out.append(ch)
             if escaped:
+                # 当前字符已被转义，消费后清除标志
                 escaped = False
             elif ch == "\\":
+                # 反斜杠使下一个字符转义
                 escaped = True
             elif ch == '"':
+                # 未转义的引号闭合字符串
                 in_string = False
             continue
         if ch == '"':
+            # 字符串外的引号开启新字符串
             in_string = True
             out.append(ch)
         elif ch in "[{":
+            # 左括号入栈，记录需在末尾补的右括号
             stack.append("]" if ch == "[" else "}")
             out.append(ch)
         elif ch in "]}":
+            # 右括号与栈顶配对出栈，保持括号栈平衡
             if stack:
+                # 栈非空才弹，避免多余右括号导致索引错误
                 stack.pop()
             out.append(ch)
         else:
             out.append(ch)
     if in_string:
+        # 扫描结束仍在字符串内，补一个收尾引号
         out.append('"')
     # 若末尾是未完成的 key: value（如 {"a": ），去掉悬空冒号避免非法 JSON
     s = "".join(out)
@@ -73,22 +83,31 @@ def parse(text: str) -> PartialObject:
 
 
 def _balanced(text: str) -> bool:
+    """判断括号与字符串是否完整闭合，供 parse 判定原本是否已是完整 JSON。"""
     depth = 0
     in_string = False
     escaped = False
     for ch in text:
+        # 与 _close_json 同款状态机，但只统计闭合情况、不改写文本
         if in_string:
+            # 字符串内：只处理转义与结束引号
             if escaped:
+                # 转义字符已消费，重置标志
                 escaped = False
             elif ch == "\\":
+                # 反斜杠开启下一次转义
                 escaped = True
             elif ch == '"':
+                # 未转义引号结束字符串
                 in_string = False
         elif ch == '"':
+            # 字符串外的引号开启字符串
             in_string = True
         elif ch in "[{":
+            # 左括号增加嵌套深度
             depth += 1
         elif ch in "]}":
+            # 右括号减少嵌套深度
             depth -= 1
     return depth == 0 and not in_string
 
@@ -97,6 +116,7 @@ def _best_effort(text: str) -> JsonObject:
     """尽力从非法文本中提取 key-value 对（结构不确定，用 JsonObject 聚集）。"""
     result: JsonObject = {}
     for m in re.finditer(r'"([^"\\]+)"\s*:\s*("(?:[^"\\]|\\.)*"|true|false|null|-?\d+(?:\.\d+)?)', text):
+        # 正则逐段抓取 key-value：能解析的转成 JSON 值，否则保留原始串
         key, raw = m.group(1), m.group(2)
         try:
             result[key] = json.loads(raw)

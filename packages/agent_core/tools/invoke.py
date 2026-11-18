@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from packages.agent_core.errors import CoreError
 from packages.agent_core.tools.registry import REGISTRY
 from packages.agent_core.types import Decision, ToolResult, ToolSpec
+from packages.contracts.enums import ReasonCode
 
 
 def truncate(text: str, max_chars: int) -> tuple[str, bool]:
@@ -27,7 +28,7 @@ def policy_check(surface: str, spec: ToolSpec) -> None:
     """§11.11：越权调用在策略层被拒（确定性授权，不靠提示）。"""
     if surface not in spec.surfaces:
         raise CoreError.business(
-            "CAPABILITY_DENIED",
+            ReasonCode.CAPABILITY_DENIED,
             f"surface {surface!r} not allowed for tool {spec.name!r}",
         )
 
@@ -35,14 +36,15 @@ def policy_check(surface: str, spec: ToolSpec) -> None:
 def invoke(d: Decision) -> ToolResult:
     """§11.6 逐字五步（d 为 CALL_TOOL 决策）。"""
     # ① 未注册直接拒绝
-    spec = REGISTRY.get(d.tool)
+    # d.tool 在 CALL_TOOL 分支必有值，但类型上是 str | None；空串兜底即查不到→拒绝
+    spec = REGISTRY.get(d.tool or "")
     if spec is None:
-        raise CoreError.business("CAPABILITY_DENIED", f"unregistered tool: {d.tool!r}")
+        raise CoreError.business(ReasonCode.CAPABILITY_DENIED, f"unregistered tool: {d.tool!r}")
     # ② Pydantic 严格校验参数
     try:
         args = spec.args_model.model_validate(d.args)
     except ValidationError as e:
-        raise CoreError.business("INPUT_INVALID", f"invalid args for {d.tool!r}: {e}") from e
+        raise CoreError.business(ReasonCode.INPUT_INVALID, f"invalid args for {d.tool!r}: {e}") from e
     # ③ 确定性授权
     policy_check(d.surface, spec)
     # ④ 执行（handler 抛 CoreError.infra → 基础设施故障，直接上抛）

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-import jsonschema
+from jsonschema import validators
 
 from packages.agent_core.errors import (
     BUSINESS_FAILURE,
@@ -21,7 +21,7 @@ def test_T14_all_event_kinds_validate():
     assert len(AgentEventKind) == 18
     with open(SCHEMA, encoding="utf-8") as f:
         schema = json.load(f)
-    validator = jsonschema.validators.validator_for(schema)(schema)
+    validator = validators.validator_for(schema)(schema)
     # 每种 kind 的枚举值都在 schema 的 kind enum 中
     allowed = set(schema["properties"]["kind"]["enum"])
     assert {k.value for k in AgentEventKind} <= allowed

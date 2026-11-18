@@ -16,7 +16,7 @@ import json
 from typing import Protocol, TypedDict, cast
 
 from packages.agent_core.injection import CheckpointStore, ObjectStore
-from packages.agent_core.types import State
+from packages.agent_core.types import CheckpointNode, State
 
 
 class CheckpointRow(TypedDict):
@@ -24,8 +24,8 @@ class CheckpointRow(TypedDict):
 
     rev: int
     """版本号（主键 part）。"""
-    node: str
-    """落盘节点（decision.kind）。"""
+    node: CheckpointNode
+    """落盘节点（触发落盘的判定分支或 FINAL 收尾；规则 5 用枚举）。"""
     state_ref: str
     """状态大对象的存储引用。"""
     prev_hash: str
@@ -50,7 +50,7 @@ def serialize_state(state: State) -> bytes:
     return json.dumps(state.snapshot(), sort_keys=True, default=str).encode("utf-8")
 
 
-def save_checkpoint(store: CheckpointStore, state: State, node: str) -> str:
+def save_checkpoint(store: CheckpointStore, state: State, node: CheckpointNode) -> str:
     """落盘一行 checkpoint；返回该行的链 hash（供下一段复用）。
 
     store 需具备 objects（FakeObjectStore / 生产对象存储）与 states 便捷属性；
@@ -82,10 +82,12 @@ def chain_valid(store: CheckpointStore, run_id: str) -> bool:
     raw_rows = extras.rows.get(run_id, []) if hasattr(store, "rows") else []
     rows = sorted(raw_rows, key=lambda r: r["rev"])
     if not rows:
+        # 没有任何 checkpoint 行，无从校验，直接判失败
         return False
     prev = ""
     objects = extras.objects
     for row in rows:
+        # 按 rev 顺序回读每行内容，重算 hash 链，任一环断裂即校验失败
         try:
             data = objects.get(row["state_ref"])
         except Exception:  # noqa: BLE001 - 对象引用失效/篡改 → hash 链校验失败（返回 False）
@@ -93,6 +95,7 @@ def chain_valid(store: CheckpointStore, run_id: str) -> bool:
         state_hash = hashlib.sha256(data).hexdigest()
         expected = hashlib.sha256((prev + state_hash).encode("utf-8")).hexdigest()
         if row["prev_hash"] != expected:
+            # 记录值与重算值不符，说明状态被篡改或落盘不一致
             return False
         prev = row["prev_hash"]
     return True

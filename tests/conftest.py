@@ -17,6 +17,7 @@ from packages.agent_core.injection import NoOpTracer
 from packages.agent_core.state.checkpoint import CheckpointRow
 from packages.agent_core.types import (
     AgentEvent,
+    CheckpointNode,
     Message,
     ModelOutput,
     State,
@@ -114,7 +115,7 @@ class InMemoryCheckpointStore:
         import json
         return json.dumps(state.snapshot(), ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
 
-    def save(self, run_id: str, rev: int, node: str, state_ref: str, prev_hash: str) -> None:
+    def save(self, run_id: str, rev: int, node: CheckpointNode, state_ref: str, prev_hash: str) -> None:
         rows = self.rows.setdefault(run_id, [])
         # 主键 (run_id, rev)：重复 rev 直接抛，供 I4 断言
         if any(r["rev"] == rev for r in rows):
@@ -125,7 +126,7 @@ class InMemoryCheckpointStore:
         """便捷方法：序列化 state 到对象存储并写 checkpoint 行。"""
         ref = self.objects.put(f"checkpoint/{run_id}/{state.rev}.json", self._serialize(state))
         prev = self.hashes(run_id)[-1] if self.hashes(run_id) else ""
-        self.save(run_id, state.rev, str(state.phase), ref, prev)
+        self.save(run_id, state.rev, CheckpointNode.FINAL, ref, prev)
         self.states[run_id] = state
         return ref
 

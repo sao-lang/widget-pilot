@@ -11,10 +11,12 @@ from packages.agent_core.injection import IdempotencyStore
 
 
 def make_idem_key(session_id: str, step: str, payload_hash: str) -> str:
+    """用 | 拼接会话、步骤与负载哈希，生成幂等键（与 SQL 注释逐字一致）。"""
     return f"{session_id}|{step}|{payload_hash}"
 
 
 def hash_payload(payload: str) -> str:
+    """对负载取 SHA-256 并截前 16 位，作为幂等键中稳定且紧凑的负载指纹。"""
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 

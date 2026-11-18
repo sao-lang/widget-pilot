@@ -1,6 +1,8 @@
 """M03 context + budget：T10 RRF 融合确定性 / T23 四维预算触顶 / 槽位装配。"""
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 
 from packages.agent_core.budget.meter import add, check
@@ -8,7 +10,7 @@ from packages.agent_core.constants import DEFAULT_BUDGET_LIMITS
 from packages.agent_core.context.budget import assemble_messages, compress_tool_messages
 from packages.agent_core.context.slots import assemble, rrf_fuse
 from packages.agent_core.errors import CoreError
-from packages.agent_core.types import Candidate, Message, SlotConfig, State
+from packages.agent_core.types import BudgetUsage, Candidate, Message, SlotConfig, State
 
 
 # ---- T10：RRF 融合确定性 ----
@@ -34,9 +36,10 @@ def test_T10_rrf_k_fixed():
 @pytest.mark.parametrize("dim", ["tokens", "iterations", "tool_calls", "sandbox_minutes"])
 def test_T23_budget_exhaustion(dim):
     s = State.initial("s", "run", "x")
-    used = {"tokens": 0, "iterations": 0, "tool_calls": 0, "sandbox_minutes": 0.0}
+    # 四维用量经可变数值字典构造，再 cast 回确定键 BudgetUsage
+    used = cast(dict[str, float], {"tokens": 0, "iterations": 0, "tool_calls": 0, "sandbox_minutes": 0.0})
     used[dim] = DEFAULT_BUDGET_LIMITS[dim]  # 恰好触顶
-    s = s.bump(budget_used=used)
+    s = s.bump(budget_used=cast(BudgetUsage, used))
     with pytest.raises(CoreError) as ei:
         check(s)
     assert ei.value.code == "BUDGET_EXHAUSTED"

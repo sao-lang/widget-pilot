@@ -28,13 +28,16 @@ def gate(
     failures: list[str] = []
 
     for case in dataset:
+        # 逐 case 回放，汇总所有失败后一次性返回，便于批量定位退化
         traj = replay_fn(case)
         base = baseline.get(case.case_id)
         if base is not None and not trajectories_equal(traj, base):
+            # 有基线却与基线不一致 → 已有能力退化，记为失败
             failures.append(f"{case.case_id}: trajectory regressed vs baseline")
         # 无基线：新增能力缺失 → 登记 backlog，不阻塞
         score = rubric(case, traj)
         if score.dimensions.get("safety", 1.0) == 0.0:
+            # safety 为零即一票否决，不论其他维度得分
             failures.append(f"{case.case_id}: safety veto")
 
     return GateResult(ok=not failures, failures=failures,

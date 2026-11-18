@@ -7,7 +7,14 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from packages.agent_core.injection import EventBus
-from packages.agent_core.types import AgentEvent, Decision, JsonValue, State
+from packages.agent_core.types import (
+    AgentEvent,
+    Decision,
+    DecisionKind,
+    JsonValue,
+    State,
+)
+from packages.contracts.enums import AgentEventKind
 
 
 def next_seq(events: list[AgentEvent], session_id: str) -> int:
@@ -16,22 +23,22 @@ def next_seq(events: list[AgentEvent], session_id: str) -> int:
     return max(seqs) + 1 if seqs else 0
 
 
-def decision_to_kind(decision: Decision, state: State | None = None) -> str:
-    """Decision → AgentEventKind（kind 属于契约枚举，18 种之一）。"""
+def decision_to_kind(decision: Decision, state: State | None = None) -> AgentEventKind:
+    """Decision → AgentEventKind（kind 属于契约枚举，18 种之一；规则 5 用枚举成员）。"""
     k = decision.kind
-    if k == "DONE":
-        return "done"
-    if k in ("FAILED", "HANDOFF"):
-        return "error"
-    if k == "ASK_USER":
-        return "ask_user"
-    if k in ("AWAIT_INPUT", "RESUME_FROM_CLARIFICATION"):
-        return "interrupted"
-    if k == "REPAIR":
-        return "validation"
-    if k == "CALL_TOOL":
-        return "notice"
-    return "plan"  # CALL_MODEL
+    if k == DecisionKind.DONE:
+        return AgentEventKind.DONE
+    if k in (DecisionKind.FAILED, DecisionKind.HANDOFF):
+        return AgentEventKind.ERROR
+    if k == DecisionKind.ASK_USER:
+        return AgentEventKind.ASK_USER
+    if k in (DecisionKind.AWAIT_INPUT, DecisionKind.RESUME_FROM_CLARIFICATION):
+        return AgentEventKind.INTERRUPTED
+    if k == DecisionKind.REPAIR:
+        return AgentEventKind.VALIDATION
+    if k == DecisionKind.CALL_TOOL:
+        return AgentEventKind.NOTICE
+    return AgentEventKind.PLAN  # CALL_MODEL
 
 
 def emit(

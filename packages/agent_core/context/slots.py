@@ -24,7 +24,9 @@ def rrf_fuse(
     scores: dict[str, float] = {}
     best: dict[str, Candidate] = {}
     for ranking in (vector, bm25):
+        # 向量与 BM25 两路分别计分，保证同 doc_id 的分数可叠加
         for rank, cand in enumerate(ranking, start=1):
+            # rank 从 1 起，按 RRF 公式累加倒数排名分
             scores[cand.doc_id] = scores.get(cand.doc_id, 0.0) + 1.0 / (k + rank)
             # 保留首个（向量）候选的 text/source 作为代表
             if cand.doc_id not in best:

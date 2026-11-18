@@ -17,10 +17,12 @@ def acquire(provider: LeaseProvider, run_id: str, owner: str, ttl_s: int) -> Lea
 
 
 def heartbeat(provider: LeaseProvider, run_id: str, owner: str) -> bool:
+    """续租：仅当 owner 仍持锁时刷新到期时间，返回是否续约成功。"""
     return provider.heartbeat(run_id, owner)
 
 
 def release(provider: LeaseProvider, run_id: str, owner: str) -> None:
+    """释放租约：仅 owner 可主动归还，供正常结束时立即让出持锁权。"""
     provider.release(run_id, owner)
 
 

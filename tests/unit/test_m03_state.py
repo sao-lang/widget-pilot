@@ -4,13 +4,16 @@
 """
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
+from conftest import FakeLease
 
 from packages.agent_core.errors import CoreError
 from packages.agent_core.state.checkpoint import chain_valid, save_checkpoint
 from packages.agent_core.state.idempotency import get_or_reserve
 from packages.agent_core.state.lease import acquire, heartbeat, release, scan_expired
-from packages.agent_core.types import State
+from packages.agent_core.types import CheckpointNode, State
 
 
 # ---- T17：rev 单调 + prev_hash 链可校验 ----
@@ -18,7 +21,7 @@ def test_T17_checkpoint_rev_monotonic_and_hash_chain(checkpoint_store):
     for rev in range(30):
         s = State.initial("s", "run-17", "x")
         s = s.bump(rev=rev, iteration=rev)
-        save_checkpoint(checkpoint_store, s, node=f"n{rev}")
+        save_checkpoint(checkpoint_store, s, node=CheckpointNode.CALL_MODEL)
     rows = checkpoint_store.rows["run-17"]
     revs = [r["rev"] for r in rows]
     assert revs == sorted(set(revs))  # 严格递增无重复
@@ -28,9 +31,10 @@ def test_T17_checkpoint_rev_monotonic_and_hash_chain(checkpoint_store):
 
 def test_T17_duplicate_rev_rejected(checkpoint_store):
     s = State.initial("s", "run-dup", "x").bump(rev=0)
-    save_checkpoint(checkpoint_store, s, node="n0")
+    save_checkpoint(checkpoint_store, s, node=CheckpointNode.CALL_MODEL)
     with pytest.raises(ValueError):
-        save_checkpoint(checkpoint_store, s, node="n0-again")
+        # 同一 rev 重复落盘：即使换节点也必须以主键冲突拒绝（I4）
+        save_checkpoint(checkpoint_store, s, node=CheckpointNode.FINAL)
 
 
 # ---- T16：幂等副作用，命中复用不重复 ----
@@ -65,7 +69,8 @@ def test_T19_lease_acquire_exactly_one_winner(lease_provider, clock):
 def test_lease_heartbeat_and_release(lease_provider):
     lease = acquire(lease_provider, "run-hb", "worker-A", ttl_s=30)
     assert heartbeat(lease_provider, "run-hb", "worker-A") is True
-    assert lease.heartbeats >= 0
+    # heartbeats 是内存桩 FakeLease 的观测量，cast 到桩类型后断言
+    assert cast(FakeLease, lease).heartbeats >= 0
     release(lease_provider, "run-hb", "worker-A")
     assert "run-hb" not in lease_provider.holders
 

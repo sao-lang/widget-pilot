@@ -1,6 +1,8 @@
 """M03 eval 层：T26 快照一致 GATE OK / T27 门禁只断言已有能力不退化。"""
 from __future__ import annotations
 
+from typing import cast
+
 from packages.agent_core.eval.gate import gate
 from packages.agent_core.eval.replay import (
     build_trajectory,
@@ -8,12 +10,13 @@ from packages.agent_core.eval.replay import (
     trajectories_equal,
 )
 from packages.agent_core.eval.rubric import rubric
-from packages.agent_core.types import AgentEvent, EvalCase, Trajectory
+from packages.agent_core.types import AgentEvent, EvalCase, FingerprintInfo, Trajectory
 
 
-def fp(**kw):
-    return {"prompt_version": "p1", "recipe_version": "r1",
-            "retrieval_snapshot": "snap1", "model": "m1", "model_tier": "standard", **kw}
+def fp(**kw) -> FingerprintInfo:
+    """构造测试用复现指纹（cast 收口裸 dict 到确定键 TypedDict）。"""
+    return cast(FingerprintInfo, {"prompt_version": "p1", "recipe_version": "r1",
+            "retrieval_snapshot": "snap1", "model": "m1", "model_tier": "standard", **kw})
 
 
 def make_events(n=5):

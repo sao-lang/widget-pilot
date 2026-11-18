@@ -6,11 +6,13 @@
 """
 from __future__ import annotations
 
+from typing import cast
+
 from packages.agent_core.eval.gate import gate
 from packages.agent_core.injection import Deps
 from packages.agent_core.loop.run import run
 from packages.agent_core.state.checkpoint import chain_valid
-from packages.agent_core.types import Input, ModelOutput, Usage
+from packages.agent_core.types import FingerprintInfo, Input, ModelOutput, Usage
 
 
 def make_deps(fake_model, cs, idem, bus, clock, tracer, lease):
@@ -77,8 +79,8 @@ def test_gate_ok_integration(fake_model, checkpoint_store, idem_store, event_bus
     from packages.agent_core.types import EvalCase
 
     # 同题同版本两次跑 → 轨迹一致
-    fp = {"prompt_version": "p1", "recipe_version": "r1", "retrieval_snapshot": "s1",
-          "model": "m1", "model_tier": "standard"}
+    fp = cast(FingerprintInfo, {"prompt_version": "p1", "recipe_version": "r1", "retrieval_snapshot": "s1",
+          "model": "m1", "model_tier": "standard"})
     t1 = build_trajectory(event_bus.all(), fingerprint=fp)
     t2 = build_trajectory(event_bus.all(), fingerprint=fp)
     assert trajectories_equal(t1, t2)

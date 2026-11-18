@@ -18,7 +18,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import Literal, NamedTuple, TypedDict, Unpack
+from enum import StrEnum
+from typing import NamedTuple, TypedDict, Unpack, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -176,53 +177,148 @@ class StateUpdate(TypedDict, total=False):
     """:meth:`State.bump` 可更新字段全集：键确定，取代 ``**changes: Any``。"""
 
     session_id: str
+    """所属会话 ID。"""
     run_id: str
+    """所属运行 ID。"""
     rev: int
+    """状态修订号（单调，用于 checkpoint 版本链）。"""
     seq: int
+    """全局事件序号水位。"""
     phase: SessionState
+    """会话阶段（决定主循环是否继续）。"""
     iteration: int
+    """已执行的 super-step 数。"""
     repair_count: int
+    """REPAIR 回边累计次数（受 MAX_REPAIR 约束）。"""
     clarify_count: int
+    """ASK_USER 澄清累计次数（受 MAX_CLARIFY 约束）。"""
     spec: SpecState
+    """规格槽位：模型可信结论的唯一写入位。"""
     diff_ref: str | None
+    """差异产物引用（无差异时为 None）。"""
     excluded_approaches: list[str]
+    """已被否决的方案列表，防止重试重复旧路。"""
     budget_used: BudgetUsage
+    """四维预算累计用量。"""
     tier_history: list[str]
+    """模型档位切换历史。"""
     last_error_fingerprint: str | None
+    """最近一次错误指纹（用于去重/幂等，无错误时为 None）。"""
     clarification_answer: str | None
+    """用户回填的澄清答案（未回填时为 None）。"""
     terminal: Terminal | None
+    """终态信息（未终结时为 None）。"""
 
 
 class StateSnapshot(TypedDict):
     """可断言快照的 wire 形态，键确定（用于 hash 链与 T1/T20/T26 快照断言）。"""
 
     session_id: str
+    """所属会话 ID。"""
     run_id: str
+    """所属运行 ID。"""
     rev: int
+    """状态修订号。"""
     seq: int
+    """全局事件序号水位。"""
     phase: SessionState
+    """会话阶段。"""
     iteration: int
+    """已执行的 super-step 数。"""
     repair_count: int
+    """REPAIR 回边累计次数。"""
     clarify_count: int
+    """ASK_USER 澄清累计次数。"""
     spec: JsonObject
+    """SpecState 经 model_dump 的纯 dict（快照须为可断言、可序列化的 wire 数据）。"""
     diff_ref: str | None
+    """差异产物引用。"""
     excluded_approaches: list[str]
+    """已被否决的方案列表。"""
     budget_used: BudgetUsage
+    """四维预算累计用量。"""
     tier_history: list[str]
+    """模型档位切换历史。"""
     last_error_fingerprint: str | None
+    """最近一次错误指纹。"""
     clarification_answer: str | None
+    """用户回填的澄清答案。"""
     terminal: JsonObject | None
+    """终态信息的 JSON 序列化形态（未终结时为 None）。"""
 
 
 # ---------------------------------------------------------------------------
 # 决策与状态（§5.1 / §6.2，逐字对齐）
 # ---------------------------------------------------------------------------
 
-DecisionKind = Literal[
-    "CALL_MODEL", "CALL_TOOL", "REPAIR", "AWAIT_INPUT", "DONE", "HANDOFF",
-    "FAILED", "ASK_USER", "RESUME_FROM_CLARIFICATION",
-]
-"""decide() 九种判定分支（v1.3 新增 ASK_USER / RESUME_FROM_CLARIFICATION）。"""
+class DecisionKind(StrEnum):
+    """decide() 九种判定分支（v1.3 新增 ASK_USER / RESUME_FROM_CLARIFICATION）。
+
+    规则 5：有限取值集合用枚举；值与 §11.3 wire 协议字符串一致，StrEnum 可直接与
+    str 比较、JSON 序列化仍为字符串，故 ``d.kind == "FAILED"`` 断言保持成立。
+    """
+
+    CALL_MODEL = "CALL_MODEL"
+    CALL_TOOL = "CALL_TOOL"
+    REPAIR = "REPAIR"
+    AWAIT_INPUT = "AWAIT_INPUT"
+    DONE = "DONE"
+    HANDOFF = "HANDOFF"
+    FAILED = "FAILED"
+    ASK_USER = "ASK_USER"
+    RESUME_FROM_CLARIFICATION = "RESUME_FROM_CLARIFICATION"
+
+    @classmethod
+    def coerce(cls, raw: str) -> DecisionKind:
+        """把模型/外部写入的信号归一为枚举；未知值显式回退到 CALL_MODEL（保持默认调模型的 fall-through 语义）。"""
+        try:
+            return cls(raw)
+        except ValueError:
+            return cls.CALL_MODEL
+
+
+class TerminalKind(StrEnum):
+    """三种终态类型（DONE 带产物；FAILED/HANDOFF 带原因码与证据）。"""
+
+    DONE = "DONE"
+    HANDOFF = "HANDOFF"
+    FAILED = "FAILED"
+
+    @classmethod
+    def coerce(cls, raw: str) -> TerminalKind:
+        """归一终态类型；未知值显式回退到 FAILED（安全侧，避免误判成功）。"""
+        try:
+            return cls(raw)
+        except ValueError:
+            return cls.FAILED
+
+
+class CheckpointNode(StrEnum):
+    """checkpoint 落盘节点（规则 5：有限取值集合用枚举）。
+
+    取值 = decide() 的 9 种判定分支（哪个决策触发了落盘）+ FINAL（收尾补写）。
+    wire 值与 DecisionKind 逐字一致，故 ``node == "CALL_MODEL"`` 断言成立。
+    """
+
+    CALL_MODEL = "CALL_MODEL"
+    CALL_TOOL = "CALL_TOOL"
+    REPAIR = "REPAIR"
+    AWAIT_INPUT = "AWAIT_INPUT"
+    DONE = "DONE"
+    HANDOFF = "HANDOFF"
+    FAILED = "FAILED"
+    ASK_USER = "ASK_USER"
+    RESUME_FROM_CLARIFICATION = "RESUME_FROM_CLARIFICATION"
+    FINAL = "final"
+    """循环因 MAX_ITER 退出且无终态时的收尾补写节点。"""
+
+    @classmethod
+    def from_decision(cls, kind: DecisionKind) -> CheckpointNode:
+        """由判定分支转换（两者值逐字一致）；未知判定显式回退到 FINAL。"""
+        try:
+            return cls(kind.value)
+        except ValueError:
+            return cls.FINAL
 
 
 class Decision(NamedTuple):
@@ -232,7 +328,7 @@ class Decision(NamedTuple):
     """判定分支。"""
     messages: list[Message] = []  # noqa: RUF012 - §11.3 逐字默认值，NamedTuple 不可变故共享安全
     """仅在 CALL_MODEL / ASK_USER 分支携带的消息。"""
-    tier: ModelTier = "standard"
+    tier: ModelTier = ModelTier.STANDARD
     """CALL_MODEL 使用的模型档位。"""
     tool: str | None = None
     """CALL_TOOL 的工具名。"""
@@ -250,8 +346,8 @@ class Decision(NamedTuple):
 class Terminal:
     """§5.1【推导·需评审】已固化：DONE 必带 bundle_ref；FAILED/HANDOFF 必带 reason_code + evidence_ref。"""
 
-    kind: Literal["DONE", "HANDOFF", "FAILED"]
-    """终态类型。"""
+    kind: TerminalKind
+    """终态类型（规则 5：有限取值集合用枚举）。"""
     reason_code: str | None = None
     """FAILED / HANDOFF 的失败原因码。"""
     bundle_ref: str | None = None
@@ -263,9 +359,9 @@ class Terminal:
 
     def __post_init__(self) -> None:
         """终态不变量校验：DONE 必有产物，失败态必有原因码与证据。"""
-        if self.kind == "DONE" and not self.bundle_ref:
+        if self.kind == TerminalKind.DONE and not self.bundle_ref:
             raise ValueError("DONE terminal must carry bundle_ref")
-        if self.kind in ("FAILED", "HANDOFF") and not (self.reason_code and self.evidence_ref):
+        if self.kind in (TerminalKind.FAILED, TerminalKind.HANDOFF) and not (self.reason_code and self.evidence_ref):
             raise ValueError(f"{self.kind} terminal must carry reason_code and evidence_ref")
 
 
@@ -363,7 +459,10 @@ class State:
         按 decision.kind 提供，终态约束在 Terminal.__post_init__ 校验。
         """
         ts = (now or datetime.now(UTC)).isoformat()
-        kind = decision.kind if decision.kind in ("DONE", "HANDOFF", "FAILED") else "FAILED"
+        # 仅终态判定能写 Terminal；其余（防御性调用）显式回退到 FAILED
+        terminal_kinds = (DecisionKind.DONE, DecisionKind.HANDOFF, DecisionKind.FAILED)
+        kind = (TerminalKind.coerce(decision.kind.value)
+                if decision.kind in terminal_kinds else TerminalKind.FAILED)
         terminal = Terminal(
             kind=kind,
             reason_code=decision.reason_code,
@@ -371,7 +470,7 @@ class State:
             evidence_ref=evidence_ref,
             finished_at=ts,
         )
-        phase = SessionState.COMPLETED if kind == "DONE" else SessionState.FAILED
+        phase = SessionState.COMPLETED if kind == TerminalKind.DONE else SessionState.FAILED
         return replace(self, phase=phase, terminal=terminal)
 
     def bump(self, **changes: Unpack[StateUpdate]) -> State:
@@ -396,7 +495,7 @@ class State:
             "spec": self.spec.model_dump(),
             "diff_ref": self.diff_ref,
             "excluded_approaches": list(self.excluded_approaches),
-            "budget_used": dict(self.budget_used),
+            "budget_used": cast(BudgetUsage, dict(self.budget_used)),
             "tier_history": list(self.tier_history),
             "last_error_fingerprint": self.last_error_fingerprint,
             "clarification_answer": self.clarification_answer,
@@ -465,7 +564,7 @@ class ModelOutput:
     """归一后的用量。"""
     finish_reason: str = "stop"
     """供应商结束原因。"""
-    tier: ModelTier = "standard"
+    tier: ModelTier = ModelTier.STANDARD
     """本次调用的模型档位。"""
     raw: JsonObject = field(default_factory=dict)
     """供应商原始响应（不确定结构，统一聚集到 JsonObject）。"""
@@ -574,6 +673,25 @@ class ToolResult:
 # ---------------------------------------------------------------------------
 # 护栏（§4.1 L24/L25/L26）
 # ---------------------------------------------------------------------------
+
+class _GuardName(StrEnum):
+    """护栏名（规则 5：跨模块对齐的私有枚举，值与 wire 协议一致）。"""
+
+    INPUT = "input_guard"
+    OUTPUT = "output_guard"
+
+
+class _HitType(StrEnum):
+    """命中类型（规则 5：护栏内置的有限命中类型；规则自定义类型仍用 str 透传）。"""
+
+    PROMPT_INJECTION = "prompt_injection"
+    PROMPT_LEAK = "prompt_leak"
+    PII = "pii"
+    OUT_OF_SCOPE = "out_of_scope"
+    FORBIDDEN_EVAL = "forbidden_eval"
+    FORBIDDEN_NETWORK = "forbidden_network"
+    UNKNOWN_IMPORT = "unknown_import"
+
 
 @dataclass
 class GuardVerdict:
@@ -740,7 +858,8 @@ class Trajectory:
     """序列化后的事件序列（不确定结构，用 JsonObject）。"""
     terminal: JsonObject | None = None
     """终态快照（不确定结构，用 JsonObject）。"""
-    fingerprint: FingerprintInfo = field(default_factory=dict)
+    # dict() 会被推断为 dict[Unknown, Unknown]，cast 收口到确定键的 TypedDict（规则 3）
+    fingerprint: FingerprintInfo = field(default_factory=lambda: cast(FingerprintInfo, {}))
     """复现指纹五要素（确定键）。"""
 
 
@@ -754,7 +873,7 @@ class EvalCase:
     """用例输入（不确定结构，用 JsonObject）。"""
     expected: JsonObject = field(default_factory=dict)
     """期望断言（不确定结构，用 JsonObject）。"""
-    fingerprint: FingerprintInfo = field(default_factory=dict)
+    fingerprint: FingerprintInfo = field(default_factory=lambda: cast(FingerprintInfo, {}))
     """复现指纹五要素。"""
 
 
@@ -764,7 +883,7 @@ class Score:
 
     case_id: str
     """对应用例标识。"""
-    dimensions: ScoreDimensions = field(default_factory=dict)
+    dimensions: ScoreDimensions = field(default_factory=lambda: cast(ScoreDimensions, {}))
     """七维度得分（确定键）。"""
     passed: bool = False
     """是否通过门禁。"""
@@ -774,7 +893,8 @@ class Score:
         """七维度加权平均（归一化到 [0,1]）。"""
         if not self.dimensions:
             return 0.0
-        return sum(self.dimensions.values()) / len(self.dimensions)
+        # TypedDict.values() 被推断为 object，cast 到 float 序列再做数值求和
+        return sum(cast(float, v) for v in self.dimensions.values()) / len(self.dimensions)
 
 
 @dataclass

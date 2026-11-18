@@ -12,13 +12,13 @@ from __future__ import annotations
 import hashlib
 import json
 
-from packages.agent_core.types import RepairIssue, State
+from packages.agent_core.types import DecisionKind, RepairIssue, State
 
 
 def feedback(state: State, errors: list[RepairIssue]) -> State:
     """执行 REPAIR 回边：计数+1 + 写错误 + 信号回 CALL_MODEL（下轮重生成）。"""
     spec = state.spec.model_copy(update={
-        "signal": "CALL_MODEL",  # 回边完成：下一轮回到生成回路，不新增 Run
+        "signal": DecisionKind.CALL_MODEL,  # 回边完成：下一轮回到生成回路，不新增 Run
         "errors": list(errors),
     })
     fingerprint = hashlib.sha256(

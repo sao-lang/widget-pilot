@@ -15,7 +15,7 @@ from typing import cast
 
 from packages.agent_core.errors import CoreError
 from packages.agent_core.types import JsonObject, JsonValue, Message, ModelOutput, Usage
-from packages.contracts.enums import ModelTier
+from packages.contracts.enums import ModelTier, ReasonCode
 
 
 def normalize_usage(raw: JsonObject | None) -> Usage:
@@ -38,21 +38,25 @@ def with_retry[T](
     """基础设施故障指数退避（有上限）；业务失败立即上抛，不重试。"""
     sleeper = sleep or time.sleep
     last: CoreError | None = None
+    # 总尝试次数 = 首次 + max_retries 次重试，超次数即退出，避免无限重试
     for attempt in range(max_retries + 1):
         try:
             return fn()
         except CoreError as e:
+            # 业务失败重试无意义，立即上抛交由调用方走 REPAIR/终态
             if e.retryable is False:
                 raise  # 业务失败不重试
             last = e
+            # 仅在还有重试余量时退避，末次失败不再空等直接退出
             if attempt < max_retries:
                 sleeper(base_delay * (2 ** attempt))
         except Exception as e:  # noqa: BLE001 - 未知异常按基础设施故障处理（有上限）
-            # 未知异常按基础设施故障处理（有上限）
-            last = CoreError.infra("MODEL_ERROR", str(e))
+            # 未知异常同样受重试上限约束，耗尽后统一抛出
+            last = CoreError.infra(ReasonCode.MODEL_ERROR, str(e))
+            # 末次不再退避：无后续尝试时休眠只是无谓等待
             if attempt < max_retries:
                 sleeper(base_delay * (2 ** attempt))
-    raise last or CoreError.infra("MODEL_ERROR", "retry exhausted")
+    raise last or CoreError.infra(ReasonCode.MODEL_ERROR, "retry exhausted")
 
 
 def complete(
@@ -80,7 +84,7 @@ def complete(
             timeout=60.0,
         )
         if resp.status_code in (429, 500, 502, 503, 504):
-            raise CoreError.infra("MODEL_ERROR", f"HTTP {resp.status_code}: {resp.text[:200]}")
+            raise CoreError.infra(ReasonCode.MODEL_ERROR, f"HTTP {resp.status_code}: {resp.text[:200]}")
         resp.raise_for_status()
         # httpx.Response.json() 返回 Any；此处收口为 JsonObject 单一不确定结构
         return cast(JsonObject, resp.json())
@@ -88,16 +92,22 @@ def complete(
     data = with_retry(call)
     content = ""
     choices = data.get("choices") or []
+    # 只取第一个候选：chat-completions 兼容端点默认单候选，多候选由供应商配置
     if isinstance(choices, list) and choices:
         first = choices[0]
+        # 供应商响应字段形态不固定，逐层判型后再取，避免非 dict 触发 AttributeError
         if isinstance(first, dict):
             message = first.get("message")
+            # message 可能缺失或为其他类型，判型后才读取 content
             if isinstance(message, dict):
                 raw_content: JsonValue = message.get("content", "")
                 content = raw_content if isinstance(raw_content, str) else ""
+    # 先取 usage 再判型：isinstance 收窄作用于局部变量，避免对 get() 二次调用失效
+    raw_usage = data.get("usage")
+    usage = raw_usage if isinstance(raw_usage, dict) else None
     return ModelOutput(
         content=content,
-        usage=normalize_usage(data.get("usage") if isinstance(data.get("usage"), dict) else None),
+        usage=normalize_usage(usage),
         tier=cast(ModelTier, tier),  # tier 由服务层配置为契约档位字符串
         raw=data,
     )

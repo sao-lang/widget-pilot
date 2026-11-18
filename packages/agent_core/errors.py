@@ -50,10 +50,12 @@ class CoreError(Exception):
 
     @classmethod
     def business(cls, code: str, message: str = "", evidence_ref: str | None = None) -> CoreError:
+        """构造业务失败异常并显式标记为不可重试，使其走 REPAIR 回边/终态而非 RetryPolicy。"""
         return cls(code, message, evidence_ref, retryable=False)
 
     @classmethod
     def infra(cls, code: str, message: str = "", evidence_ref: str | None = None) -> CoreError:
+        """构造基础设施故障异常并显式标记为可重试，交由 RetryPolicy 做有上限退避。"""
         return cls(code, message, evidence_ref, retryable=True)
 
     def __repr__(self) -> str:

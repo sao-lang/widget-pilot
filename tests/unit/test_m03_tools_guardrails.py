@@ -10,7 +10,13 @@ from packages.agent_core.guardrails.input_guard import RuleSet, input_guard
 from packages.agent_core.guardrails.output_guard import output_guard
 from packages.agent_core.tools.invoke import invoke, truncate
 from packages.agent_core.tools.registry import REGISTRY, ToolSpec, register
-from packages.agent_core.types import CapabilityCall, Decision, Manifest, ModelOutput
+from packages.agent_core.types import (
+    CapabilityCall,
+    Decision,
+    DecisionKind,
+    Manifest,
+    ModelOutput,
+)
 
 
 class Args(BaseModel):
@@ -31,7 +37,7 @@ def clean_registry():
 
 # ---- 工具五步 ----
 def test_invoke_unregistered_tool_rejected():
-    d = Decision("CALL_TOOL", tool="eval", args={}, surface="generation")
+    d = Decision(DecisionKind.CALL_TOOL, tool="eval", args={}, surface="generation")
     with pytest.raises(CoreError) as ei:
         invoke(d)
     assert ei.value.code == "CAPABILITY_DENIED"
@@ -39,21 +45,21 @@ def test_invoke_unregistered_tool_rejected():
 
 
 def test_invoke_validates_args():
-    d = Decision("CALL_TOOL", tool="get_weather", args={"bad": 1}, surface="generation")
+    d = Decision(DecisionKind.CALL_TOOL, tool="get_weather", args={"bad": 1}, surface="generation")
     with pytest.raises(CoreError) as ei:
         invoke(d)
     assert ei.value.code == "INPUT_INVALID"
 
 
 def test_invoke_authorization_denied_on_wrong_surface():
-    d = Decision("CALL_TOOL", tool="get_weather", args={"city": "SZ"}, surface="widget-runtime")
+    d = Decision(DecisionKind.CALL_TOOL, tool="get_weather", args={"city": "SZ"}, surface="widget-runtime")
     with pytest.raises(CoreError) as ei:
         invoke(d)
     assert ei.value.code == "CAPABILITY_DENIED"
 
 
 def test_invoke_success_and_truncate():
-    d = Decision("CALL_TOOL", tool="get_weather", args={"city": "Shenzhen"}, surface="generation")
+    d = Decision(DecisionKind.CALL_TOOL, tool="get_weather", args={"city": "Shenzhen"}, surface="generation")
     result = invoke(d)
     assert result.ok is True
     assert result.truncated is True
@@ -69,7 +75,7 @@ def test_invoke_handler_timeout_classified_infra():
     def boom(args):
         raise CoreError.infra("SANDBOX_UNAVAILABLE", "timeout")
     register("flaky", ToolSpec("flaky", Args, {"generation"}, boom, 100))
-    d = Decision("CALL_TOOL", tool="flaky", args={"city": "SZ"}, surface="generation")
+    d = Decision(DecisionKind.CALL_TOOL, tool="flaky", args={"city": "SZ"}, surface="generation")
     with pytest.raises(CoreError) as ei:
         invoke(d)
     assert classify(ei.value.code) == "infra"

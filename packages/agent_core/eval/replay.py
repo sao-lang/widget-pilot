@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+from typing import cast
+
 from packages.agent_core.constants import FINGERPRINT_PARTS
 from packages.agent_core.types import (
     AgentEvent,
@@ -26,7 +28,9 @@ def build_trajectory(
 ) -> Trajectory:
     """从事件序列构建确定性轨迹：只保留可断言字段，按 seq 排序。"""
     serialized: list[JsonObject] = [e.to_dict() for e in sorted(events, key=lambda x: x.seq)]
-    return Trajectory(events=serialized, terminal=terminal, fingerprint=dict(fingerprint or {}))
+    # dict() 推断为 dict[str, object]，cast 收口到 FingerprintInfo（规则 3）
+    fp = cast(FingerprintInfo, dict(fingerprint or {}))
+    return Trajectory(events=serialized, terminal=terminal, fingerprint=fp)
 
 
 def trajectories_equal(a: Trajectory, b: Trajectory) -> bool:

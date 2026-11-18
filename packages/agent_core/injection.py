@@ -15,6 +15,7 @@ from typing import Protocol, Self, runtime_checkable
 from packages.agent_core.types import (
     AgentEvent,
     Candidate,
+    CheckpointNode,
     JsonValue,
     Message,
     ModelOutput,
@@ -74,7 +75,7 @@ class ObjectStore(Protocol):
 class CheckpointStore(Protocol):
     """版本化 checkpoint 存储：按 (run_id, rev) 存状态与 hash 链。"""
 
-    def save(self, run_id: str, rev: int, node: str, state_ref: str, prev_hash: str) -> None:
+    def save(self, run_id: str, rev: int, node: CheckpointNode, state_ref: str, prev_hash: str) -> None:
         """落一行 checkpoint（主键 (run_id, rev) 唯一）。"""
         ...
 

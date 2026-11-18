@@ -6,11 +6,11 @@ from datetime import UTC, datetime
 from packages.agent_core.events.replay import replay
 from packages.agent_core.events.seq import emit, next_seq
 from packages.agent_core.events.sse import frame, resume_from
-from packages.agent_core.types import Decision
+from packages.agent_core.types import Decision, DecisionKind
 
 
 def _emit_n(bus, session, run, n, trace="t1"):
-    d = Decision("CALL_MODEL")
+    d = Decision(DecisionKind.CALL_MODEL)
     for i in range(n):
         emit(i, "RUNNING", d, bus=bus, session_id=session, run_id=run,
              trace_id=trace, now=datetime(2026, 1, 1, tzinfo=UTC))
