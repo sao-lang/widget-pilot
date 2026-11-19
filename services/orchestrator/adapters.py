@@ -21,10 +21,16 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Final
 
+import psycopg
 import redis
+from sqlalchemy import func, literal, or_, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 
 from packages.agent_core.types import AgentEvent, CheckpointNode, State
 from services.control_plane.accounts.constants import LEASE_TTL_S
+from services.control_plane.db import make_session_factory, session_scope
+from services.control_plane.models import Checkpoint
 
 # 事件解码由调用方注入（Stream data → AgentEvent），避免适配器重实现 schema 还原（规则 8）
 type EventDecoder = Callable[[str], AgentEvent | None]
@@ -65,8 +71,8 @@ def _stream_data(fields: object) -> str:
 class PgCheckpointStore:
     """PG checkpoint 存储：实现 M03 CheckpointStore Protocol（§3.4 表定义）。
 
-    save/load/latest_rev/hashes 映射到 SQL；主键 (run_id, rev) 唯一约束防重复（I1）。
-    生产部署前须在 Docker 环境补跑 A10（rev 单调 + hash 链）。
+    v1.5 ORM 化：save/load/latest_rev/hashes 用 SQLAlchemy ORM；主键
+    (run_id, rev) 唯一约束防重复（I1）。
     """
 
     def __init__(self, dsn: str, object_get: Callable[[str], bytes]) -> None:
@@ -76,7 +82,7 @@ class PgCheckpointStore:
             dsn: PostgreSQL 连接串。
             object_get: 从对象存储按 ref 读回字节的回调（含 hash 校验），由 Deps 注入。
         """
-        self._dsn = dsn
+        self._factory = make_session_factory(dsn)
         self._object_get = object_get
 
     def save(
@@ -89,30 +95,48 @@ class PgCheckpointStore:
     ) -> None:
         """落一行 checkpoint：主键冲突即抛（I1 断言点）。
 
-        B2 修复：新 rev 行继承同 run 最新行的租约列——租约是 run 级而非 rev 级，
-        否则持锁 worker 每写一个 checkpoint 就丢锁、被另一 worker 抢占。
+        B2：新 rev 行继承同 run 最新行的租约列（run 级租约，不随 checkpoint 丢）。
+        单 Session 事务内先查 MAX(rev) 行租约、再写新行。
 
         Args:
             run_id: 运行标识。
-            rev: 单调版本号（由调用方 max(state.rev, latest+1) 计算）。
-            node: 该 checkpoint 对应的执行节点。
+            rev: 单调版本号。
+            node: 触发落盘的决策节点。
             state_ref: 对象存储引用（state 字节 + hash）。
-            prev_hash: 上一 rev 的链 hash（hash 链断言点）。
+            prev_hash: 上一 rev 的链 hash。
         """
-        import psycopg
-
-        with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
-            # B2 修复：新 rev 行继承同 run 最新行的租约（run 级租约，不随 checkpoint 丢）。
-            # 子查询取 MAX(rev) 行的 owner/until；首行（无前行）自然为 NULL = 空闲。
-            cur.execute(
-                "INSERT INTO checkpoint "
-                "(run_id, rev, node, state_ref, prev_hash, lease_owner, lease_until, created_at) "
-                "SELECT %s, %s, %s, %s, %s, "
-                "  (SELECT lease_owner FROM checkpoint WHERE run_id = %s ORDER BY rev DESC LIMIT 1), "
-                "  (SELECT lease_until FROM checkpoint WHERE run_id = %s ORDER BY rev DESC LIMIT 1), "
-                "  now()",
-                (run_id, rev, node.value, state_ref, prev_hash, run_id, run_id),
-            )
+        try:
+            with session_scope(self._factory) as session:
+                # B2：查最新 rev 行的租约列；首行无前驱时二者为 None（= 空闲）。
+                # with_for_update 锁住该行——restore 旧单语句 INSERT...SELECT 的
+                # 快照原子性：SELECT 与 INSERT 之间租约不会被并发事务改写。
+                prev = session.execute(
+                    select(Checkpoint.lease_owner, Checkpoint.lease_until)
+                    .where(Checkpoint.run_id == run_id)
+                    .order_by(Checkpoint.rev.desc())
+                    .limit(1)
+                    .with_for_update()
+                ).first()
+                lease_owner = prev.lease_owner if prev is not None else None
+                lease_until = prev.lease_until if prev is not None else None
+                session.add(
+                    Checkpoint(
+                        run_id=run_id,
+                        rev=rev,
+                        node=node.value,
+                        state_ref=state_ref,
+                        prev_hash=prev_hash,
+                        lease_owner=lease_owner,
+                        lease_until=lease_until,
+                        # created_at 省略 → server_default func.now()
+                    )
+                )
+        except IntegrityError as exc:
+            # 行为等价：原 psycopg 实现直接抛 UniqueViolation（I1 断言点），
+            # ORM 包装成 IntegrityError——此处还原底层异常，保持对外契约不变
+            if isinstance(exc.orig, psycopg.errors.UniqueViolation):
+                raise exc.orig from exc
+            raise
 
     def load(self, run_id: str) -> State | None:
         """取最新 rev 的 state_ref，从对象存储读回并反序列化为 State（§3.4）。
@@ -121,35 +145,30 @@ class PgCheckpointStore:
             run_id: 运行标识。
 
         Returns:
-            最新 checkpoint 的 State；该 run 无任何 checkpoint 时返回 None。
+            最新 checkpoint 的 State；无 checkpoint 返回 None。
         """
-        import psycopg
-
-        with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
-            cur.execute(
-                "SELECT state_ref FROM checkpoint WHERE run_id = %s "
-                "ORDER BY rev DESC LIMIT 1",
-                (run_id,),
+        with session_scope(self._factory) as session:
+            ref = session.scalar(
+                select(Checkpoint.state_ref)
+                .where(Checkpoint.run_id == run_id)
+                .order_by(Checkpoint.rev.desc())
+                .limit(1)
             )
-            row = cur.fetchone()
-        if row is None:
+        if ref is None:
             return None
-        # state_ref 形如 "key#sha256:<digest>"；完整 ref 交给注入的对象读取回调（含 hash 校验）
-        ref = str(row[0])
-        data = self._object_get(ref)
+        # 完整 ref 交给注入的对象读取回调（含 hash 校验），契约不变
+        data = self._object_get(str(ref))
         return State.from_snapshot(json.loads(data))
 
     def latest_rev(self, run_id: str) -> int:
         """返回最大 rev；无记录返回 -1（§4.3 契约）。"""
-        import psycopg
-
-        with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
-            cur.execute(
-                "SELECT COALESCE(MAX(rev), -1) FROM checkpoint WHERE run_id = %s",
-                (run_id,),
+        with session_scope(self._factory) as session:
+            value = session.scalar(
+                select(func.coalesce(func.max(Checkpoint.rev), -1)).where(
+                    Checkpoint.run_id == run_id
+                )
             )
-            row = cur.fetchone()
-        return int(row[0]) if row else -1
+        return int(value) if value is not None else -1
 
     def hashes(self, run_id: str) -> list[str]:
         """按 rev 排序返回 prev_hash 列（供 hash 链重算，I2）。
@@ -160,15 +179,13 @@ class PgCheckpointStore:
         Returns:
             按 rev 升序的 prev_hash 列表（首行为空串）。
         """
-        import psycopg
-
-        with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
-            cur.execute(
-                "SELECT prev_hash FROM checkpoint WHERE run_id = %s ORDER BY rev ASC",
-                (run_id,),
-            )
-            rows = cur.fetchall()
-        return [str(r[0]) for r in rows]
+        with session_scope(self._factory) as session:
+            values = session.scalars(
+                select(Checkpoint.prev_hash)
+                .where(Checkpoint.run_id == run_id)
+                .order_by(Checkpoint.rev.asc())
+            ).all()
+        return [str(v) for v in values]
 
 
 class PgLease:
@@ -201,46 +218,56 @@ class PgLeaseProvider:
     """
 
     def __init__(self, dsn: str) -> None:
-        """注入 PG DSN；连接在使用时惰性创建。"""
-        self._dsn = dsn
+        """注入 PG DSN，构造该实例绑定的 sessionmaker。
+
+        Args:
+            dsn: PostgreSQL 连接串。
+        """
+        self._factory = make_session_factory(dsn)
 
     def acquire(self, run_id: str, owner: str, ttl_s: int) -> PgLease | None:
         """原子抢锁；成功返回 PgLease，已被他人持有返回 None（A4 单持锁者）。
 
-        若该 run 尚无 checkpoint 行，先插入 rev=0 占位行（懒建租约锚点），
-        再走条件 UPDATE；两步在同一连接内，UPDATE 的 WHERE 保证原子性。
+        先 ON CONFLICT DO NOTHING 建 rev=0 锚点，再条件 UPDATE（租约空闲/过期
+        才命中）。RETURNING 判赢家 —— PG 行锁保证并发恰好一个成功。
 
         Args:
             run_id: 运行标识。
-            owner: 持锁 worker 标识（写入 lease_owner）。
-            ttl_s: 租约有效期秒数（lease_until = now + ttl_s）。
+            owner: 持锁 worker 标识。
+            ttl_s: 租约有效期秒数。
 
         Returns:
-            抢锁成功返回 PgLease（run() 内用其 heartbeat/release）；
-            已被他人持有且未过期返回 None。
+            抢锁成功返回 PgLease；已被他人持有且未过期返回 None。
         """
-        import psycopg
-
-        with psycopg.connect(self._dsn) as conn:
-            with conn.cursor() as cur:
-                # 懒建锚点：ON CONFLICT DO NOTHING，不影响已有行
-                cur.execute(
-                    "INSERT INTO checkpoint (run_id, rev, node, state_ref, prev_hash) "
-                    "VALUES (%s, 0, 'FINAL', '', '') ON CONFLICT (run_id, rev) DO NOTHING",
-                    (run_id,),
+        ttl_expr = func.now() + (literal(ttl_s) * text("interval '1 second'"))
+        with session_scope(self._factory) as session:
+            # 懒建锚点（PG 方言的 ON CONFLICT DO NOTHING）
+            session.execute(
+                pg_insert(Checkpoint)
+                .values(run_id=run_id, rev=0, node="FINAL", state_ref="", prev_hash="")
+                .on_conflict_do_nothing(index_elements=["run_id", "rev"])
+            )
+            # 原子条件更新：仅最新 rev 行、租约空闲/过期时命中
+            max_rev = (
+                select(func.max(Checkpoint.rev))
+                .where(Checkpoint.run_id == run_id)
+                .scalar_subquery()
+            )
+            stmt = (
+                update(Checkpoint)
+                .where(Checkpoint.run_id == run_id)
+                .where(Checkpoint.rev == max_rev)
+                .where(
+                    or_(
+                        Checkpoint.lease_owner == _LEASE_UNOWNED,
+                        Checkpoint.lease_until.is_(None),
+                        Checkpoint.lease_until < func.now(),
+                    )
                 )
-                # 原子抢锁：仅当租约空闲（owner 空）或已过期时，条件成立才更新。
-                # RETURNING 命中行数即赢家标记 —— 并发下 PG 行锁保证恰好一个成功。
-                cur.execute(
-                    "UPDATE checkpoint SET lease_owner = %s, "
-                    "lease_until = now() + (%s * interval '1 second') "
-                    "WHERE run_id = %s AND rev = (SELECT MAX(rev) FROM checkpoint WHERE run_id = %s) "
-                    "AND (lease_owner = %s OR lease_until IS NULL OR lease_until < now()) "
-                    "RETURNING run_id",
-                    (owner, ttl_s, run_id, run_id, _LEASE_UNOWNED),
-                )
-                won = cur.fetchone() is not None
-            conn.commit()
+                .values(lease_owner=owner, lease_until=ttl_expr)
+                .returning(Checkpoint.run_id)
+            )
+            won = session.execute(stmt).first() is not None
         return PgLease(self, run_id, owner) if won else None
 
     def heartbeat(self, run_id: str, owner: str) -> bool:
@@ -253,21 +280,20 @@ class PgLeaseProvider:
         Returns:
             True 表示续约成功；False 表示租约已被他人接管或过期。
 
-        租约 TTL 引用 LEASE_TTL_S 常量（M02 Q4），不硬编码。
+        TTL 引用 LEASE_TTL_S 常量（M02 Q4）。不限制 rev —— B2 租约继承让同 run
+        多行共享 owner，heartbeat 须刷新所有匹配行（行为等价原 SQL）。
         """
-        import psycopg
-
-        with psycopg.connect(self._dsn) as conn:
-            with conn.cursor() as cur:
-                # B2：租约 TTL 引用常量（M02 Q4），不再硬编码 30s
-                cur.execute(
-                    "UPDATE checkpoint SET lease_until = now() + (%s * interval '1 second') "
-                    "WHERE run_id = %s AND lease_owner = %s AND lease_until >= now() "
-                    "RETURNING run_id",
-                    (LEASE_TTL_S, run_id, owner),
-                )
-                renewed = cur.fetchone() is not None
-            conn.commit()
+        ttl_expr = func.now() + (literal(LEASE_TTL_S) * text("interval '1 second'"))
+        stmt = (
+            update(Checkpoint)
+            .where(Checkpoint.run_id == run_id)
+            .where(Checkpoint.lease_owner == owner)
+            .where(Checkpoint.lease_until >= func.now())
+            .values(lease_until=ttl_expr)
+            .returning(Checkpoint.run_id)
+        )
+        with session_scope(self._factory) as session:
+            renewed = session.execute(stmt).first() is not None
         return renewed
 
     def release(self, run_id: str, owner: str) -> None:
@@ -277,16 +303,13 @@ class PgLeaseProvider:
             run_id: 运行标识。
             owner: 持锁 worker 标识（不匹配则无操作，防误放他人租约）。
         """
-        import psycopg
-
-        with psycopg.connect(self._dsn) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE checkpoint SET lease_owner = %s, lease_until = NULL "
-                    "WHERE run_id = %s AND lease_owner = %s",
-                    (_LEASE_UNOWNED, run_id, owner),
-                )
-            conn.commit()
+        with session_scope(self._factory) as session:
+            session.execute(
+                update(Checkpoint)
+                .where(Checkpoint.run_id == run_id)
+                .where(Checkpoint.lease_owner == owner)
+                .values(lease_owner=_LEASE_UNOWNED, lease_until=None)
+            )
 
     def scan_expired(self, now: datetime) -> list[str]:
         """扫描 lease_until < now 且仍有持锁者的 runId（§11.4 step 3）。
@@ -297,16 +320,14 @@ class PgLeaseProvider:
         Returns:
             租约已过期的 run_id 列表（去重）。
         """
-        import psycopg
-
-        with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
-            cur.execute(
-                "SELECT DISTINCT run_id FROM checkpoint "
-                "WHERE lease_until < %s AND lease_owner != %s",
-                (now, _LEASE_UNOWNED),
-            )
-            rows = cur.fetchall()
-        return [str(r[0]) for r in rows]
+        with session_scope(self._factory) as session:
+            rows = session.scalars(
+                select(Checkpoint.run_id)
+                .where(Checkpoint.lease_until < now)
+                .where(Checkpoint.lease_owner != _LEASE_UNOWNED)
+                .distinct()
+            ).all()
+        return [str(r) for r in rows]
 
 
 class RedisIdempotencyStore:
