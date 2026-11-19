@@ -571,7 +571,7 @@ def invoke(d: Decision) -> ToolResult:
 
 - **槽位装配**（替代 `trim_messages`）：`系统契约 → 规程 → 检索片段 → 附件洞察 → 用户记忆 → 会话结论`，固定顺序保持 prompt caching；`budget.py` 用 tiktoken 计数，超阈值只压缩 tool message，**保留任务契约与已排除方案**；state 只存结论与引用。
 - **检索融合**（替代 retriever）：`SQL 硬过滤(grid/type/capability) → 向量 top-k → BM25 top-k → 自研 RRF → rerank → 去重 → 预算裁剪`；索引快照版本写进 `manifest`，保证可复现。
-- **模型直连**：`model/provider.py` 用 `httpx` 直接请求 provider 的 chat-completions 兼容端点，统一把不同供应商的 `usage` 字段归一；换模型只改配置，不换代码；流式 delta 由 `stream.py` 自行分帧。
+- **模型直连**：`model/provider.py` 当前用 `httpx` 直接请求 provider 的 chat-completions 兼容端点，统一把不同供应商的 `usage` 字段归一；换模型只改配置，不换代码；流式 delta 由 `stream.py` 自行分帧。**M20 v1.4 设计增补（未实现）**：按 provider 级 `wire_api` 增加 Responses wire adapter，把 `/v1/responses` 的 `input`/`instructions`、`output_text` 与类型化 SSE 事件归一到现有 `ModelOutput` / `Delta` / `Usage`；M03 的 `\n\n` 分帧与半帧缓存内核不变，上层 agent loop 无感。
 
 > RRF 融合链路的**具体参数**原文只给链路、不给数值：【推导·需评审】建议 RRF 常数 `k = 60`、向量/BM25 各取 `top-k = 10`、`rerank` 后 `top-k = 5`、预算裁剪按 `context/budget.py` 的 token 阈值；这些取值需在影子期实测校准后固化到 `context/slots.py`，并纳入 §9 回归触发范围。
 
@@ -1351,7 +1351,7 @@ type WidgetSpec = {
 | 代价 / 风险 | 缓解 |
 |---|---|
 | 自己处理幂等、租约、并发、背压、schema 演进 | §11.9 的测试与判据作为硬门禁 |
-| 没有框架的 provider 生态集成 | 用 OpenAI-compatible 协议做统一适配层，新增供应商只加一个 adapter |
+| 没有框架的 provider 生态集成 | 用 `ProviderAdapter` + 两种手写 wire（`chat_completions` / `responses`，后者 v1.4 仅设计未实现）做统一适配层；同 wire 供应商只加配置，新 wire 才加 adapter |
 | 缺少现成 tracing / eval UI | 自建表 + 简单看板，正好是可讲的前端交付物 |
 | 代码量更大 | `agent_core` 模块边界清晰，每个模块都有不变量与单测 |
 
@@ -1362,7 +1362,7 @@ type WidgetSpec = {
 | 项 | 说明 | 处理 / 责任建议 |
 |---|---|---|
 | 手写 harness 正确性（§9.6 全局风险） | 无框架兜底，幂等 / 租约 / 并发 / 背压 / schema 演进需自己保证 | 以 §11.9 六层测试与本文 §8.2 为**硬门禁**；`GATE OK` 前不引入降级分支 |
-| provider 生态 | 无框架适配器 | OpenAI-compatible 统一适配层，新增供应商只加一个 adapter（§11.10） |
+| provider 生态 | 无框架适配器 | `chat_completions` + `responses`（v1.4 设计占位，未实现）双 wire 适配层；新增同 wire 供应商只加配置，新 wire 才加 adapter（§11.10） |
 | schema 演进 | `WidgetSpec` / 事件 schema 升级会破坏旧 checkpoint 反序列化 | checkpoint 带 `rev` + `prev_hash`；反序列化按版本分支；变更触发全量回放（T27） |
 | 背压 | SSE 事件入队、日志窗口化、大日志走对象存储引用 | 事件按 `seq` 去重与乱序丢弃；日志最多保留 N 行 |
 | 并发 | 抢租约、`REGISTRY` 只读、`side_effect` 唯一键 | 原子 `UPDATE ... WHERE lease_until < now()`；主键约束 |

@@ -3,10 +3,11 @@
 > **文档类型**：补充模块（可独立交付 / 可独立验收）
 > **递进层定位**：**L7 闭环增强第三环（可切换）**——依赖 L3 的 M03 provider 实现；切换门禁消费 M19 的回归范围矩阵与影子对比（00 总览 §2.3）
 > **来源**：`设计方案.md` **v1.2 §12.1（本模块的原文增补章节）**、§11.7（模型直连 httpx / usage 归一 / 换模型只改配置）、§0 D-4（模型分档，阈值版本化、影子验证后再灰度）、§2.5（关键技术决策：model gateway 直连）、§5 D4（验收：换模型只改配置）、§9.1（影子模式）、§9.2（熔断与回滚）；本模块是拆分评审发现的**能力缺口补充**，不改变原架构决策
-> **版本**：v1.0　|　**拆分日期**：2026-11-16　|　**最近修订**：2026-11-16（v1.3，ADR-001 同步）　|　**状态**：设计定稿（含 6 项待决，见 §9）
+> **版本**：v1.0　|　**拆分日期**：2026-11-16　|　**最近修订**：2026-11-20（v1.4，Responses API wire adapter 设计增补，未实现）　|　**状态**：设计定稿（含待决项，见 §9）
 > **对应编号**：FR-21（重试 / 降级的供应商接入侧）/ D-4 关联 / X4（成本·单价与计量归一侧）/ X5（降级链·接入侧）/ X10（回归门禁触发侧）；**无新增 FR、无新增 ReasonCode**
 > **主责包**：`packages/agent_core/model/providers/`（ProviderAdapter 实现与注册表）+ `infra/deploy/model_providers.yaml`（供应商配置，单一事实来源）
 > **一句话定义**：把 M03 已实现的「单供应商直连」升级为一套**可切换**的供应商接入体系——`ProviderAdapter` 接口规范、`model_providers.yaml` 配置 registry、模型能力矩阵、四场景切换流程（回归 → 影子 → 灰度 → 回滚）、降级 fallback 链与 embedding provider 切换规范——让「换模型只改配置」从一句验收口号变成有接口、有判据、有演练 runbook 的工程机制。
+> **v1.4 设计增补（2026-11-20，未实现）**：新增 `wire_api: chat_completions | responses` 与 `adapter_responses` 的 wire 规范——Responses API 作为支持厂商的首选 wire，chat-completions 作为跨厂商兜底；本轮只冻结接口、事件映射与配置字段，不新增代码、不改测试。
 
 ---
 
@@ -16,7 +17,7 @@
 
 WidgetPilot 是一个「用自然语言生成手机桌面控件」的 AI Agent 产品：规格（`2x1`–`4x4` 六种）为可选预填 + 缺省询问补全，系统不推断（v1.3 ADR-001 D-6），用户输入描述、可传附件，系统生成 TSX + React 代码，经编译与一次性沙箱测试后产出控件包。生成链路的第 ⑦ 步要调用大模型（先出 `WidgetSpec` 再产代码），成本按模型档位（`cheap / standard / frontier` 三档，§4.2 `ModelTier`）分账。
 
-原设计定稿了两个关键决策：**D-5 零 Agent 框架**——模型调用不用任何 SDK，由 M03 手写 `model/provider.py` 用 `httpx` 直连 chat-completions 兼容端点、`stream.py` 自研 SSE 分帧、usage 字段归一；**D-4 模型分档**——简单控件用便宜模型、复杂任务用强模型，分档阈值版本化、影子验证后再灰度。M07 在此之上装了 `ModelGateway` 与 `model_config_version`，验收写明「换模型只改配置」「新增供应商只加一个 adapter」（§11.10）。
+原设计定稿了两个关键决策：**D-5 零 Agent 框架**——模型调用不用任何 SDK，由 M03 手写 `model/provider.py` 用 `httpx` 直连 chat-completions 兼容端点、`stream.py` 自研 SSE 分帧、usage 字段归一；**D-4 模型分档**——简单控件用便宜模型、复杂任务用强模型，分档阈值版本化、影子验证后再灰度。M07 在此之上装了 `ModelGateway` 与 `model_config_version`，验收写明「换模型只改配置」「新增供应商只加一个 adapter」（§11.10）。v1.4 增补把「一个 adapter」细化为**两类 wire adapter**：同 wire 的供应商只加配置，新 wire（Responses API）才加 adapter。
 
 ### 0.2 端到端 14 步链路中的位置
 
@@ -40,6 +41,7 @@ WidgetPilot 是一个「用自然语言生成手机桌面控件」的 AI Agent �
 | 已有的 | 模块 | 缺的 |
 |---|---|---|
 | `provider.py` httpx 直连 chat-completions、`stream.py` SSE 分帧、`normalize_usage` usage 归一（单供应商实现） | M03 | **没有 ProviderAdapter 接口规范**：第二个供应商的 adapter 该长什么样、必须实现哪些方法、健康检查怎么报，无约定 |
+| 现有 wire 只有 chat-completions（OpenAI-compatible） | M03 / M07 | **没有 Responses API wire adapter**：支持 `/v1/responses` 的厂商无法用上类型化事件与推理项；不支持该协议的厂商又不能被强制切换（v1.4 只设计、不实现） |
 | `ModelGateway`（`gateway.py` / `usage.py`）+ `model_config_version` | M07 | **没有配置文件 schema**：`model_config_version` 里面具体是什么结构、密钥放哪、参数默认值，无定义 |
 | 三档分档 rubric（三因子 → `ModelTier`） | M07 | **没有能力矩阵**：档位怎么映射到具体 model_id、每个模型的上下文窗口 / json_mode / 单价 / SSE quirk 怎么登记，无设计 |
 | 影子模式与灰度（四阶段） | §9.1 / M11 | **没有切换流程**：换供应商要走哪些门禁、影子对比比什么、灰度怎么放量、怎么回滚，无流程 |
@@ -60,7 +62,7 @@ flowchart LR
   M10["M10 检索与评测\nretrieval_snapshot / 回归门禁"] <==>|embedding 绑定 + 回归触发| M20
   M18["M18 链路追踪\nTraceExport"] -.影子对比的轨迹断言素材.-> M20
   M19["M19 评测体系（并行补充模块）\n回归范围矩阵"] -.切换触发的回归范围.-> M20
-  LLM["第三方 Provider\nchat-completions 兼容端点"] -->|HTTP/SSE| M20
+  LLM["第三方 Provider\nchat-completions / Responses API 端点"] -->|HTTP/SSE| M20
   EMB["Embedding Provider"] -->|向量接口| M20
 ```
 
@@ -112,6 +114,7 @@ flowchart LR
 | R9 | 密钥与日志安全 | `api_key_ref` 只引用 secret/env；请求日志脱敏；供应商数据出境合规登记 |
 | R10 | per-adapter 契约测试 | 录制回放 HTTP fixtures（CI 不真实调用 API）、usage 归一单测（I10：两供应商切换代码 diff=0）、fallback 故障注入、能力矩阵决策单测 |
 | R11 | 切换演练 runbook | 回滚步骤、embedding 重建步骤、灰度放量与熔断联动，落 `docs/runbook/` |
+| R12 | 双 wire adapter 规范（v1.4 设计增补，未实现） | `wire_api: chat_completions \| responses` 按 provider 配置；Responses 端点与类型化事件归一到现有内核；不支持的厂商保留 chat-completions 兜底 |
 
 ### 1.3 不做什么（明确排除，边界切割点）
 
@@ -135,7 +138,7 @@ flowchart LR
 | 入 | M07 `ModelGateway` 的解析请求：`ModelTier`（cheap/standard/frontier） | 库级接口 `resolve(tier)`（§4.3） |
 | 入 | `model_providers.yaml`（经 `model_config_version` 版本化） | 配置文件 + 启动/热加载校验（§6.2） |
 | 入 | M11 指令：灰度放量比例、kill switch、降级触发 | 内部事件 / 开关配置 |
-| 入 | 供应商 HTTP 响应与 SSE 流 | chat-completions 兼容协议（§4.1） |
+| 入 | 供应商 HTTP 响应与 SSE 流 | `chat_completions` 或 `responses` wire（§4.1 / §4.7） |
 | 入 | M10 回归门禁结论（`GATE OK / GATE FAIL`） | 内部接口（切换流程门禁位） |
 | 出 | `ResolvedModel { provider, model_id, params, capability }` 与已注入的 adapter | 库级返回值，M07 的 `complete()` 据此调用 |
 | 出 | 归一 `Usage`（沿用 M07 定义） | 库级返回值，M07 计量、M11 分账 |
@@ -159,6 +162,7 @@ flowchart LR
 6. **兼容性差异配置化，不改内核**：SSE quirk、json_mode、prompt caching 差异全部登记进能力矩阵，由 adapter 参数化处理；M03 的分帧与归一内核零改动。
 7. **旧快照永远可回滚**：embedding 切换不覆盖旧索引快照；模型配置回滚 = 回退到上一 `model_config_version`，历史复现指纹不失效。
 8. **CI 零真实外呼**：per-adapter 契约测试用录制回放 fixtures，任何 CI 环境不得真实调用供应商 API（成本与可重复性双重原因）。
+9. **Responses 优先、chat-completions 兜底（v1.4）**：wire 差异配置化，业务只见 `ModelOutput` / `Delta` / `Usage`；不依赖 `previous_response_id`、服务端 `store` 或原生工具调用，多轮历史与工具协议仍由 M03/M07 自有链路负责。
 
 ---
 
@@ -169,8 +173,8 @@ flowchart LR
 | 层 | 选型 | 版本 / 约束 | 为什么 | 明确不用什么 |
 |---|---|---|---|---|
 | adapter 协议 | Python `typing.Protocol` | 五方法接口（§4.1） | 与 M03 `ModelGateway` 注入接口同风格，结构化子类型、无继承耦合 | 不用抽象基类注册机制、不用供应商官方 SDK |
-| HTTP 客户端 | `httpx`（M03 既有） | 直连 chat-completions 兼容端点 | 与 §11.7 定稿一致，无 SDK 黑盒 | 不用 openai-python / 各供应商 SDK |
-| SSE 解析 | M03 `stream.py` + adapter frame post-processor | `\n\n` 分帧内核不变；quirk 参数化 | 兼容性差异配置化（§3.4 D） | 不为每个供应商 fork 分帧器 |
+| HTTP 客户端 | `httpx`（M03 既有） | 按 `wire_api` 直连 `/v1/chat/completions` 或 `/v1/responses` | 与 §11.7 定稿一致，无 SDK 黑盒 | 不用 openai-python / 各供应商 SDK |
+| SSE 解析 | M03 `stream.py` 分帧 + wire 事件解码器 | `\n\n` 分帧内核不变；chat-completions delta 与 Responses 类型化事件各自归一为 `Delta` | 兼容性差异配置化（§3.4 D / §4.7） | 不为每个供应商 fork 分帧器 |
 | 配置 | YAML + Pydantic v2 严格校验 | `model_providers.yaml`，`model_config_version` 版本化 | 可 diff、可评审、可回滚；启动即全量校验 | 不把供应商配置散落环境变量、不做无版本的热改 |
 | 密钥 | env / secret manager 引用 | `api_key_ref: "env:XXX"`，启动解析 | 密钥不进 git、不进日志 | 禁止明文密钥入配置 |
 | 灰度路由 | 确定性哈希（`user_id` 分桶） | 同一用户在同一 switch 周期内桶位稳定 | 灰度期间用户体验一致、归因干净 | 不用随机路由 |
@@ -180,7 +184,7 @@ flowchart LR
 
 ### 2.2 硬约束
 
-- **D-5 零 Agent 框架**：不引入 LiteLLM / OpenRouter SDK / 任何统一网关框架；统一适配层就是本模块的 `ProviderAdapter` Protocol + OpenAI-compatible 协议（§11.10 的手写实现）。
+- **D-5 零 Agent 框架**：不引入 LiteLLM / OpenRouter SDK / 任何统一网关框架；统一适配层就是本模块的 `ProviderAdapter` Protocol + 手写 wire adapter（`chat_completions` / `responses`，§11.10）。
 - **不新增 ReasonCode、不新增事件 kind**：失败复用 `MODEL_ERROR` / `CONTRACT_MISMATCH` 等既有码（v1.3 后共 17 个，ADR-001 新增 3 个）；降级提示复用 `notice` 事件（新增须走 M02 契约变更 + M10 回归门禁）。
 - **门禁不可绕过**：影子 / 灰度阶段的门禁位（回归结论、影子报告）缺失时，切换流程不得推进到下一状态；无在线跳过开关。
 - **CI 零真实外呼**：测试一律录制回放；`health_check` 在 CI 中以 fake 实现。
@@ -205,6 +209,8 @@ packages/agent_core/model/
     protocol.py              # ProviderAdapter Protocol + ProviderRequest/ResolvedModel
     registry.py              # 配置加载、校验、resolve(tier)、热加载、fail-fast
     adapter_openai_compat.py # OpenAI-compatible 通用 adapter（M03 provider.py 之上的参数化封装）
+    adapter_responses.py     # ★ v1.4 设计占位：Responses API wire adapter（未实现）
+    response_events.py       # ★ v1.4 设计占位：response.* 类型化事件 → Delta 归一（未实现）
     fallback.py              # 降级链执行 + RetryPolicy 装配
     shadow.py                # 影子跑批与 TraceExport 对比断言
     health.py                # health_check 周期探测 + 上报 M11
@@ -234,7 +240,7 @@ flowchart TB
   subgraph CORE["agent_core/model/providers"]
     REG["ProviderRegistry\n加载/校验 yaml、resolve(tier)、热加载"]
     CAP["CapabilityMatrix\n能力矩阵校验与查询"]
-    ADP["ProviderAdapter 实现\nopenai_compat 通用 adapter"]
+    ADP["ProviderAdapter 实现\nchat_completions / responses 两种 wire"]
     FB["FallbackChain\n档内备选 + RetryPolicy"]
     HL["HealthProbe\n周期 health_check → 上报 M11"]
     SH["ShadowRunner\n新旧 provider 同 dataset 对比"]
@@ -242,7 +248,8 @@ flowchart TB
   M07["M07 ModelGateway"] -->|resolve(tier)| REG
   REG --> CAP
   REG -->|ResolvedModel| ADP
-  ADP -->|complete/stream| M03["M03 provider.py + stream.py\nhttpx 直连 + SSE 分帧（不改）"]
+  ADP -->|complete/stream| M03["M03 provider.py + stream.py\nhttpx 直连 + SSE 分帧内核（不改）"]
+  ADP -->|类型化事件归一| RE["Responses 事件解码器\n【v1.4 设计占位，未实现】"]
   ADP -->|normalize_usage| U["M03 usage 归一（不改）"]
   FB --> REG
   HL --> ADP
@@ -259,7 +266,8 @@ flowchart TB
 |---|---|---|
 | `ProviderRegistry` | 加载 `model_providers.yaml`、Pydantic 严格校验、按 `model_config_version` 版本化、`resolve(tier)` 纯函数解析、配置热加载 | 启动时矩阵缺失 / schema 非法即拒绝启动；resolve 为纯函数：同 tier + 同配置版本必得同一 model_id |
 | `CapabilityMatrix` | 每个 model_id 的能力与单价登记、查询与校验 | 矩阵是 resolve 的强制依赖；缺失即 `CONTRACT_MISMATCH` 拒绝启动 |
-| `ProviderAdapter` | 每供应商的五方法实现（§4.1） | 无状态；同配置实例化两次行为一致；可被 fake 整体替换 |
+| `ProviderAdapter` | 每供应商的五方法实现（§4.1） | 无状态；同配置实例化两次行为一致；可被 fake 整体替换；按 `wire_api` 选 `chat_completions` / `responses` |
+| Responses 事件解码器【v1.4 设计占位，未实现】 | 把 `response.output_text.delta` / `response.completed` 等类型化事件归一为 `Delta`，终态不再依赖 `[DONE]` | M03 `\n\n` 分帧与半帧缓存内核不变；输出与 chat-completions wire 同构 |
 | `FallbackChain` | 档内 provider 有序备选；只对基础设施故障生效 | fallback 计数独立于 `repair_count`；链上每一步都有退避上限 |
 | `HealthProbe` | 周期 `health_check`，结果推 M11 | 只上报不决策；熔断判定归 M11 |
 | `ShadowRunner` | 新旧 provider 各跑同一 dataset，产出对比报告 | 断言只含确定性判据（轨迹 / 产物 / 分布）；不真实服务用户流量 |
@@ -272,9 +280,9 @@ flowchart TB
 1. M07 `ModelGateway.complete(messages, tier, stream=True)` 被调用（M07 §4.3 既有签名）。
 2. Gateway 调 `ProviderRegistry.resolve(tier)`：读当前生效 `model_config_version`，经该档 `tier_mapping` 取目标 model_id，组装 `ResolvedModel{provider, model_id, params: {temperature=0, max_tokens, timeout_s}, capability}`。
 3. Registry 校验 `ResolvedModel.model_id` 在能力矩阵中（启动已 fail-fast，此处为防御性再校验）。
-4. Gateway 用 `ResolvedModel` 取对应 `ProviderAdapter` 实例，调 `adapter.complete()`（内部走 M03 `provider.py` httpx 直连 + `stream.py` 分帧）。
-5. 响应 `usage` 经 `adapter.normalize_usage()` 归一为统一 `Usage{prompt_tokens, completion_tokens, total_tokens, provider, model, model_version}`（M07 §6.2 定义，零改动沿用）。
-6. 模型输出统一为 `{"tool","args"}` JSON 文本约定（M03 §11.6），**不使用原生 function calling**——任何能输出文本的兼容端点均可接入。
+4. Gateway 用 `ResolvedModel` 取对应 `ProviderAdapter` 实例，调 `adapter.complete()`；adapter 按 `wire_api` 走 `chat_completions`（M03 `provider.py` httpx 直连 + `stream.py` 分帧）或 `responses`（`/v1/responses` + 类型化事件解码，v1.4 设计占位未实现）。
+5. 响应 `usage` 经 `adapter.normalize_usage()` 归一为统一 `Usage{prompt_tokens, completion_tokens, total_tokens, provider, model, model_version}`（M07 §6.2 定义，零改动沿用）；Responses wire 的 `input_tokens` / `output_tokens` 走同一归一路径。
+6. 模型输出统一为 `{"tool","args"}` JSON 文本约定（M03 §11.6），**不使用原生 function calling，也不启用 Responses 内置工具**——任何能输出文本的端点均可接入。
 7. 供应商 429/5xx / 网络抖动 → `FallbackChain`（流程 C）。
 8. 归一 usage 交回 M07 计量（`cost_ledger`），事件与审计由 M07/M11 既有链路落库。
 
@@ -383,9 +391,10 @@ type ProviderHealth = "HEALTHY" | "DEGRADED" | "UNAVAILABLE";  // 只上报，�
 
 | 兼容项 | 机制 | 矩阵字段 |
 |---|---|---|
+| wire 协议【v1.4 设计占位，未实现】 | provider 级 `wire_api: chat_completions \| responses`：Responses 优先、chat-completions 兜底；两 wire 都向内核产出同构 `ModelOutput` / `Delta` / `Usage`，业务代码无感 | `wire_api`（provider 级配置，见 §6.2） |
 | usage 归一 | `adapter.normalize_usage()` 把各供应商 usage 字段（含可选 cost、思考 token 等变体）归一为 M07 既有 `Usage` 五字段结构；`prompt_tokens / completion_tokens / total_tokens` 三字段强制齐备，缺失即抛 `MODEL_ERROR`（计量不可缺） | `usage_fields_extra: string[]`【契约约定：登记供应商附加字段名，归一时丢弃或映射】 |
 | JSON mode | `json_mode: native` → 请求附加供应商的 json 输出参数（如 `response_format`，写入 `ProviderConfig.json_params`）；`prompt_only` → 纯 prompt-first。**本项目本就 prompt-first**（系统提示放 schema + 示例、final 严格校验、repair 回边，M03 §11.5），从不依赖 constrained decoding——native json_mode 只降低首轮格式出错概率，不影响校验与回边路径，因此两种取值天然兼容 | `json_mode: "native" \| "prompt_only"` |
-| SSE 分帧 | M03 `stream.py` 分帧内核（`\n\n` 分帧 + 半帧缓存 + UTF-8 解码）不变；per-provider 差异（CRLF 帧、无 `[DONE]`、usage 只在末帧、keep-alive 注释帧）由 adapter 的 frame post-processor 参数化处理，quirk 从能力矩阵读取 | `sse_quirks: string[]`【推导·需评审：值域建议 `crlf_frames / no_done_marker / usage_in_final_frame / comment_keepalive`】 |
+| SSE 分帧 | M03 `stream.py` 分帧内核（`\n\n` 分帧 + 半帧缓存 + UTF-8 解码）不变；chat-completions 的 delta 与 Responses 的 `response.output_text.delta` / `response.completed` 类型化事件由 wire 事件解码器各自归一；CRLF、keep-alive 等差异仍由 post-processor 处理 | `sse_quirks: string[]`【推导·需评审：值域建议 `crlf_frames / no_done_marker / usage_in_final_frame / comment_keepalive`】 |
 | 工具调用 | **不依赖原生 function calling**：模型输出统一为 `{"tool","args"}` JSON 文本约定，由 M03 自研解析器校验后分发（§11.6）；请求不携带 `tools` / `function_call` 参数 | 无需字段（全供应商一致行为） |
 | prompt caching | M07 固定槽位 1–2（系统契约 + 规程）为稳定 caching 前缀；供应商差异：`auto`（自动缓存无参数）、`explicit`（需在消息上打标记，标记参数写入 `ProviderConfig.caching_params`）、`none`（不支持，成本按全价计） | `prompt_caching: "auto" \| "explicit" \| "none"`【推导·需评审】 |
 | vision | 带附件任务至少 `standard` 档（M07 rubric）；若所选 model_id `vision=false` 且任务带附件视觉输入，resolve 阶段直接拒绝并沿档内链取下一支持项 | `vision: boolean` |
@@ -456,12 +465,12 @@ class ProviderAdapter(Protocol):
     """
 
     def complete(self, req: "ProviderRequest") -> "ModelOutput":
-        """非流式 / 聚合完成。内部经 M03 provider.py 直连 chat-completions
-        兼容端点；返回的 usage 必为归一结构（不变量 I5）。"""
+        """非流式 / 聚合完成。内部按 provider 的 wire_api 走 chat-completions
+        或 Responses API；返回的 usage 必为归一结构（不变量 I5）。"""
 
     def stream(self, req: "ProviderRequest") -> Iterator["Delta"]:
-        """流式完成。内部经 M03 stream.py 分帧 + 本 adapter 的 frame
-        post-processor 处理 sse_quirks；流中不触发任何副作用（M03 §11.5）。"""
+        """流式完成。内部经 M03 stream.py 分帧 + wire 事件解码器归一
+        （chat-completions delta / Responses 类型化事件）；流中不触发任何副作用（M03 §11.5）。"""
 
     def normalize_usage(self, raw: dict) -> "Usage":
         """供应商 usage 原始字段 → M07 统一 Usage。
@@ -558,6 +567,26 @@ def complete(messages, tier, stream=True) -> "ModelStream": ...
 | 运维切换状态查询接口 | **【推导·需评审】**（管理员只读） | 同步 | 是 | 是否入 openapi.yaml 待 M02 定稿 |
 | `notice` 降级 payload 字段 | **【契约约定】增量**（kind 不新增） | 流式 | — | §4.2 |
 | 灰度放量为 5%→50%→100%、旧快照保留 ≥30 天、探测周期 60s | **影子校准中** | — | — | §9 待决 |
+
+### 4.7 Responses API wire adapter（v1.4 设计增补，未实现）
+
+> 本节只冻结 wire 映射与配置字段；`adapter_responses.py` / `response_events.py` 本轮不落地，代码与测试均不改。
+
+| 维度 | `chat_completions`（现有） | `responses`（v1.4 设计） |
+|---|---|---|
+| 端点 | `POST {base_url}/chat/completions` | `POST {base_url}/responses` |
+| 请求 | `messages` + system/developer 角色 | `input` + `instructions` |
+| 文本输出 | `choices[0].message.content` | `output_text`，或 `output[]` 中 `type=message` 的 content parts |
+| 流式增量 | `choices[0].delta.content`，`[DONE]` 终止 | `response.output_text.delta` 产出文本，`response.completed` 终态；不依赖 `[DONE]` |
+| usage | `prompt_tokens / completion_tokens / total_tokens` | `input_tokens / output_tokens / total_tokens`，归一到同一 `Usage`（I5 三字段必填） |
+| 工具 | 不携带 `tools`；输出 `{"tool","args"}` JSON | 同样不启用原生 function calling / 内置工具；仍解析 `{"tool","args"}` JSON 文本 |
+| 多轮 | M03 重放完整 `messages` | M03 重放完整 `input`；不使用 `previous_response_id` / 服务端 `store` |
+
+**槽位映射**：M07 固定槽位「系统契约 + 规程」→ `instructions`；「检索片段 + 附件洞察 + 用户记忆 + 会话结论 + 当前用户输入」→ `input`（保持顺序，prompt caching 前缀不变）。映射是 adapter 内部行为，`ProviderRequest.messages` 与 M07 对外接口均不变。
+
+**不变式**：① M03 `\n\n` 分帧与半帧缓存内核零改动；② 输出 `Delta` / `ModelOutput` / `Usage` 与现有 wire 同构，上层 diff=0；③ 不在服务端保存响应状态（`store=false`），复现指纹仍由 M03 checkpoint + `model_config_version` 决定；④ 若某厂商的 Responses 实现缺 `response.completed` 或 usage 不在终态事件，登记进 `sse_quirks` 并按 I5 fail-fast，不静默产出无计量调用。
+
+**配置落点**（见 §6.2）：provider 级 `wire_api: responses`，配套 `responses: { store: false, use_previous_response_id: false, terminal_event: "response.completed" }`。
 
 ---
 
@@ -675,6 +704,7 @@ model_config_version: "v7"            # 沿用 M07 版本号；任何变更必�
 providers:
   provider_a:                         # key = provider name（adapter 实例化键）
     name: provider_a
+    wire_api: "chat_completions"      # chat_completions（默认）| responses【v1.4 设计占位】
     base_url: "https://api.provider-a.com/v1"    # 【安全】仅 HTTPS；上线域名白名单校验
     api_key_ref: "env:PROVIDER_A_API_KEY"        # 只引用 secret/env，密钥不落配置文件（R9）
     max_concurrency: 16               # 【推导·需评审】供应商侧并发上限
@@ -694,6 +724,11 @@ providers:
         params: { temperature: 0, max_tokens: 32768, timeout_s: 90 }
   provider_b:
     name: provider_b
+    wire_api: "responses"              # 【v1.4 设计占位】该 provider 支持 Responses API
+    responses:                         # Responses wire 参数（§4.7）
+      store: false                     # 不依赖服务端状态，历史由 M03 重放
+      use_previous_response_id: false  # 跨天恢复走 M03 checkpoint，不走供应商续接
+      terminal_event: "response.completed"
     base_url: "https://api.provider-b.com/v1"
     api_key_ref: "secret://llm/provider-b-key"   # secret manager 引用同样合法
     max_concurrency: 8
@@ -751,7 +786,7 @@ embedding_providers:                  # §6.4；切换规范见 §3.4 E
 embedding_active: "emb_a"             # 当前激活 embedding；切换必须走 §3.4 E 六步
 ```
 
-**schema 硬规则**：① `tier_mapping` 引用的 model_id 必须同时出现在该 provider 的 `models` 与 `capability_matrix`，否则启动失败（I2）；② `fallback_chain` 引用的 model_id 必须登记且 `tier_mapping` 包含该档；③ `api_key_ref` 值必须匹配 `env:*` 或 `secret://*` 前缀，其余形式校验失败；④ `base_url` 必须 HTTPS 且在上线域名白名单内【推导·需评审：防 SSRF，§8.5】；⑤ 三个档位的 `fallback_chain` 均不得为空。
+**schema 硬规则**：① `tier_mapping` 引用的 model_id 必须同时出现在该 provider 的 `models` 与 `capability_matrix`，否则启动失败（I2）；② `fallback_chain` 引用的 model_id 必须登记且 `tier_mapping` 包含该档；③ `api_key_ref` 值必须匹配 `env:*` 或 `secret://*` 前缀，其余形式校验失败；④ `base_url` 必须 HTTPS 且在上线域名白名单内【推导·需评审：防 SSRF，§8.5】；⑤ 三个档位的 `fallback_chain` 均不得为空；⑥【v1.4 设计占位】`wire_api` 只允许 `chat_completions | responses`，默认 `chat_completions`；选 `responses` 时 `responses.store` / `responses.use_previous_response_id` 必须为 `false`（违反即在启动校验拒绝，本轮仅冻结 schema 不实现）。
 
 ### 6.3 能力矩阵字段定义（`ModelCapability`）
 
@@ -769,6 +804,8 @@ embedding_active: "emb_a"             # 当前激活 embedding；切换必须走
 | `data_residency` | string【推导·需评审】 | — | 数据合规区域（§7） |
 
 > **【v1.3 ADR-001 D-8】端点能力位扩充**：新增 `embedding` 端点与 `classify`（低档分类）端点能力位，纳入能力矩阵与 `model_providers.yaml` 配置版本化。意图级联的语义路由模型（L2 embedding）与分类小模型（L3）经同一 Provider 抽象接入；切换流程（§3.4 A）同样适用于语义路由模型与分类小模型——其模型版本纳入 `repro_fingerprint`，由 M06 消费；对应变更按 M19 回归范围矩阵触发回归（intent_samples / 相似度阈值 / L3 分类器版本）。
+>
+> **【v1.4 设计占位】** wire 协议由 provider 级 `wire_api` 决定，不进入 per-model 能力矩阵：同一 provider 下多模型共享 wire；fallback 跨 wire 时只依赖归一后的 `ModelOutput` / `Usage`，不把 wire 差异泄漏给 M07。
 
 ### 6.4 `embedding_providers` 配置段与绑定关系
 
@@ -865,6 +902,8 @@ embedding_active: "emb_a"             # 当前激活 embedding；切换必须走
 | W16 | Given 旧 `retrieval_snapshot`（emb_a）；When 切换到 emb_b 后以旧快照复现历史任务；Then 检索结果与历史逐项一致 | 旧快照可回滚可复现 | 快照重放断言 |
 | W17 | Given 全测试套件执行；When 扫描外呼；Then 真实供应商 API 调用数 = 0；扫描全部日志 / 配置 / 报告对象，密钥明文命中 = 0 | CI 零外呼（I11）+ 密钥零泄漏（I12） | socket 探针 + 正则全量扫描 |
 | W18 | Given 请求日志落盘；When 检查；Then 每条仅含 provider/model/tier/token 数/耗时/状态码/首行截断摘要，无用户描述全文 | 日志脱敏（§7） | 日志结构断言 |
+| W19【v1.4 设计占位，未实现】 | Given Responses API 录制 fixture（`response.output_text.delta` + `response.completed`，末帧含 usage）；When `adapter_responses.stream()`；Then 产出与 chat-completions fixture 同构的 `Delta` 序列与 `Usage`，`stream.py` 分帧内核 diff=空、不依赖 `[DONE]` | wire 归一（§4.7） | fixture 回放断言 + 内核文件 diff=空 |
+| W20【v1.4 设计占位，未实现】 | Given 同题同配置，仅把 provider 的 `wire_api` 从 `chat_completions` 切到 `responses`；When 经 gateway 重跑；Then 业务代码 diff=0、轨迹 kind 序列与产物 hash 一致，仅 `Usage.provider/model` 允许变化 | 双 wire 等价（R12 / §4.7） | 代码库 diff=空 + 轨迹与产物断言 |
 
 ### 8.3 量化指标与阈值
 
@@ -887,7 +926,7 @@ embedding_active: "emb_a"             # 当前激活 embedding；切换必须走
 
 ### 8.4 出口条件（Definition of Done）
 
-- §8.2 的 W1–W18 全部通过且可自动化复跑；
+- §8.2 的 W1–W20 全部通过且可自动化复跑（W19/W20 为 v1.4 设计占位，adapter 落地后才纳入执行）；
 - `model_providers.schema.json` 并入 `packages/contracts` 并通过 M02 CI 一致性校验；
 - `ProviderAdapter` Protocol 与 M03 `ModelGateway` 注入接口的装配关系经 M03 评审确认（不改 L1/L2 与分帧内核）；
 - per-adapter 契约测试（录制回放）进入 CI 且全供应商覆盖；故障注入（429/5xx/超时/链耗尽/矩阵缺失/密钥缺失）全绿；
@@ -917,6 +956,7 @@ embedding_active: "emb_a"             # 当前激活 embedding；切换必须走
 | 项 | 说明 | 处理 / 责任建议 |
 |---|---|---|
 | `ProviderAdapter` Protocol 定稿 | 本模块新增接口，需与 M03 `ModelGateway` 注入接口、L1/L2 签名对齐 | **【推导·需评审】** M03 + M02 评审后固化到 `providers/protocol.py` |
+| Responses API 不是跨厂商通用协议（v1.4） | 各厂商 Responses 支持度与字段行为不一：部分缺失 `previous_response_id`、内置工具或统一终态事件 | 双 wire 策略：`responses` 仅用于支持厂商，`chat_completions` 兜底；不启用服务端状态与原生工具；差异登记 `sse_quirks`，缺关键事件即 fail-fast |
 | `model_providers.yaml` schema | 配置结构为【契约约定】，原文未给 | **【推导·需评审】** M02 固定 `model_providers.schema.json` 并入契约 CI |
 | 灰度放量的具体阶梯与观察窗口 | 原文只定稿「影子验证后再灰度」（D-4） | **【推导·需评审】** 建议 5%→50%→100%，每级观察窗口与 SLO 阈值由 M11 + M07 影子期校准 |
 | 旧索引快照保留窗口 | 原文未定 | **【推导·需评审】** 建议 ≥30 天，与「任何变更可回滚」（§9.2）对齐，存储成本随语料规模评估 |
@@ -938,6 +978,8 @@ embedding_active: "emb_a"             # 当前激活 embedding；切换必须走
 | 术语 | 本模块语境下的含义 |
 |---|---|
 | `ProviderAdapter` | 五方法 Protocol（complete/stream/normalize_usage/health_check/capabilities）；无状态、纯配置实例化、可被 fake 替换 |
+| `wire_api`【v1.4 设计占位】 | provider 级线协议选择：`chat_completions`（默认）或 `responses`；只影响 adapter 内部请求/事件映射，上层无感 |
+| Responses wire adapter【v1.4 设计占位】 | 把 `/v1/responses` 的 `input`/`instructions`、`output_text` 与类型化 SSE 事件归一到现有 `ModelOutput` / `Delta` / `Usage`；本轮未实现 |
 | `ProviderRegistry` | 加载与校验 `model_providers.yaml`、`resolve(tier)` 纯函数解析、热加载、fail-fast |
 | `model_providers.yaml` | 供应商配置单一事实来源；`model_config_version` 版本化、可 diff 可回滚、密钥只存引用 |
 | `能力矩阵` | 每个 model_id 的能力 / 单价 / quirk 登记；缺失即拒绝启动；分档 rubric 经 `tier_mapping` 落到 model_id |
@@ -959,6 +1001,7 @@ embedding_active: "emb_a"             # 当前激活 embedding；切换必须走
 |---|---|
 | 模型直连 httpx、usage 归一、换模型只改配置（本模块把它升级为多供应商切换体系） | §11.7、§2.5 |
 | 「新增供应商只加一个 adapter」（本模块给出 adapter 的接口规范与测试口径） | §11.10、§5 D4 验收 |
+| Responses API wire adapter（v1.4 设计增补，未实现） | §11.7、§12.1 v1.5 增补 |
 | 模型分档三档、阈值版本化、影子验证后再灰度（本模块的 `tier_mapping` 与切换门禁） | §0 D-4、§5 D4、§9.6 |
 | 模型变更触发回归门禁（本模块是触发源之一，执行在 M10） | §9.5、§5 D7、§11.9 第六层 |
 | 影子模式（本模块 ShadowRunner 的流程口径与流量隔离） | §9.1 |
