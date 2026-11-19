@@ -5,6 +5,7 @@ SessionRow 全字段（含 v1.3/v1.4 的 grid_source/clarify_count/
 clarification_answer/reason_code/evidence_ref）逐列映射，状态枚举用值存取。
 SQL 用 psycopg.sql.SQL 组合（静态列名常量），既满足类型检查又避免拼接注入。
 """
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -33,9 +34,9 @@ class PgSessionStore:
 
     def insert(self, row: SessionRow) -> None:
         """插入会话行（15 字段逐列映射）。"""
-        query = sql.SQL("INSERT INTO sessions ({}) VALUES ").format(_SELECT_COLS) + sql.SQL(
-            "(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
-        )
+        query = sql.SQL("INSERT INTO sessions ({}) VALUES ").format(
+            _SELECT_COLS
+        ) + sql.SQL("(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)")
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
             cur.execute(query, _row_params(row))
 
@@ -47,33 +48,44 @@ class PgSessionStore:
             row = cur.fetchone()
         return _to_session_row(row) if row else None
 
-    def update(self, row: SessionRow) -> None:
-        """写回全字段（生产 UPDATE；updated_at 由服务层刷新后带入）。"""
+    def update(
+        self, row: SessionRow, expected_state: SessionState | None = None
+    ) -> None:
+        """写回全字段（S2：expected_state 非空时加乐观锁 WHERE，0 行抛 ValueError）。"""
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            # S2：乐观锁——带 expected_state 时 WHERE 多一个前态条件，
+            # 并发下只有一个请求的 UPDATE 命中（0 行即冲突）
+            where = "WHERE id = %s"
+            params: list[object] = [
+                row.state.value
+                if isinstance(row.state, SessionState)
+                else str(row.state),
+                row.title,
+                row.grid,
+                row.grid_source,
+                row.clarify_count,
+                row.clarification_answer,
+                row.last_seq,
+                row.checkpoint_rev,
+                row.run_id,
+                row.reason_code,
+                row.evidence_ref,
+                row.updated_at,
+            ]
+            # WHERE 参数顺序须与 SQL 一致：先 id（WHERE id=%s），再 expected（AND state=%s）
+            params.append(row.id)
+            if expected_state is not None:
+                where += " AND state = %s"
+                params.append(expected_state.value)
             cur.execute(
                 "UPDATE sessions SET state = %s, title = %s, grid = %s, "
                 "grid_source = %s, clarify_count = %s, clarification_answer = %s, "
                 "last_seq = %s, checkpoint_rev = %s, run_id = %s, "
-                "reason_code = %s, evidence_ref = %s, updated_at = %s "
-                "WHERE id = %s",
-                (
-                    row.state.value
-                    if isinstance(row.state, SessionState)
-                    else str(row.state),
-                    row.title,
-                    row.grid,
-                    row.grid_source,
-                    row.clarify_count,
-                    row.clarification_answer,
-                    row.last_seq,
-                    row.checkpoint_rev,
-                    row.run_id,
-                    row.reason_code,
-                    row.evidence_ref,
-                    row.updated_at,
-                    row.id,
-                ),
+                "reason_code = %s, evidence_ref = %s, updated_at = %s " + where,
+                tuple(params),
             )
+            if expected_state is not None and cur.rowcount == 0:
+                raise ValueError("CONFLICT: state changed by another request")
 
     def list_by_user(self, user_id: str) -> list[SessionRow]:
         """按 user_id 过滤列出会话（租户隔离，§7）。"""

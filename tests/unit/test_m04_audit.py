@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 
 from services.control_plane.audit.ledger import AuditActions, AuditLedger
+from services.control_plane.sessions.service import SessionService
+from services.control_plane.sessions.stores import InMemorySessionStore
 
 
 @pytest.fixture
@@ -32,11 +34,39 @@ class TestAuditChain:
         ledger._rows[0].payload["rev"] = 999  # type: ignore[attr-defined]
         assert not ledger.chain_valid()
 
+    def test_tamper_action_detected(self, ledger: AuditLedger) -> None:
+        """S6 回归：篡改 action（非 payload 字段）也必须被 hash 链检出。"""
+        ledger.append("u1", "s1", AuditActions.RESUME, "OK", {}, "t1")
+        # frozen dataclass：用 object.__setattr__ 模拟存储层被篡改
+        object.__setattr__(ledger._rows[0], "action", AuditActions.DENY)  # type: ignore[attr-defined]
+        assert not ledger.chain_valid()
+
     def test_by_session_filters(self, ledger: AuditLedger) -> None:
         """按会话过滤审计事件（M11 重放入口）。"""
         ledger.append("u1", "s1", AuditActions.CANCEL, "OK", {}, "t1")
         ledger.append("u1", "s2", AuditActions.CANCEL, "OK", {}, "t2")
         assert len(ledger.by_session("s1")) == 1
+
+    def test_session_service_writes_audit(self, ledger: AuditLedger) -> None:
+        """S1 回归：SessionService 状态迁移实时写审计账本（R10 生产接线）。"""
+        svc = SessionService(InMemorySessionStore(), audit=ledger)
+        sid = svc.create("u1", "t", "4x4").id
+        svc.submit_message(sid, "u1", "desc", [])
+        svc.interrupt(sid, "u1")
+        rows = ledger.by_session(sid)
+        assert len(rows) == 2  # 提交 + 打断
+        assert rows[0].action == AuditActions.STATE_TRANSITION
+        assert rows[1].action == AuditActions.INTERRUPT
+        assert ledger.chain_valid()
+
+    def test_awaiting_reason_code_in_audit(self, ledger: AuditLedger) -> None:
+        """N2 回归：reason_code 不再死参数——SPEC_MISSING 进审计 decision 字段。"""
+        svc = SessionService(InMemorySessionStore(), audit=ledger)
+        sid = svc.create("u1", "t", None).id
+        svc.submit_message(sid, "u1", "desc", [])
+        svc.mark_awaiting_input(sid, "u1", "SPEC_MISSING")
+        rows = ledger.by_session(sid)
+        assert rows[-1].decision == "SPEC_MISSING"
 
     def test_deny_audit_records_no_pii(self, ledger: AuditLedger) -> None:
         """越权拒绝写审计，但 payload 不含资源内容（§7 合规）。"""

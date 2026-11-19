@@ -86,6 +86,29 @@ class TestPgLease:
         assert lease_a is not None
         assert lease_b is None  # 第二抢锁者被 UPDATE ... WHERE 挡回
 
+    def test_lease_survives_checkpoint_save(self) -> None:
+        """B2 回归：持锁 worker 写新 rev 后，第二 worker 不能抢占（单持锁者贯穿 super-step）。
+
+        拷问实测：修复前 save() 插入的新 rev 行 lease_owner 为 NULL，
+        acquire 锁在 MAX(rev) 行上 → 新行可被二次抢锁（双 worker 并发）。
+        """
+        provider = PgLeaseProvider(PG_DSN)
+        run_id = f"run-{uuid4()}"
+        lease_a = provider.acquire(run_id, "worker-a", ttl_s=30)
+        assert lease_a is not None
+        store = PgCheckpointStore(PG_DSN, object_get=lambda ref: b"{}")
+        # 持锁期间写两个新 checkpoint rev（模拟 super-step 落盘）
+        for rev in (1, 2):
+            store.save(
+                run_id,
+                rev,
+                CheckpointNode.FINAL,
+                f"checkpoint/{run_id}/{rev}.json",
+                f"h{rev}",
+            )
+        # 新 max rev 行仍应带 worker-a 的租约 → B 抢不到
+        assert provider.acquire(run_id, "worker-b", ttl_s=30) is None
+
     def test_expired_lease_takeover(self) -> None:
         """租约过期后另一 worker 可接管（A3 崩溃恢复的 SQL 判定）。"""
         provider = PgLeaseProvider(PG_DSN)
@@ -199,14 +222,34 @@ class TestPgStores:
         store = PgSessionStore(PG_DSN)
         svc = SessionService(store)
         sid = str(uuid4())
-        row = SessionRow(id=sid, user_id="pg-user", state=SessionState.DRAFT, grid="4x4")
+        row = SessionRow(
+            id=sid, user_id="pg-user", state=SessionState.DRAFT, grid="4x4"
+        )
         store.insert(row)
-        svc.submit_message(sid, "desc", [])
+        svc.submit_message(sid, "pg-user", "desc", [])
         assert PgSessionStore(PG_DSN).get(sid).state is SessionState.RUNNING  # type: ignore[union-attr]
-        svc.interrupt(sid)
+        svc.interrupt(sid, "pg-user")
         assert PgSessionStore(PG_DSN).get(sid).state is SessionState.PAUSED  # type: ignore[union-attr]
-        svc.resume(sid)
+        svc.resume(sid, "pg-user")
         assert PgSessionStore(PG_DSN).get(sid).state is SessionState.RUNNING  # type: ignore[union-attr]
+
+    def test_optimistic_lock_rejects_stale_transition(self) -> None:
+        """S2 回归：两个服务实例持同一会话旧态并发迁移，后者因乐观锁失败。"""
+        from services.control_plane.sessions.service import ConflictError
+
+        store = PgSessionStore(PG_DSN)
+        svc_a = SessionService(store)
+        svc_b = SessionService(store)  # 模拟另一个 worker 的独立实例
+        sid = str(uuid4())
+        store.insert(SessionRow(id=sid, user_id="u", state=SessionState.DRAFT))
+        # A 先提交 DRAFT→RUNNING
+        svc_a.submit_message(sid, "u", "desc", [])
+        # B 拿到的仍是过期的 DRAFT 快照，尝试迁移应被乐观锁拒绝
+        stale = store.get(sid)
+        assert stale is not None
+        stale.state = SessionState.DRAFT  # 模拟 B 读到的旧态
+        with pytest.raises(ConflictError):
+            svc_b._commit(stale, SessionState.DRAFT)
 
     def test_session_tenant_isolation(self) -> None:
         """跨用户读会话由 TenantGuard 拒绝（A1，PG 存储路径）。"""
@@ -222,9 +265,13 @@ class TestPgStores:
     def test_auth_with_pg_store_end_to_end(self) -> None:
         """AuthService 注入 PgUserStore：注册→登录→JWT，全链路 PG（生产同构）。"""
         store = PgUserStore(PG_DSN)
-        auth = AuthService(store, jwt_secret="test-secret-not-production-32bytes-minimum")
+        auth = AuthService(
+            store, jwt_secret="test-secret-not-production-32bytes-minimum"
+        )
         result = auth.register(f"auth-{uuid4()}@example.com", "pass-phrase")
         # 用新 AuthService + 新 store 实例登录，证明凭据与 token 跨实例有效
-        auth2 = AuthService(PgUserStore(PG_DSN), jwt_secret="test-secret-not-production-32bytes-minimum")
+        auth2 = AuthService(
+            PgUserStore(PG_DSN), jwt_secret="test-secret-not-production-32bytes-minimum"
+        )
         logged = auth2.login(result.user.email, "pass-phrase")
         assert auth2.decode_access(logged.access_token).user_id == result.user.id

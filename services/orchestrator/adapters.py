@@ -24,6 +24,7 @@ from typing import Final
 import redis
 
 from packages.agent_core.types import AgentEvent, CheckpointNode, State
+from services.control_plane.accounts.constants import LEASE_TTL_S
 
 # 事件解码由调用方注入（Stream data → AgentEvent），避免适配器重实现 schema 还原（规则 8）
 type EventDecoder = Callable[[str], AgentEvent | None]
@@ -90,11 +91,16 @@ class PgCheckpointStore:
         import psycopg
 
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
+            # B2 修复：新 rev 行继承同 run 最新行的租约（run 级租约，不随 checkpoint 丢）。
+            # 子查询取 MAX(rev) 行的 owner/until；首行（无前行）自然为 NULL = 空闲。
             cur.execute(
                 "INSERT INTO checkpoint "
-                "(run_id, rev, node, state_ref, prev_hash, created_at) "
-                "VALUES (%s, %s, %s, %s, %s, now())",
-                (run_id, rev, node.value, state_ref, prev_hash),
+                "(run_id, rev, node, state_ref, prev_hash, lease_owner, lease_until, created_at) "
+                "SELECT %s, %s, %s, %s, %s, "
+                "  (SELECT lease_owner FROM checkpoint WHERE run_id = %s ORDER BY rev DESC LIMIT 1), "
+                "  (SELECT lease_until FROM checkpoint WHERE run_id = %s ORDER BY rev DESC LIMIT 1), "
+                "  now()",
+                (run_id, rev, node.value, state_ref, prev_hash, run_id, run_id),
             )
 
     def load(self, run_id: str) -> State | None:
@@ -209,11 +215,12 @@ class PgLeaseProvider:
 
         with psycopg.connect(self._dsn) as conn:
             with conn.cursor() as cur:
+                # B2：租约 TTL 引用常量（M02 Q4），不再硬编码 30s
                 cur.execute(
-                    "UPDATE checkpoint SET lease_until = now() + interval '30 seconds' "
+                    "UPDATE checkpoint SET lease_until = now() + (%s * interval '1 second') "
                     "WHERE run_id = %s AND lease_owner = %s AND lease_until >= now() "
                     "RETURNING run_id",
-                    (run_id, owner),
+                    (LEASE_TTL_S, run_id, owner),
                 )
                 renewed = cur.fetchone() is not None
             conn.commit()

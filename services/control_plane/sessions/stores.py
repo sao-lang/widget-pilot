@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
@@ -61,8 +61,10 @@ class SessionStore(Protocol):
         """按 id 查会话，无则 None。"""
         ...
 
-    def update(self, row: SessionRow) -> None:
-        """写回变更后的会话行。"""
+    def update(
+        self, row: SessionRow, expected_state: SessionState | None = None
+    ) -> None:
+        """写回变更后的会话行；expected_state 非空时为乐观锁（不符抛冲突）。"""
         ...
 
     def list_by_user(self, user_id: str) -> list[SessionRow]:
@@ -82,11 +84,19 @@ class InMemorySessionStore:
         self._rows[row.id] = row
 
     def get(self, session_id: str) -> SessionRow | None:
-        """按 id 查会话，无则返回 None。"""
-        return self._rows.get(session_id)
+        """按 id 查会话快照（返回副本，改后须显式 update；对齐 PG fetchone 语义）。"""
+        row = self._rows.get(session_id)
+        return replace(row) if row is not None else None
 
-    def update(self, row: SessionRow) -> None:
+    def update(
+        self, row: SessionRow, expected_state: SessionState | None = None
+    ) -> None:
         """写回变更后的会话行（内存即覆盖；生产为 PG UPDATE）。"""
+        # S2：乐观锁——前态不符说明并发已被他人改过（规则 10 不丢更新）
+        if expected_state is not None:
+            current = self._rows.get(row.id)
+            if current is not None and current.state is not expected_state:
+                raise ValueError("CONFLICT: state changed by another request")
         row.updated_at = datetime.now(UTC)
         self._rows[row.id] = row
 

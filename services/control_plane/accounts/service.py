@@ -12,7 +12,7 @@ from uuid import uuid4
 
 import jwt
 from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError
+from argon2.exceptions import InvalidHashError, VerificationError
 
 from packages.contracts.enums import UserRole
 from services.control_plane.accounts.constants import (
@@ -98,18 +98,26 @@ class AuthService:
             raise AuthError("invalid credentials")
         try:
             self._hasher.verify(row.password_hash, password)
-        except VerifyMismatchError as exc:
+        except (VerificationError, InvalidHashError) as exc:
+            # S3：验证码不匹配、hash 损坏（非 VerificationError 子类）统一折叠，
+            # 避免脏 hash 泄漏 500；仍不区分「用户不存在」，防枚举
             raise AuthError("invalid credentials") from exc
         return self._issue_pair(row)
 
     def refresh(self, refresh_token: str) -> str:
-        """用 refresh token 换发新 access token（M02 Q3 路径）。"""
+        """用 refresh token 换发新 access token（M02 Q3 路径）。
+
+        B3 修复：用户必须仍存在才签发；角色取 DB 最新值而非 token claims，
+        避免删除/降权后凭旧 role 换发越权令牌（§7 服务端权限裁剪）。
+        """
         claims = self._decode(refresh_token)
         if claims.token_type != TOKEN_TYPE_REFRESH:
             raise AuthError("wrong token type")  # 防 access 当 refresh 用
-        return self._issue_access(
-            self.store.find_by_id(claims.user_id) or self._claims_to_row(claims)
-        )
+        user = self.store.find_by_id(claims.user_id)
+        # 用户已删除/不存在 → 拒绝（不再用 _claims_to_row 兜底旧角色）
+        if user is None:
+            raise AuthError("invalid token")
+        return self._issue_access(user)  # 用 DB 最新 role，不用 claims.role
 
     def decode_access(self, token: str) -> TokenClaims:
         """解码并校验 access token；类型/签名不符抛 AuthError。"""
@@ -164,13 +172,4 @@ class AuthService:
             user_id=str(payload["sub"]),
             role=role,
             token_type=str(payload.get("type", TOKEN_TYPE_ACCESS)),
-        )
-
-    def _claims_to_row(self, claims: TokenClaims) -> UserRow:
-        """refresh 时用户已被删的兜底：构造最小行仅用于再签发（保留 user_id/role）。"""
-        return UserRow(
-            id=claims.user_id,
-            email="",
-            password_hash="",
-            role=claims.role,
         )

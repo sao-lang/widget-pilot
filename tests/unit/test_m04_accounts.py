@@ -66,6 +66,20 @@ class TestRegisterLogin:
         with pytest.raises(AuthError):
             auth.login("nobody@example.com", "any-pass")
 
+    def test_login_corrupt_hash_rejected(self, auth: AuthService) -> None:
+        """S3 回归：DB 中 hash 损坏时 login 抛 AuthError，不泄漏 500。"""
+        from services.control_plane.accounts.stores import UserRow
+
+        auth.store.insert(
+            UserRow(
+                id="corrupt-user",
+                email="corrupt@example.com",
+                password_hash="not-a-valid-argon2-hash",
+            )
+        )
+        with pytest.raises(AuthError):
+            auth.login("corrupt@example.com", "any-pass")
+
 
 class TestJWT:
     """JWT 签发与校验：携带 user_id/role，失效拒绝。"""
@@ -90,3 +104,12 @@ class TestJWT:
         new_access = auth.refresh(result.refresh_token)
         claims = auth.decode_access(new_access)
         assert claims.user_id == result.user.id
+
+    def test_refresh_rejects_deleted_user(self, auth: AuthService) -> None:
+        """B3 回归：用户被删后 refresh 必须失败，不得凭旧 role 签发令牌（§7）。"""
+        result = auth.register("deleted@example.com", "pass-phrase")
+        # 模拟账号删除：清内存存储（测试直接操作桩，生产为 PG DELETE）
+        auth.store._by_id.pop(result.user.id, None)  # type: ignore[attr-defined]
+        auth.store._by_email.pop("deleted@example.com", None)  # type: ignore[attr-defined]
+        with pytest.raises(AuthError):
+            auth.refresh(result.refresh_token)

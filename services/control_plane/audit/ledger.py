@@ -56,6 +56,29 @@ class AuditActions:
     """越权拒绝。"""
 
 
+def _canonical_body(
+    user_id: str,
+    session_id: str,
+    action: str,
+    decision: str,
+    payload: AuditPayload,
+    trace_id: str,
+) -> str:
+    """审计证据的规范化字节源（S6：全字段入链，sort_keys 保证可重算一致）。"""
+    return json.dumps(
+        {
+            "user_id": user_id,
+            "session_id": session_id,
+            "action": action,
+            "decision": decision,
+            "payload": payload,
+            "trace_id": trace_id,
+        },
+        sort_keys=True,
+        default=str,
+    )
+
+
 class AuditLedger:
     """只追加审计账本（内存实现；生产为 PG append-only 表）。"""
 
@@ -74,8 +97,8 @@ class AuditLedger:
     ) -> AuditEventRow:
         """追加一条审计事件，计算 prev_hash/chain_hash 成链。"""
         prev = self._rows[-1].chain_hash if self._rows else ""
-        # 规范化payload（sort_keys）保证 hash 可重算一致（A18）
-        body = json.dumps(payload, sort_keys=True, default=str)
+        # S6：整行证据字段入链（不只 payload），篡改 action/user_id/decision 也能被发现（A18）
+        body = _canonical_body(user_id, session_id, action, decision, payload, trace_id)
         chain = hashlib.sha256((prev + body).encode("utf-8")).hexdigest()
         row = AuditEventRow(
             seq=len(self._rows),
@@ -96,7 +119,14 @@ class AuditLedger:
         """重算整条 hash 链，任一环断裂返回 False（A18：可完整重放）。"""
         prev = ""
         for row in self._rows:
-            body = json.dumps(row.payload, sort_keys=True, default=str)
+            body = _canonical_body(
+                row.user_id,
+                row.session_id,
+                row.action,
+                row.decision,
+                row.payload,
+                row.trace_id,
+            )
             expected = hashlib.sha256((prev + body).encode("utf-8")).hexdigest()
             if row.prev_hash != prev or row.chain_hash != expected:
                 return False

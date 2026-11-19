@@ -52,6 +52,13 @@ class LoginReq(BaseModel):
     password: str
 
 
+class RefreshReq(BaseModel):
+    """刷新令牌请求体（M02 Q3 定稿端点）。"""
+
+    model_config = ConfigDict(extra="forbid")
+    refresh_token: str
+
+
 class CreateSessionReq(BaseModel):
     """新建会话请求体（v1.3：grid 可选）。"""
 
@@ -149,6 +156,17 @@ def create_app(
             }
         )
 
+    @app.post("/api/auth/refresh")
+    def refresh(req: RefreshReq) -> dict[str, Any]:
+        """S4：刷新 access token（M02 Q3 定稿路径；失效 refresh → 401）。"""
+        try:
+            access = auth.refresh(req.refresh_token)
+        except AuthError as exc:
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED, _CODE_UNAUTHORIZED
+            ) from exc
+        return _ok({"access_token": access})
+
     @app.get("/api/sessions")
     def list_sessions(user: UserRow = CurrentUser) -> dict[str, Any]:
         """会话列表：按 user_id 隔离（§4.1）。"""
@@ -184,7 +202,7 @@ def create_app(
         """提交描述：DRAFT→RUNNING，202 已受理（§5.5 异步语义）。"""
         try:
             row = sessions.submit_message(
-                session_id, req.description, req.attachment_ids
+                session_id, user.id, req.description, req.attachment_ids
             )
         except ForbiddenError as exc:
             raise HTTPException(status.HTTP_403_FORBIDDEN, _CODE_FORBIDDEN) from exc
@@ -220,8 +238,13 @@ def create_app(
 
     @app.post("/api/sessions/{session_id}/interrupt")
     def interrupt(session_id: str, user: UserRow = CurrentUser) -> dict[str, Any]:
-        """打断：幂等（A6）。"""
-        row = sessions.interrupt(session_id)
+        """打断：幂等（A6）；越权 403 / 状态冲突 409。"""
+        try:
+            row = sessions.interrupt(session_id, user.id)
+        except ForbiddenError as exc:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, _CODE_FORBIDDEN) from exc
+        except ConflictError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, _CODE_CONFLICT) from exc
         return _ok(
             {
                 "state": row.state.value,
@@ -232,24 +255,36 @@ def create_app(
 
     @app.post("/api/sessions/{session_id}/resume")
     def resume(session_id: str, user: UserRow = CurrentUser) -> dict[str, Any]:
-        """继续：终态 409（A13）。"""
+        """继续：终态 409（A13）；越权 403。"""
         try:
-            row = sessions.resume(session_id)
+            row = sessions.resume(session_id, user.id)
+        except ForbiddenError as exc:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, _CODE_FORBIDDEN) from exc
         except ConflictError as exc:
             raise HTTPException(status.HTTP_409_CONFLICT, _CODE_CONFLICT) from exc
         return _ok({"state": row.state.value, "runId": row.run_id})
 
     @app.post("/api/sessions/{session_id}/cancel")
     def cancel(session_id: str, user: UserRow = CurrentUser) -> dict[str, Any]:
-        """取消：任意非终态→CANCELLED。"""
-        row = sessions.cancel(session_id)
+        """取消：任意非终态→CANCELLED；越权 403。"""
+        try:
+            row = sessions.cancel(session_id, user.id)
+        except ForbiddenError as exc:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, _CODE_FORBIDDEN) from exc
         return _ok({"state": row.state.value})
 
     # 测试钩子：把会话置为 AWAITING_INPUT（生产由 M06 语义层触发，此处仅供接线测试）
     @app.post("/api/sessions/{session_id}/_test_awaiting")
     def test_awaiting(session_id: str, user: UserRow = CurrentUser) -> dict[str, Any]:
         """测试专用：模拟语义层判定转 AWAITING_INPUT（生产环境不注册此路由）。"""
-        row = sessions.mark_awaiting_input(session_id, "CLARIFICATION_REQUIRED")
+        try:
+            row = sessions.mark_awaiting_input(
+                session_id, user.id, "CLARIFICATION_REQUIRED"
+            )
+        except ForbiddenError as exc:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, _CODE_FORBIDDEN) from exc
+        except ConflictError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, _CODE_CONFLICT) from exc
         return _ok({"state": row.state.value})
 
     return app

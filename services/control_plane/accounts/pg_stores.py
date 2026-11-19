@@ -4,6 +4,7 @@
 协议 + 默认/生产双实现，装配期由 main.py 选择）。email 唯一性由 PG
 UNIQUE 约束保证，冲突映射为 DuplicateEmailError（register 409）。
 """
+
 from __future__ import annotations
 
 import json
@@ -80,7 +81,9 @@ def _to_user_row(row: tuple[object, ...]) -> UserRow:
     except ValueError:
         role = UserRole.USER
     raw_quota = row[5]
-    quota = raw_quota if isinstance(raw_quota, dict) else json.loads(str(raw_quota or "{}"))
+    quota = (
+        raw_quota if isinstance(raw_quota, dict) else json.loads(str(raw_quota or "{}"))
+    )
     return UserRow(
         id=str(row[0]),
         email=str(row[1]),

@@ -51,6 +51,16 @@ class TestAuthEndpoints:
         assert data["refresh_token"]
         assert data["user"]["role"] == "user"
 
+    def test_refresh_endpoint_returns_access(self, client: TestClient) -> None:
+        """S4：POST /api/auth/refresh 用 refresh token 换回新 access token。"""
+        data = _register(client, "refresh-api@example.com")
+        resp = client.post(
+            "/api/auth/refresh",
+            json={"refresh_token": data["refresh_token"]},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["data"]["access_token"]
+
     def test_login_wrong_password_401(self, client: TestClient) -> None:
         """密码错误返回 401 + code（§4.1 login 401）。"""
         _register(client, "api-b@example.com")
@@ -103,6 +113,27 @@ class TestSessionEndpoints:
         """无 token 访问会话端点 → 401。"""
         resp = client.get("/api/sessions")
         assert resp.status_code == 401
+
+    def test_cross_user_signal_endpoints_403(self, client: TestClient) -> None:
+        """B1 回归：用户 B 对 A 的会话发 signal（cancel/interrupt/messages）一律 403。
+
+        拷问实测：修复前 B 可 cancel A 的会话（HTTP 200）导致状态被篡改。
+        """
+        token_a = _register(client, "sig-owner@example.com")["access_token"]
+        sid = client.post(
+            "/api/sessions", json={"title": "t"}, headers=_auth(token_a)
+        ).json()["data"]["id"]
+        token_b = _register(client, "sig-attacker@example.com")["access_token"]
+        hdr_b = _auth(token_b)
+        # 三个 signal 端点：任一返回 200/500 都是缺陷
+        for path, body in (
+            ("messages", {"description": "hack", "attachment_ids": []}),
+            ("interrupt", {}),
+            ("resume", {}),
+            ("cancel", {}),
+        ):
+            resp = client.post(f"/api/sessions/{sid}/{path}", json=body, headers=hdr_b)
+            assert resp.status_code == 403, f"{path} 越权未被拒：{resp.status_code}"
 
     def test_clarification_flow(self, client: TestClient) -> None:
         """澄清端点回注答案（P0-2 落点经 HTTP 验证）。"""
