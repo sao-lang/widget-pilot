@@ -16,6 +16,11 @@ dependencies = [
     "tiktoken>=0.8",        # M03/M07/M10：纯 token 计数
     "Pillow>=11.0",         # M05：图片只读解码
     "jsonschema>=4.23",     # M06/M02：JSON Schema 校验器
+    # M04 §2 技术栈：认证与租户基座的运行期依赖
+    "PyJWT>=2.8",           # M04：JWT 签发/校验（access + refresh）
+    "argon2-cffi>=23.1",    # M04：密码哈希（只存 hash）
+    "redis>=5.0",           # M04：Redis Streams 队列/SSE 扇出/限流
+    "bcrypt>=4.0",          # M04：密码哈希备选（argon2 不可用时）
 ]
 
 [dependency-groups]

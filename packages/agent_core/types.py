@@ -38,6 +38,15 @@ type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, J
 type JsonObject = dict[str, JsonValue]
 """JSON 对象（键值均为 :data:`JsonValue`），作为不确定结构的统一聚集类型。"""
 
+
+def _json_str(value: JsonValue | None) -> str | None:
+    """把 JSON 边界的宽泛值收窄为 str|None（跨天恢复反序列化用）。
+
+    非字符串值（异常的历史快照）返回 None 而非抛错，保持恢复路径 fail-safe。
+    """
+    return value if isinstance(value, str) else None
+
+
 type RepairIssue = str | JsonObject
 """一条校验错误：可为简短字符串，或 ``{field, expected, got}`` 结构化字典。"""
 
@@ -507,6 +516,50 @@ class State:
                 "finished_at": self.terminal.finished_at,
             },
         }
+
+    @classmethod
+    def from_snapshot(cls, data: StateSnapshot) -> State:
+        """从 snapshot() 产出的纯 dict 还原 State（跨天恢复的反序列化边界）。
+
+        与 :meth:`snapshot` 互逆；生产适配器从对象存储读回 JSON 后走此入口
+        （M04 §3.4 checkpoint 恢复 step 3）。动态 JSON 在此一处收敛为具名视图
+        （编码规则 6），下游只访问 State 的具名字段。
+        """
+        raw = data
+        # spec 由 SpecState 严格校验（Pydantic，额外字段拒绝）
+        spec = SpecState.model_validate(raw["spec"])
+        # terminal 为可选嵌套结构，按 TerminalKind 枚举还原（未知值显式回退）
+        terminal: Terminal | None = None
+        term_raw = raw.get("terminal")
+        if term_raw is not None:
+            # JsonValue 是宽泛联合；terminal 各字段在 snapshot() 中均为 str|None 写入，
+            # 此处显式收窄回 str|None（规则 6：动态边界单一处归一化）
+            kind = TerminalKind.coerce(_json_str(term_raw.get("kind")) or "")
+            terminal = Terminal(
+                kind=kind,
+                reason_code=_json_str(term_raw.get("reason_code")),
+                bundle_ref=_json_str(term_raw.get("bundle_ref")),
+                evidence_ref=_json_str(term_raw.get("evidence_ref")),
+                finished_at=_json_str(term_raw.get("finished_at")) or "",
+            )
+        return cls(
+            session_id=str(raw["session_id"]),
+            run_id=str(raw["run_id"]),
+            rev=int(raw["rev"]),
+            seq=int(raw["seq"]),
+            phase=SessionState(str(raw["phase"])),
+            iteration=int(raw["iteration"]),
+            repair_count=int(raw["repair_count"]),
+            clarify_count=int(raw["clarify_count"]),
+            spec=spec,
+            diff_ref=raw.get("diff_ref"),
+            excluded_approaches=list(raw.get("excluded_approaches") or []),
+            budget_used=cast(BudgetUsage, dict(raw.get("budget_used") or {})),
+            tier_history=list(raw.get("tier_history") or []),
+            last_error_fingerprint=raw.get("last_error_fingerprint"),
+            clarification_answer=raw.get("clarification_answer"),
+            terminal=terminal,
+        )
 
 
 # ---------------------------------------------------------------------------
