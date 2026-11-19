@@ -27,6 +27,20 @@ def client() -> TestClient:
     return TestClient(app)
 
 
+def _sse_client() -> tuple[TestClient, object]:
+    """构造带 SSE 事件源的 app（测试注入内存窗口，验证流式端点接线）。"""
+    from services.control_plane.sessions.sse import SSEWindow
+
+    window = SSEWindow(window_n=500)
+    app = create_app(
+        user_store=InMemoryUserStore(),
+        session_store=InMemorySessionStore(),
+        jwt_secret="test-secret-not-production-32bytes-minimum",
+        event_source=window,
+    )
+    return TestClient(app), window
+
+
 def _register(client: TestClient, email: str) -> dict:
     """注册并取 token。"""
     resp = client.post(
@@ -156,3 +170,56 @@ class TestSessionEndpoints:
         )
         assert answered.status_code == 202
         assert answered.json()["data"]["state"] == "RUNNING"
+
+
+class TestSSEEventsEndpoint:
+    """GET /api/sessions/{id}/events：帧格式 / 续传 / 租户隔离（§4.1 L359/L363）。"""
+
+    def test_events_stream_frames_and_resume(self) -> None:
+        """SSE 帧格式 + Last-Event-ID 续传（只补 seq 之后的事件，无重复）。"""
+        from services.control_plane.sessions.sse import SSEWindow
+
+        client, source = _sse_client()
+        assert isinstance(source, SSEWindow)
+        token = _register(client, "sse-owner@example.com")["access_token"]
+        hdr = _auth(token)
+        sid = client.post("/api/sessions", json={"title": "sse"}, headers=hdr).json()[
+            "data"
+        ]["id"]
+        for seq in (1, 2, 3):
+            source.emit(seq, "run", {"n": seq})
+
+        resp = client.get(
+            f"/api/sessions/{sid}/events",
+            params={"runId": "run-1"},
+            headers=hdr,
+        )
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/event-stream")
+        assert resp.headers["cache-control"] == "no-cache"
+        assert resp.headers["x-accel-buffering"] == "no"
+        body = resp.text
+        assert "id: 1\nevent: run\ndata: " in body
+        assert "id: 3\n" in body
+        assert ": keepalive" in body
+
+        # 续传：Last-Event-ID=1 → 只返回 2、3
+        resumed = client.get(
+            f"/api/sessions/{sid}/events",
+            params={"runId": "run-1"},
+            headers={**hdr, "Last-Event-ID": "1"},
+        )
+        assert "id: 1\n" not in resumed.text
+        assert "id: 2\n" in resumed.text
+        assert "id: 3\n" in resumed.text
+
+    def test_events_cross_user_403(self) -> None:
+        """SSE 端点同样按 user_id 隔离（B 读 A 的事件流 → 403）。"""
+        client, _ = _sse_client()
+        token_a = _register(client, "sse-victim@example.com")["access_token"]
+        sid = client.post(
+            "/api/sessions", json={"title": "sse"}, headers=_auth(token_a)
+        ).json()["data"]["id"]
+        token_b = _register(client, "sse-attacker@example.com")["access_token"]
+        resp = client.get(f"/api/sessions/{sid}/events", headers=_auth(token_b))
+        assert resp.status_code == 403

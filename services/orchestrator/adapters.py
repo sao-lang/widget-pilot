@@ -301,6 +301,35 @@ class RedisIdempotencyStore:
         return len(keys)
 
 
+def make_event_decoder() -> EventDecoder:
+    """默认事件解码器：Stream data JSON → AgentEvent（emit 的逆操作）。
+
+    未知 kind 返回 None 让总线跳过（§4.5：前端/服务端对未知 kind 忽略而非报错）。
+    构造 AgentEvent 用最小字段（SSE 只消费 seq/kind/payload），其余填默认值。
+    """
+    from packages.agent_core.types import AgentEvent
+    from packages.contracts.enums import AgentEventKind
+
+    def decode(raw: str) -> AgentEvent | None:
+        try:
+            data = json.loads(raw)
+            kind = AgentEventKind(str(data["kind"]))
+        except (ValueError, KeyError, json.JSONDecodeError):
+            return None  # 未知 kind / 坏数据：跳过（§4.5）
+        return AgentEvent(
+            seq=int(data["seq"]),
+            session_id=str(data.get("session_id", "")),
+            run_id=str(data.get("run_id", "")),
+            ts=str(data.get("ts", "")),
+            kind=kind.value,
+            phase=str(data.get("phase", "")),
+            payload=data.get("payload", {}),
+            trace_id=str(data.get("trace_id", "")),
+        )
+
+    return decode
+
+
 class RedisEventBus:
     """Redis Streams 事件总线：实现 M03 EventBus Protocol（§4.2 / §11.8）。
 

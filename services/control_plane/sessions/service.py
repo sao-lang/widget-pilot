@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from packages.contracts import enums as _contracts_enums
 from packages.contracts.enums import SessionState
-from services.control_plane.api.guard import TenantGuard
+from services.control_plane.api.guard import ForbiddenError, TenantGuard
 from services.control_plane.audit.ledger import AuditActions, AuditLedger
 from services.control_plane.sessions.stores import (
     SessionRow,
@@ -62,6 +62,21 @@ class SessionService:
             trace_id=trace_id,
         )
 
+    def _assert_owner(self, user_id: str, row: SessionRow) -> None:
+        """租户校验 + S1 收尾：拒绝时写 DENY 审计（不泄漏资源内容）再抛 ForbiddenError。"""
+        try:
+            TenantGuard.assert_owner(user_id, row.user_id)
+        except ForbiddenError:
+            self.audit.append(
+                user_id=user_id,  # 尝试者（非资源 owner，便于 M11 溯源）
+                session_id=row.id,
+                action=AuditActions.DENY,
+                decision="FORBIDDEN",
+                payload={"actor": user_id},  # 仅尝试者 id，不含资源内容
+                trace_id="",
+            )
+            raise
+
     def create(self, user_id: str, title: str, grid: str | None) -> SessionRow:
         """新建会话：state=DRAFT、last_seq=0（§5.2 首行）。"""
         row = SessionRow(
@@ -85,7 +100,7 @@ class SessionService:
     def snapshot(self, session_id: str, user_id: str) -> SessionRow:
         """会话快照查询：先租户校验再返回（A1 越权 403）。"""
         row = self.get(session_id)
-        TenantGuard.assert_owner(user_id, row.user_id)
+        self._assert_owner(user_id, row)
         return row
 
     def submit_message(
@@ -97,7 +112,7 @@ class SessionService:
     ) -> SessionRow:
         """提交描述：DRAFT→RUNNING，分配 runId（§5.2）。B1：先租户校验。"""
         row = self.get(session_id)
-        TenantGuard.assert_owner(user_id, row.user_id)
+        self._assert_owner(user_id, row)
         if row.state is not SessionState.DRAFT:
             raise ConflictError("session not in DRAFT state")
         if not description:
@@ -114,7 +129,7 @@ class SessionService:
     ) -> SessionRow:
         """RUNNING→AWAITING_INPUT，记录触发原因码（§5.2 / §5.3）。B1：先租户校验。"""
         row = self.get(session_id)
-        TenantGuard.assert_owner(user_id, row.user_id)
+        self._assert_owner(user_id, row)
         if row.state is not SessionState.RUNNING:
             raise ConflictError("only RUNNING can await input")
         # N2：reason_code 不落 Session 主记录（按 §6.1 字段归属，过程数据走事件流），
@@ -141,7 +156,7 @@ class SessionService:
     ) -> SessionRow:
         """回答澄清：AWAITING_INPUT→RUNNING，答案入槽位，clarify_count+1（D-7）。"""
         row = self.get(session_id)
-        TenantGuard.assert_owner(user_id, row.user_id)
+        self._assert_owner(user_id, row)
         if row.state is not SessionState.AWAITING_INPUT:
             raise ConflictError("session not awaiting input")
         if row.clarify_count >= MAX_CLARIFY:
@@ -157,7 +172,7 @@ class SessionService:
     def interrupt(self, session_id: str, user_id: str) -> SessionRow:
         """用户停止：RUNNING→PAUSED，写 checkpoint（rev+1）；挂起态幂等返回（A6）。B1：先租户校验。"""
         row = self.get(session_id)
-        TenantGuard.assert_owner(user_id, row.user_id)
+        self._assert_owner(user_id, row)
         if row.state in _HANG_STATES:
             # 幂等：已挂起则不重复写 checkpoint，直接返回当前状态（A6）
             return row
@@ -173,7 +188,7 @@ class SessionService:
     def resume(self, session_id: str, user_id: str) -> SessionRow:
         """用户继续：PAUSED→RUNNING；终态抛 ConflictError（A13）。B1：先租户校验。"""
         row = self.get(session_id)
-        TenantGuard.assert_owner(user_id, row.user_id)
+        self._assert_owner(user_id, row)
         if row.state in _TERMINAL_STATES:
             raise ConflictError("cannot resume terminal session")
         # AWAITING_INPUT 的回答走 answer_clarification，不走 resume（§5.5）
@@ -188,7 +203,7 @@ class SessionService:
     def cancel(self, session_id: str, user_id: str) -> SessionRow:
         """用户取消：任意非终态→CANCELLED（§5.2 修订版）。终态幂等返回。B1：先租户校验。"""
         row = self.get(session_id)
-        TenantGuard.assert_owner(user_id, row.user_id)
+        self._assert_owner(user_id, row)
         if row.state in _TERMINAL_STATES:
             return row  # 终态重复 cancel 幂等
         before_state = row.state

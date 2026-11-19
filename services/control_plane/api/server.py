@@ -7,9 +7,11 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from packages.contracts.enums import SessionState
@@ -25,6 +27,7 @@ from services.control_plane.sessions.service import (
     SessionError,
     SessionService,
 )
+from services.control_plane.sessions.sse import EventWindow, SSEWindow
 from services.control_plane.sessions.stores import SessionRow, SessionStore
 
 # 业务码常量（编码规则 5：语义字符串具名）
@@ -93,11 +96,18 @@ def create_app(
     user_store: UserStore,
     session_store: SessionStore,
     jwt_secret: str,
+    event_source: EventWindow | None = None,
 ) -> FastAPI:
-    """构造 M04 API app（注入存储与密钥，便于测试替身与生产适配器切换）。"""
+    """构造 M04 API app（注入存储与密钥，便于测试替身与生产适配器切换）。
+
+    Args:
+        event_source: SSE 事件源；None 时用空 SSEWindow（无事件流的部署可缺省）。
+    """
     app = FastAPI(title="WidgetPilot control-plane M04", docs_url=None, redoc_url=None)
     auth = AuthService(user_store, jwt_secret)
     sessions = SessionService(session_store)
+    # 事件源缺省为空窗口（规则 9：协议必有默认实现）
+    events = event_source or SSEWindow(window_n=500)
 
     def current_user(authorization: str | None = Header(default=None)) -> UserRow:
         """Bearer JWT 鉴权依赖：解析 token → 还原用户，失败 401。"""
@@ -272,6 +282,42 @@ def create_app(
         except ForbiddenError as exc:
             raise HTTPException(status.HTTP_403_FORBIDDEN, _CODE_FORBIDDEN) from exc
         return _ok({"state": row.state.value})
+
+    @app.get("/api/sessions/{session_id}/events")
+    def stream_events(
+        session_id: str,
+        user: UserRow = CurrentUser,
+        run_id: str | None = Query(default=None, alias="runId"),
+        last_event_id: int | None = Header(default=None, alias="Last-Event-ID"),
+    ) -> StreamingResponse:
+        """SSE 事件流（§4.1 L359）：先租户校验，按 Last-Event-ID 续传存量事件。
+
+        有限流实现：发完当前窗口事件 + 一条心跳帧后关闭，客户端凭最后 seq
+        重连续传（§4.5 超窗先拉快照）。生产长连接保活（异步订阅新事件）
+        待与 M15 联调时启用；当前构件（SSEWindow/RedisEventBus）已就绪。
+        """
+        try:
+            sessions.snapshot(session_id, user.id)  # 越权 403（每条流先校验归属）
+        except ForbiddenError as exc:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, _CODE_FORBIDDEN) from exc
+        except SessionError as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, _CODE_INPUT_INVALID) from exc
+
+        def frames() -> object:
+            """生成 SSE 帧：id/event/data 三行 + 空行，末尾心跳注释帧。"""
+            for event in events.since(last_event_id or 0, session_id):
+                payload = json.dumps(event["payload"], default=str)
+                yield f"id: {event['seq']}\nevent: {event['kind']}\ndata: {payload}\n\n"
+            yield ": keepalive\n\n"
+
+        return StreamingResponse(
+            frames(),  # type: ignore[arg-type]
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     # 测试钩子：把会话置为 AWAITING_INPUT（生产由 M06 语义层触发，此处仅供接线测试）
     @app.post("/api/sessions/{session_id}/_test_awaiting")

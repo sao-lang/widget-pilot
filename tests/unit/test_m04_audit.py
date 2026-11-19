@@ -75,3 +75,18 @@ class TestAuditChain:
         )
         assert row.action == AuditActions.DENY
         assert "session" not in str(row.payload).lower()
+
+    def test_cross_user_access_writes_deny_audit(self, ledger: AuditLedger) -> None:
+        """S1 收尾：真实越权路径（B 读 A 快照）自动写 DENY 审计（§7）。"""
+        from services.control_plane.api.guard import ForbiddenError
+
+        svc = SessionService(InMemorySessionStore(), audit=ledger)
+        sid = svc.create("user-a", "t", None).id
+        with pytest.raises(ForbiddenError):
+            svc.snapshot(sid, "user-b")
+        rows = ledger.by_session(sid)
+        assert len(rows) == 1
+        assert rows[0].action == AuditActions.DENY
+        assert rows[0].decision == "FORBIDDEN"
+        # DENY payload 不含资源内容，仅标识尝试者
+        assert "session" not in str(rows[0].payload).lower()
