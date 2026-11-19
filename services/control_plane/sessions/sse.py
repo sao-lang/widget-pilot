@@ -45,7 +45,15 @@ class SSEWindow:
         self._events: list[SSEEvent] = []
 
     def emit(self, seq: int, kind: str, payload: object) -> None:
-        """追加一条事件并裁剪超出窗口的旧事件（保留最近 N 条）。"""
+        """追加一条事件并裁剪超出窗口的旧事件（保留最近 N 条）。
+
+        Args:
+            seq: 会话内递增序号（由调用方保证连续、无重复）。
+            kind: 事件类型（AgentEventKind 值）。
+            payload: 事件载荷，JSON 兼容。
+
+        超窗的旧事件由上层拉快照补（§4.5），这里直接丢弃不占内存。
+        """
         self._events.append({"seq": seq, "kind": kind, "payload": payload})
         # 窗口裁剪：只保留最后 N 条，超窗的旧事件由上层拉快照补（§4.5）
         if len(self._events) > self._window_n:
@@ -61,11 +69,19 @@ class SSEWindow:
         return [e for e in self._events if e["seq"] > last_event_id]
 
     def all(self) -> list[SSEEvent]:
-        """返回当前窗口内全部事件（副本，防外部修改内部状态）。"""
+        """返回当前窗口内全部事件（副本，防外部修改内部状态）。
+
+        Returns:
+            按 seq 升序的事件列表拷贝。
+        """
         return list(self._events)
 
     def last_seq(self) -> int:
-        """返回窗口内最大 seq，空窗返回 -1（供快照 last_seq 锚点）。"""
+        """返回窗口内最大 seq，空窗返回 -1（供快照 last_seq 锚点）。
+
+        Returns:
+            最大 seq；空窗 -1（与 §6.1 Session.last_seq 初始 0 区分：无事件即无锚点）。
+        """
         return self._events[-1]["seq"] if self._events else -1
 
 
@@ -88,7 +104,15 @@ class RedisEventSource:
     def since(
         self, last_event_id: int, session_id: str | None = None
     ) -> list[SSEEvent]:
-        """从 Redis 拉该会话窗口事件，转 SSE 视图，按 seq 过滤（I5）。"""
+        """从 Redis 拉该会话窗口事件，转 SSE 视图，按 seq 过滤（I5）。
+
+        Args:
+            last_event_id: 客户端上次收到的 seq；只返回 seq > 此值的事件。
+            session_id: 会话标识，定位 Redis Stream key（缺失则返回空）。
+
+        Returns:
+            按 seq 升序的 SSEEvent 列表（只含 seq/kind/payload 三字段）。
+        """
         if not session_id:
             return []  # 无 session 无法定位 Redis Stream key
         result: list[SSEEvent] = []

@@ -78,7 +78,16 @@ class SessionService:
             raise
 
     def create(self, user_id: str, title: str, grid: str | None) -> SessionRow:
-        """新建会话：state=DRAFT、last_seq=0（§5.2 首行）。"""
+        """新建会话：state=DRAFT、last_seq=0（§5.2 首行）。
+
+        Args:
+            user_id: 归属用户（服务端从 JWT 解析，不信前端声明）。
+            title: 会话标题，可空。
+            grid: 规格网格（如 4x4），空表示用户未选；有值时 grid_source=selector。
+
+        Returns:
+            新建的 SessionRow（id 服务端生成）。
+        """
         row = SessionRow(
             id=str(uuid4()),
             user_id=user_id,
@@ -91,14 +100,32 @@ class SessionService:
         return row
 
     def get(self, session_id: str) -> SessionRow:
-        """取会话行；不存在抛 SessionError（快照/迁移的统一前置）。"""
+        """取会话行；不存在抛 SessionError（快照/迁移的统一前置）。
+
+        Args:
+            session_id: 会话标识。
+
+        Returns:
+            会话行副本（内存实现返回 replace 副本，避免调用方改到存储内对象）。
+
+        Raises:
+            SessionError: 会话不存在。
+        """
         row = self.store.get(session_id)
         if row is None:
             raise SessionError("session not found")
         return row
 
     def snapshot(self, session_id: str, user_id: str) -> SessionRow:
-        """会话快照查询：先租户校验再返回（A1 越权 403）。"""
+        """会话快照查询：先租户校验再返回（A1 越权 403）。
+
+        Args:
+            session_id: 会话标识。
+            user_id: 请求者（JWT claims）；与会话 owner 不等则抛 ForbiddenError。
+
+        Returns:
+            归属校验通过的会话行。
+        """
         row = self.get(session_id)
         self._assert_owner(user_id, row)
         return row
@@ -110,7 +137,22 @@ class SessionService:
         description: str,
         attachment_ids: list[str],
     ) -> SessionRow:
-        """提交描述：DRAFT→RUNNING，分配 runId（§5.2）。B1：先租户校验。"""
+        """提交描述：DRAFT→RUNNING，分配 runId（§5.2）。B1：先租户校验。
+
+        Args:
+            session_id: 会话标识。
+            user_id: 请求者；经 _assert_owner 校验归属。
+            description: 用户对 widget 的描述，不可为空。
+            attachment_ids: 关联附件 id 列表（本模块只持有 id，不解析内容）。
+
+        Returns:
+            迁移后的会话行（state=RUNNING，run_id 新分配）。
+
+        Raises:
+            ForbiddenError: 非会话 owner。
+            ConflictError: 会话非 DRAFT 态。
+            SessionError: description 为空。
+        """
         row = self.get(session_id)
         self._assert_owner(user_id, row)
         if row.state is not SessionState.DRAFT:
@@ -127,7 +169,17 @@ class SessionService:
     def mark_awaiting_input(
         self, session_id: str, user_id: str, reason_code: str
     ) -> SessionRow:
-        """RUNNING→AWAITING_INPUT，记录触发原因码（§5.2 / §5.3）。B1：先租户校验。"""
+        """RUNNING→AWAITING_INPUT，记录触发原因码（§5.2 / §5.3）。B1：先租户校验。
+
+        Args:
+            session_id: 会话标识。
+            user_id: 请求者；经 _assert_owner 校验归属。
+            reason_code: 触发原因（如 SPEC_MISSING / ASK_USER），落审计 decision 字段。
+
+        Raises:
+            ForbiddenError: 非会话 owner。
+            ConflictError: 会话非 RUNNING 态。
+        """
         row = self.get(session_id)
         self._assert_owner(user_id, row)
         if row.state is not SessionState.RUNNING:
@@ -154,7 +206,19 @@ class SessionService:
         question_id: str,
         answer: str,
     ) -> SessionRow:
-        """回答澄清：AWAITING_INPUT→RUNNING，答案入槽位，clarify_count+1（D-7）。"""
+        """回答澄清：AWAITING_INPUT→RUNNING，答案入槽位，clarify_count+1（D-7）。
+
+        Args:
+            session_id: 会话标识。
+            user_id: 请求者；经 _assert_owner 校验归属。
+            question_id: 澄清问题 id（过程标识，不入 Session 主记录）。
+            answer: 用户回答，写入 clarification_answer 槽位随 checkpoint 落盘。
+
+        Raises:
+            ForbiddenError: 非会话 owner。
+            ConflictError: 会话非 AWAITING_INPUT 态。
+            SessionError: clarify_count 已达上限（MAX_CLARIFY=2）。
+        """
         row = self.get(session_id)
         self._assert_owner(user_id, row)
         if row.state is not SessionState.AWAITING_INPUT:
@@ -170,7 +234,15 @@ class SessionService:
         return row
 
     def interrupt(self, session_id: str, user_id: str) -> SessionRow:
-        """用户停止：RUNNING→PAUSED，写 checkpoint（rev+1）；挂起态幂等返回（A6）。B1：先租户校验。"""
+        """用户停止：RUNNING→PAUSED，写 checkpoint（rev+1）；挂起态幂等返回（A6）。B1：先租户校验。
+
+        Args:
+            session_id: 会话标识。
+            user_id: 请求者；经 _assert_owner 校验归属。
+
+        Returns:
+            迁移后的会话行；若已处于挂起态则原样返回、不重复写 checkpoint（A6）。
+        """
         row = self.get(session_id)
         self._assert_owner(user_id, row)
         if row.state in _HANG_STATES:
@@ -186,7 +258,16 @@ class SessionService:
         return row
 
     def resume(self, session_id: str, user_id: str) -> SessionRow:
-        """用户继续：PAUSED→RUNNING；终态抛 ConflictError（A13）。B1：先租户校验。"""
+        """用户继续：PAUSED→RUNNING；终态抛 ConflictError（A13）。B1：先租户校验。
+
+        Args:
+            session_id: 会话标识。
+            user_id: 请求者；经 _assert_owner 校验归属。
+
+        Raises:
+            ForbiddenError: 非会话 owner。
+            ConflictError: 会话为终态，或非 PAUSED（AWAITING_INPUT 走 answer_clarification）。
+        """
         row = self.get(session_id)
         self._assert_owner(user_id, row)
         if row.state in _TERMINAL_STATES:
@@ -201,7 +282,15 @@ class SessionService:
         return row
 
     def cancel(self, session_id: str, user_id: str) -> SessionRow:
-        """用户取消：任意非终态→CANCELLED（§5.2 修订版）。终态幂等返回。B1：先租户校验。"""
+        """用户取消：任意非终态→CANCELLED（§5.2 修订版）。终态幂等返回。B1：先租户校验。
+
+        Args:
+            session_id: 会话标识。
+            user_id: 请求者；经 _assert_owner 校验归属。
+
+        Returns:
+            迁移后的会话行；已终态则原样返回（cancel 幂等）。
+        """
         row = self.get(session_id)
         self._assert_owner(user_id, row)
         if row.state in _TERMINAL_STATES:
@@ -213,7 +302,17 @@ class SessionService:
         return row
 
     def complete(self, session_id: str, bundle_ref: str) -> SessionRow:
-        """校验全通过：RUNNING→COMPLETED，写产物引用（§5.2）。"""
+        """校验全通过：RUNNING→COMPLETED，写产物引用（§5.2）。
+
+        内部方法：由 M08 校验通过后调用，不经用户 REST 端点，故无 user_id 参数。
+
+        Args:
+            session_id: 会话标识。
+            bundle_ref: 产物包引用（校验通过的最终产物）。
+
+        Raises:
+            ConflictError: 会话非 RUNNING 态。
+        """
         row = self.get(session_id)
         if row.state is not SessionState.RUNNING:
             raise ConflictError("only RUNNING can complete")

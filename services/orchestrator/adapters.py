@@ -87,7 +87,18 @@ class PgCheckpointStore:
         state_ref: str,
         prev_hash: str,
     ) -> None:
-        """落一行 checkpoint：主键冲突即抛（I1 断言点）。"""
+        """落一行 checkpoint：主键冲突即抛（I1 断言点）。
+
+        B2 修复：新 rev 行继承同 run 最新行的租约列——租约是 run 级而非 rev 级，
+        否则持锁 worker 每写一个 checkpoint 就丢锁、被另一 worker 抢占。
+
+        Args:
+            run_id: 运行标识。
+            rev: 单调版本号（由调用方 max(state.rev, latest+1) 计算）。
+            node: 该 checkpoint 对应的执行节点。
+            state_ref: 对象存储引用（state 字节 + hash）。
+            prev_hash: 上一 rev 的链 hash（hash 链断言点）。
+        """
         import psycopg
 
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
@@ -104,7 +115,14 @@ class PgCheckpointStore:
             )
 
     def load(self, run_id: str) -> State | None:
-        """取最新 rev 的 state_ref，从对象存储读回并反序列化为 State（§3.4）。"""
+        """取最新 rev 的 state_ref，从对象存储读回并反序列化为 State（§3.4）。
+
+        Args:
+            run_id: 运行标识。
+
+        Returns:
+            最新 checkpoint 的 State；该 run 无任何 checkpoint 时返回 None。
+        """
         import psycopg
 
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
@@ -134,7 +152,14 @@ class PgCheckpointStore:
         return int(row[0]) if row else -1
 
     def hashes(self, run_id: str) -> list[str]:
-        """按 rev 排序返回 prev_hash 列（供 hash 链重算，I2）。"""
+        """按 rev 排序返回 prev_hash 列（供 hash 链重算，I2）。
+
+        Args:
+            run_id: 运行标识。
+
+        Returns:
+            按 rev 升序的 prev_hash 列表（首行为空串）。
+        """
         import psycopg
 
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
@@ -184,6 +209,15 @@ class PgLeaseProvider:
 
         若该 run 尚无 checkpoint 行，先插入 rev=0 占位行（懒建租约锚点），
         再走条件 UPDATE；两步在同一连接内，UPDATE 的 WHERE 保证原子性。
+
+        Args:
+            run_id: 运行标识。
+            owner: 持锁 worker 标识（写入 lease_owner）。
+            ttl_s: 租约有效期秒数（lease_until = now + ttl_s）。
+
+        Returns:
+            抢锁成功返回 PgLease（run() 内用其 heartbeat/release）；
+            已被他人持有且未过期返回 None。
         """
         import psycopg
 
@@ -210,7 +244,17 @@ class PgLeaseProvider:
         return PgLease(self, run_id, owner) if won else None
 
     def heartbeat(self, run_id: str, owner: str) -> bool:
-        """续租：仅 owner 匹配且未过期时刷新；返回是否成功（§11.4 step 2）。"""
+        """续租：仅 owner 匹配且未过期时刷新；返回是否成功（§11.4 step 2）。
+
+        Args:
+            run_id: 运行标识。
+            owner: 持锁 worker 标识（不匹配则不更新，返回 False）。
+
+        Returns:
+            True 表示续约成功；False 表示租约已被他人接管或过期。
+
+        租约 TTL 引用 LEASE_TTL_S 常量（M02 Q4），不硬编码。
+        """
         import psycopg
 
         with psycopg.connect(self._dsn) as conn:
@@ -227,7 +271,12 @@ class PgLeaseProvider:
         return renewed
 
     def release(self, run_id: str, owner: str) -> None:
-        """释放租约：仅 owner 可主动归还（终态立即让出，不等过期）。"""
+        """释放租约：仅 owner 可主动归还（终态立即让出，不等过期）。
+
+        Args:
+            run_id: 运行标识。
+            owner: 持锁 worker 标识（不匹配则无操作，防误放他人租约）。
+        """
         import psycopg
 
         with psycopg.connect(self._dsn) as conn:
@@ -278,7 +327,16 @@ class RedisIdempotencyStore:
         return self._client
 
     def get_or_reserve(self, idem_key: str, run_id: str) -> str | None:
-        """命中返回 result_ref；否则 SETNX 占位返回 None。"""
+        """命中返回 result_ref；否则 SETNX 占位返回 None。
+
+        Args:
+            idem_key: 幂等键（session_id + step + payload_hash）。
+            run_id: 运行标识，写入占位值 reserved:{run_id} 便于溯源。
+
+        Returns:
+            命中时返回已提交的 result_ref（复用既有结果，不重复执行副作用）；
+            首次占位成功返回 None（调用方继续执行副作用后须 commit）。
+        """
         full_key = f"{_KEY_SIDE_EFFECT}:{idem_key}"
         client = self._conn()
         existing = client.get(full_key)
@@ -289,7 +347,12 @@ class RedisIdempotencyStore:
         return None
 
     def commit(self, idem_key: str, result_ref: str) -> None:
-        """副作用完成后写回 result_ref（占位 → 真实结果）。"""
+        """副作用完成后写回 result_ref（占位 → 真实结果）。
+
+        Args:
+            idem_key: 幂等键（与 get_or_reserve 同一键）。
+            result_ref: 副作用产物的对象存储引用。
+        """
         client = self._conn()
         client.set(f"{_KEY_SIDE_EFFECT}:{idem_key}", result_ref)
 
@@ -311,6 +374,15 @@ def make_event_decoder() -> EventDecoder:
     from packages.contracts.enums import AgentEventKind
 
     def decode(raw: str) -> AgentEvent | None:
+        """把一条 Stream data JSON 还原为 AgentEvent；未知 kind / 坏数据返回 None 跳过。
+
+        Args:
+            raw: XADD 写入的 data 字段 JSON 字符串（ emit 的 payload 序列化结果）。
+
+        Returns:
+            AgentEvent：用最小字段构造（SSE 只消费 seq/kind/payload），其余填默认值；
+            解析失败或 kind 不在 AgentEventKind 时返回 None（§4.5 忽略未知事件）。
+        """
         try:
             data = json.loads(raw)
             kind = AgentEventKind(str(data["kind"]))

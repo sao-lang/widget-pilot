@@ -80,7 +80,18 @@ class AuthService:
         self._hasher = password_hasher or PasswordHasher()
 
     def register(self, email: str, password: str) -> AuthResult:
-        """注册用户：只存 hash，签发双令牌；重复邮箱抛 DuplicateEmailError。"""
+        """注册用户：只存 hash，签发双令牌；重复邮箱抛 DuplicateEmailError。
+
+        Args:
+            email: 登录名，统一转小写（citext 语义，大小写不敏感）。
+            password: 明文密码，仅存 argon2 hash，不落明文、不进日志。
+
+        Returns:
+            AuthResult（access + refresh 双令牌 + 用户行）。
+
+        Raises:
+            DuplicateEmailError: email 已存在（PG UNIQUE 冲突映射，对应 409）。
+        """
         normalized = email.lower()  # citext 语义：登录名大小写不敏感
         row = UserRow(
             id=str(uuid4()),
@@ -91,7 +102,18 @@ class AuthService:
         return self._issue_pair(row)
 
     def login(self, email: str, password: str) -> AuthResult:
-        """校验凭据：密码错误或用户不存在统一抛 AuthError（不泄漏账号存在性）。"""
+        """校验凭据：密码错误或用户不存在统一抛 AuthError（不泄漏账号存在性）。
+
+        Args:
+            email: 登录名（转小写后查）。
+            password: 明文密码，经 argon2 verify 比对（不匹配/坏 hash 均折叠为同一错误）。
+
+        Returns:
+            AuthResult（新签发的双令牌 + 用户行）。
+
+        Raises:
+            AuthError: 账号不存在、密码错误、或 hash 损坏（统一文案防用户枚举）。
+        """
         row = self.store.find_by_email(email.lower())
         # 失败路径统一：不区分「用户不存在」与「密码错误」，防用户枚举
         if row is None:
@@ -109,6 +131,15 @@ class AuthService:
 
         B3 修复：用户必须仍存在才签发；角色取 DB 最新值而非 token claims，
         避免删除/降权后凭旧 role 换发越权令牌（§7 服务端权限裁剪）。
+
+        Args:
+            refresh_token: 长时刷新令牌原文（token_type 必须为 refresh）。
+
+        Returns:
+            新签发的 access token（15min TTL，角色取 DB 最新值）。
+
+        Raises:
+            AuthError: 签名/类型错误，或用户已删除（凭旧角色刷新被拒）。
         """
         claims = self._decode(refresh_token)
         if claims.token_type != TOKEN_TYPE_REFRESH:
@@ -120,7 +151,17 @@ class AuthService:
         return self._issue_access(user)  # 用 DB 最新 role，不用 claims.role
 
     def decode_access(self, token: str) -> TokenClaims:
-        """解码并校验 access token；类型/签名不符抛 AuthError。"""
+        """解码并校验 access token；类型/签名不符抛 AuthError。
+
+        Args:
+            token: 客户端 Bearer token 原文。
+
+        Returns:
+            TokenClaims（user_id / role / token_type）；role 为非法值时回退 user。
+
+        Raises:
+            AuthError: 签名错误、过期、或 token_type 非 access（防 refresh 当 access 用）。
+        """
         claims = self._decode(token)
         if claims.token_type != TOKEN_TYPE_ACCESS:
             raise AuthError("wrong token type")
@@ -143,7 +184,13 @@ class AuthService:
         return self._sign(row, TOKEN_TYPE_REFRESH, REFRESH_TOKEN_TTL_S)
 
     def _sign(self, row: UserRow, token_type: str, ttl_s: int) -> str:
-        """统一签名入口：sub=user_id、role、type、exp 由 TTL 计算。"""
+        """统一签名入口：sub=user_id、role、type、exp 由 TTL 计算。
+
+        Args:
+            row: 用户行（id/role 进 claims；refresh 时须为 DB 最新值）。
+            token_type: access / refresh，写入 type claim 防混用。
+            ttl_s: 有效期秒数（access 900 / refresh 604800）。
+        """
         import time
 
         now = int(time.time())

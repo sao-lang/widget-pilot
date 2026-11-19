@@ -95,7 +95,21 @@ class AuditLedger:
         payload: AuditPayload,
         trace_id: str,
     ) -> AuditEventRow:
-        """追加一条审计事件，计算 prev_hash/chain_hash 成链。"""
+        """追加一条审计事件，计算 prev_hash/chain_hash 成链。
+
+        Args:
+            user_id: 事件归属用户（成功迁移为资源 owner，DENY 为尝试者）。
+            session_id: 所属会话。
+            action: 动作（AuditActions 常量：state_transition/interrupt/deny 等）。
+            decision: 判定结果（OK / reason_code / FORBIDDEN）。
+            payload: 证据载荷，禁含 PII 原文/附件原文/代码。
+            trace_id: 链路追踪 id（供 M11 重放）。
+
+        Returns:
+            写入的 AuditEventRow（含计算出的 prev_hash/chain_hash）。
+
+        S6：整行证据字段参与 hash（不只 payload），篡改任一字段都能被 chain_valid 检出。
+        """
         prev = self._rows[-1].chain_hash if self._rows else ""
         # S6：整行证据字段入链（不只 payload），篡改 action/user_id/decision 也能被发现（A18）
         body = _canonical_body(user_id, session_id, action, decision, payload, trace_id)
@@ -116,7 +130,11 @@ class AuditLedger:
         return row
 
     def chain_valid(self) -> bool:
-        """重算整条 hash 链，任一环断裂返回 False（A18：可完整重放）。"""
+        """重算整条 hash 链，任一环断裂返回 False（A18：可完整重放）。
+
+        Returns:
+            True 表示链完整（每行 prev_hash 等于前行 chain_hash 且全字段 hash 吻合）。
+        """
         prev = ""
         for row in self._rows:
             body = _canonical_body(
@@ -134,7 +152,11 @@ class AuditLedger:
         return True
 
     def by_session(self, session_id: str) -> list[AuditEventRow]:
-        """按会话查审计事件（供 M11 重放与 A18 断言）。"""
+        """按会话查审计事件（供 M11 重放与 A18 断言）。
+
+        Args:
+            session_id: 会话标识。
+        """
         return [r for r in self._rows if r.session_id == session_id]
 
     def all(self) -> list[AuditEventRow]:

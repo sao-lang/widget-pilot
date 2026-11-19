@@ -27,7 +27,14 @@ class PgUserStore:
         self._dsn = dsn
 
     def insert(self, row: UserRow) -> None:
-        """插入用户；email 冲突（PG UniqueViolation）映射为 DuplicateEmailError。"""
+        """插入用户；email 冲突（PG UniqueViolation）映射为 DuplicateEmailError。
+
+        Args:
+            row: 用户行（id 服务端生成，password_hash 已是哈希值，email 转小写存）。
+
+        Raises:
+            DuplicateEmailError: email 已存在（对应注册 409）。
+        """
         try:
             with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
                 cur.execute(
@@ -47,7 +54,11 @@ class PgUserStore:
             raise DuplicateEmailError(row.email) from exc
 
     def find_by_email(self, email: str) -> UserRow | None:
-        """按 email（小写）查用户，无则返回 None。"""
+        """按 email（小写）查用户，无则返回 None。
+
+        Args:
+            email: 登录名；转小写后查（citext 语义，大小写不敏感）。
+        """
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT id, email, password_hash, role, share_enabled, quota, created_at "
@@ -58,7 +69,11 @@ class PgUserStore:
         return _to_user_row(row) if row else None
 
     def find_by_id(self, user_id: str) -> UserRow | None:
-        """按 id 查用户，无则返回 None。"""
+        """按 id 查用户，无则返回 None。
+
+        Args:
+            user_id: 用户标识（JWT sub claims）；refresh 时据此取 DB 最新角色。
+        """
         with psycopg.connect(self._dsn) as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT id, email, password_hash, role, share_enabled, quota, created_at "
