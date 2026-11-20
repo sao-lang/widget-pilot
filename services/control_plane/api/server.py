@@ -9,9 +9,20 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
-from fastapi.responses import StreamingResponse
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Query,
+    UploadFile,
+    status,
+)
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from packages.contracts.enums import SessionState
@@ -37,6 +48,10 @@ _CODE_FORBIDDEN: str = "FORBIDDEN"
 _CODE_UNAUTHORIZED: str = "UNAUTHORIZED"
 _CODE_CONFLICT: str = "CONFLICT"
 _AUTH_SCHEME: str = "Bearer"
+# B008 规避：FastAPI 参数默认值单例化（编码规则，不在路由签名里重复调用函数）
+_FILE_ARG = File(...)
+_SESSION_FORM = Form(...)
+_DESCRIPTION_FORM = Form(..., min_length=1)
 
 
 class RegisterReq(BaseModel):
@@ -87,6 +102,43 @@ class ClarificationReq(BaseModel):
     answer: str
 
 
+class PatchRoleItem(BaseModel):
+    """单条 role 纠偏项（S-3：必填字段由 Pydantic 校验，畸形请求 422 而非 500）。"""
+
+    model_config = ConfigDict(extra="forbid")
+    attachment_id: str
+    role: str
+
+
+class PatchRolesReq(BaseModel):
+    """附件 role 纠偏请求体（§4.1 PATCH attachment-roles）。"""
+
+    model_config = ConfigDict(extra="forbid")
+    roles: list[PatchRoleItem]
+
+
+def _m05_ok(data: object) -> dict[str, Any]:
+    """M05 成功响应（openapi ApiResponse 完整四字段，S-1）。"""
+    return {
+        "code": _CODE_OK,
+        "message": "OK",
+        "traceId": uuid4().hex,
+        "retryable": False,
+        "data": data,
+    }
+
+
+def _m05_error(code: str, detail: str) -> dict[str, Any]:
+    """M05 失败响应（code 对齐 ReasonCode + data.detail.code，S-1/A4）。"""
+    return {
+        "code": code,
+        "message": detail,
+        "traceId": uuid4().hex,
+        "retryable": False,
+        "data": {"detail": {"code": detail}},
+    }
+
+
 def _ok(data: object) -> dict[str, Any]:
     """成功响应包装（基线 §5.1 ApiResponse 的最小形态）。"""
     return {"code": _CODE_OK, "data": data}
@@ -97,11 +149,13 @@ def create_app(
     session_store: SessionStore,
     jwt_secret: str,
     event_source: EventWindow | None = None,
+    attachment_service: Any | None = None,
 ) -> FastAPI:
     """构造 M04 API app（注入存储与密钥，便于测试替身与生产适配器切换）。
 
     Args:
         event_source: SSE 事件源；None 时用空 SSEWindow（无事件流的部署可缺省）。
+        attachment_service: M05 附件服务；None 时不挂载 M05 路由（向后兼容既有测试）。
     """
     app = FastAPI(title="WidgetPilot control-plane M04", docs_url=None, redoc_url=None)
     auth = AuthService(user_store, jwt_secret)
@@ -318,6 +372,122 @@ def create_app(
                 "X-Accel-Buffering": "no",
             },
         )
+
+    # M05 附件路由（v1.7：description 随上传提交，角色判定在上传时完成）
+    if attachment_service is not None:
+
+        @app.post("/api/attachments")
+        async def upload_attachment(
+            file: UploadFile = _FILE_ARG,
+            session_id: str = _SESSION_FORM,
+            description: str = _DESCRIPTION_FORM,
+            user: UserRow = CurrentUser,
+        ) -> dict[str, Any]:
+            """附件上传：流式限量读取 + 传输层校验 + 存储 + role 判定。"""
+            from services.control_plane.attachments.constants import (
+                MAX_ATTACHMENT_BYTES,
+            )
+            from services.control_plane.attachments.validate import validate_transfer
+
+            # B-2：分块读取至上限 +1 字节即停，防单请求 OOM（§3.1 流式接收）
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = await file.read(64 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > MAX_ATTACHMENT_BYTES:
+                    # 不再读取剩余 body，立即拒绝（413 + 契约错误响应）
+                    return JSONResponse(
+                        status_code=413,
+                        content=_m05_error(_CODE_INPUT_INVALID, "ATTACHMENT_TOO_LARGE"),
+                    )
+            data = b"".join(chunks)
+
+            content_type = file.content_type or "application/octet-stream"
+            declared_kind = (
+                "image"
+                if content_type.startswith("image/")
+                else "video"
+                if content_type.startswith("video/")
+                else "text"
+            )
+            result = validate_transfer(
+                declared_kind,
+                content_type,
+                total,
+                data[:16],
+                len(
+                    attachment_service.attachments.list_by_session(user.id, session_id)
+                ),
+            )
+            if not result.ok:
+                return JSONResponse(
+                    status_code=413 if result.detail == "ATTACHMENT_TOO_LARGE" else 422,
+                    content=_m05_error(
+                        result.reason_code or _CODE_INPUT_INVALID, result.detail
+                    ),
+                )
+            try:
+                uploaded = attachment_service.upload(
+                    user.id,
+                    session_id,
+                    data,
+                    declared_kind,
+                    content_type,
+                    description,
+                )
+            except PermissionError:
+                return JSONResponse(
+                    status_code=403,
+                    content=_m05_error(_CODE_FORBIDDEN, "FORBIDDEN"),
+                )
+            return _m05_ok(
+                {
+                    "attachment_id": uploaded.attachment_id,
+                    "kind": uploaded.kind,
+                    "mime": uploaded.mime,
+                    "size": uploaded.size,
+                    "object_key": uploaded.object_key,
+                    "hash": uploaded.hash,
+                    "role": uploaded.role,
+                    "role_confidence": uploaded.role_confidence,
+                    "insight_ref": uploaded.insight_ref,
+                    "insight_quality": uploaded.insight_quality,
+                }
+            )
+
+        @app.patch("/api/sessions/{session_id}/attachment-roles")
+        def patch_attachment_roles(
+            session_id: str, req: PatchRolesReq, user: UserRow = CurrentUser
+        ) -> dict[str, Any]:
+            """role 纠偏 + 从该步重跑（§4.1 / S3 双入口态）。"""
+            updated: list[dict[str, str]] = []
+            for item in req.roles:
+                try:
+                    result = attachment_service.patch_roles(
+                        user.id, session_id, item.attachment_id, item.role
+                    )
+                except PermissionError:
+                    return JSONResponse(
+                        status_code=403,
+                        content=_m05_error(_CODE_FORBIDDEN, "FORBIDDEN"),
+                    )
+                except ValueError as exc:
+                    return JSONResponse(
+                        status_code=422,
+                        content=_m05_error(_CODE_INPUT_INVALID, str(exc)),
+                    )
+                updated.append(
+                    {
+                        "attachment_id": result.attachment_id,
+                        "role": result.role or "",
+                        "insight_ref": result.insight_ref or "",
+                    }
+                )
+            return _m05_ok({"updated": updated, "rerun_from": "ROLE_ASSIGNED"})
 
     # 测试钩子：把会话置为 AWAITING_INPUT（生产由 M06 语义层触发，此处仅供接线测试）
     @app.post("/api/sessions/{session_id}/_test_awaiting")

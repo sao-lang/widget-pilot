@@ -214,20 +214,21 @@ paths:
   /api/attachments:
     post:
       tags: [attachments]
-      summary: 附件上传（传输层校验 → 对象存储 att/{user_id}/{session_id}/{attachment_id}/original），返回 attachment_id
+      summary: 附件上传（传输层校验 → 对象存储 → role 判定），返回附件元数据与 role 结论
       operationId: uploadAttachment
       requestBody:
         content:
           multipart/form-data:
             schema:
               type: object
-              required: [file]
+              required: [file, session_id, description]
               properties:
                 file: { type: string, format: binary }
                 session_id: { type: string }
+                description: { type: string, minLength: 1, description: 用户描述，M05 据此判定附件 role（v1.7 B1） }
       responses:
         "200":
-          description: OK——返回 attachment_id
+          description: OK——返回附件元数据 + role 判定结论（v1.7 B3 完整字段）
           content:
             application/json:
               schema:
@@ -237,9 +238,18 @@ paths:
                     properties:
                       data:
                         type: object
+                        required: [attachment_id, hash, kind, mime, size, object_key, role, role_confidence, insight_ref, insight_quality]
                         properties:
                           attachment_id: { type: string }
+                          kind: { type: string, enum: [image, video, text] }
+                          mime: { type: string }
+                          size: { type: integer, minimum: 0 }
+                          object_key: { type: string }
                           hash: { type: string }
+                          role: { $ref: "#/components/schemas/AttachmentRole", nullable: true }
+                          role_confidence: { type: number, minimum: 0, maximum: 1, description: role 判定置信度，M06 据此判明确性（v1.7 S1） }
+                          insight_ref: { type: string, nullable: true }
+                          insight_quality: { type: number, minimum: 0, maximum: 1, description: 处理结果质量，不参与 role 明确性判定（v1.7 S1） }
         "400": { $ref: "#/components/responses/BadRequest" }
 
   # ---------- events（M04 / M15，SSE 长连接）----------

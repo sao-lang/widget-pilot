@@ -1,0 +1,116 @@
+"""M05 role 判定 / 对象存储 / 服务编排验收（§8.2 A1/A2/A7/A11/A13/A14）。"""
+
+from __future__ import annotations
+
+import pytest
+
+from services.control_plane.attachments.constants import ROLE_CLARIFY_THRESHOLD
+from services.control_plane.attachments.role_resolver import resolve_role
+from services.control_plane.attachments.service import AttachmentService
+from services.control_plane.attachments.stores import (
+    FakeTenantGuard,
+    InMemoryAttachmentStore,
+    InMemoryObjectStore,
+)
+
+_PNG = bytes.fromhex("89504e470d0a1a0a") + b"\x00" * 8
+
+
+def test_a1_description_drives_visual_role() -> None:
+    """A1：描述「当背景」→ visual_reference。"""
+    decision = resolve_role("把这张图当背景", "image")
+    assert decision.role == "visual_reference"
+    assert decision.role_confidence >= ROLE_CLARIFY_THRESHOLD
+
+
+def test_a2_same_attachment_two_descriptions_two_paths() -> None:
+    """A2：同一附件两种描述 → 两个不同 role + 不同 handler + 不同 insight_ref。"""
+    a = resolve_role("把这张图当背景", "image")
+    b = resolve_role("提取图片右上角的日期", "image")
+    assert a.role == "visual_reference"
+    assert b.role == "content_extraction"
+    assert a.role != b.role
+
+    svc = AttachmentService(
+        objects=InMemoryObjectStore(),
+        attachments=InMemoryAttachmentStore(),
+        tenant=FakeTenantGuard({"u1": ["s1"]}),
+    )
+    r1 = svc.upload("u1", "s1", _PNG, "image", "image/png", "把这张图当背景")
+    r2 = svc.upload("u1", "s1", _PNG, "image", "image/png", "提取图片右上角的日期")
+    assert r1.role == "visual_reference"
+    assert r2.role == "content_extraction"
+    assert r1.handler != r2.handler
+    assert r1.insight_ref != r2.insight_ref
+
+
+def test_a7_ambiguous_role_no_default() -> None:
+    """A7：描述无线索 → role=None + confidence 低 + clarify_hint，不默认任何 role。"""
+    decision = resolve_role("这张图…", "image")
+    assert decision.role is None
+    assert decision.role_confidence < ROLE_CLARIFY_THRESHOLD
+
+    svc = AttachmentService(
+        objects=InMemoryObjectStore(),
+        attachments=InMemoryAttachmentStore(),
+        tenant=FakeTenantGuard({"u1": ["s1"]}),
+    )
+    r = svc.upload("u1", "s1", _PNG, "image", "image/png", "这张图…")
+    assert r.role is None
+    assert r.insight_ref is None
+    assert r.clarify_hint
+    assert (
+        svc.clarify_signals
+        and svc.clarify_signals[-1]["attachment_id"] == r.attachment_id
+    )
+    # B2 定稿：M05 不直接置 AWAITING_INPUT
+    assert svc.state_sink.awaiting_calls == []
+
+
+def test_a11_hash_verify_and_tamper() -> None:
+    """A11：写入 original 后按 hash 读取成功，篡改 1 字节抛错。"""
+    store = InMemoryObjectStore()
+    ref = store.put_original("u1", "s1", "a1", _PNG)
+    assert store.get_with_hash_verify(ref.key, ref.hash) == _PNG
+    store.tamper(ref.key)
+    with pytest.raises(ValueError, match="hash mismatch"):
+        store.get_with_hash_verify(ref.key, ref.hash)
+
+
+def test_a13_upload_idempotent() -> None:
+    """A13：同一文件 + 同一幂等键两次上传 → 同一 attachment_id，对象仅 1 份。"""
+    svc = AttachmentService(
+        objects=InMemoryObjectStore(),
+        attachments=InMemoryAttachmentStore(),
+        tenant=FakeTenantGuard({"u1": ["s1"]}),
+    )
+    r1 = svc.upload("u1", "s1", _PNG, "image", "image/png", "当背景")
+    r2 = svc.upload("u1", "s1", _PNG, "image", "image/png", "当背景")
+    assert r1.attachment_id == r2.attachment_id
+    originals = [k for k in svc.objects.objects if k.endswith("/original")]
+    assert len(originals) == 1
+
+
+def test_a14_insight_structure() -> None:
+    """A14：AttachmentInsight 结构合规，source_ref 带 hash，insight_quality∈[0,1]。"""
+    svc = AttachmentService(
+        objects=InMemoryObjectStore(),
+        attachments=InMemoryAttachmentStore(),
+        tenant=FakeTenantGuard({"u1": ["s1"]}),
+    )
+    r = svc.upload("u1", "s1", _PNG, "image", "image/png", "把这张图当背景")
+    insight = svc.read_insight(r.insight_ref)
+    assert "#sha256:" in insight.source_ref
+    assert 0.0 <= insight.insight_quality <= 1.0
+    assert insight.extracted is not None
+
+
+def test_tenant_guard_denies_cross_user() -> None:
+    """A12：越权（user_id 不拥有 session_id）→ 拒绝，不读文件内容。"""
+    svc = AttachmentService(
+        objects=InMemoryObjectStore(),
+        attachments=InMemoryAttachmentStore(),
+        tenant=FakeTenantGuard({"u1": ["s1"]}),
+    )
+    with pytest.raises(PermissionError, match="FORBIDDEN"):
+        svc.upload("u2", "s1", _PNG, "image", "image/png", "当背景")
