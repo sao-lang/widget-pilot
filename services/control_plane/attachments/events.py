@@ -48,9 +48,14 @@ class AttachmentEventEmitter:
         self._sink = sink
 
     def emit_attachment(
-        self, session_id: str, attachment_id: str, role: str | None, action: str
+        self,
+        session_id: str,
+        attachment_id: str,
+        role: str | None,
+        action: str,
+        insight_ref: str | None = "",
     ) -> None:
-        """上传/纠偏完成事件（A8：新 seq > 旧 seq；best-effort 不拖垮主流程）。"""
+        """上传/纠偏完成事件（A8；payload 对齐 M15 `attachment` 通道契约）。"""
         try:
             seq = self._sink.next_seq(session_id)
             self._sink.emit(
@@ -61,6 +66,7 @@ class AttachmentEventEmitter:
                     "payload": {
                         "attachment_id": attachment_id,
                         "role": role,
+                        "insight_ref": insight_ref,  # M15 §6.4 要求
                         "action": action,
                     },
                 }

@@ -191,7 +191,9 @@ class AttachmentService:
         row.insight_ref = f"{insight_ref_obj.key}#sha256:{insight_ref_obj.hash}"
         row.insight_quality = insight_quality
         row = self._insert_or_reuse(row, user_id, session_id)
-        self.events.emit_attachment(session_id, attachment_id, decision.role, "UPLOAD")
+        self.events.emit_attachment(
+            session_id, attachment_id, decision.role, "UPLOAD", row.insight_ref
+        )
         return self._to_result(row)
 
     def patch_roles(
@@ -254,7 +256,9 @@ class AttachmentService:
         row.processing_state = "INSIGHT_READY"
         row.clarify_hint = ""
         self.attachments.update(row)
-        self.events.emit_attachment(session_id, attachment_id, new_role, "PATCH")
+        self.events.emit_attachment(
+            session_id, attachment_id, new_role, "PATCH", row.insight_ref
+        )
         return self._to_result(row)
 
     def get_attachment(
