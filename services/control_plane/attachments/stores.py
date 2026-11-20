@@ -83,6 +83,24 @@ class InMemoryObjectStore:
             if f"/{attachment_id}/" in key and "insight.v" in key
         ]
 
+    def get_raw(self, key: str) -> bytes | None:
+        """按裸 key 读对象（洞察解析用；不校验 hash）。"""
+        return self.objects.get(key)
+
+    def bump_version(self, attachment_id: str, prefix_hint: str = "") -> int:
+        """洞察版本号 +1，返回新版本号（纠偏作废旧版）。"""
+        version = self.insight_versions.get(attachment_id, 0) + 1
+        self.insight_versions[attachment_id] = version
+        return version
+
+    def archive_insight(self, insight_ref: str, version: int) -> None:
+        """把旧洞察复制为 insight.v{n}.json（只追加，不物理删）。"""
+        old_key = insight_ref.partition("#sha256:")[0]
+        data = self.objects.get(old_key)
+        if data is not None:
+            vkey = old_key.replace("insight.json", f"insight.v{version}.json")
+            self.objects[vkey] = data
+
     def tamper(self, key: str) -> None:
         """测试钩子：篡改对象 1 字节（§8.2 A11 故障注入）。"""
         data = self.objects.get(key)
@@ -115,6 +133,10 @@ class InMemoryAttachmentStore:
     def update(self, row: AttachmentRow) -> None:
         """写回附件行。"""
         self.rows[row.id] = row
+
+    def all_rows(self) -> list[AttachmentRow]:
+        """列出全部附件行（红线扫描/统计用）。"""
+        return list(self.rows.values())
 
 
 class FakeTenantGuard:

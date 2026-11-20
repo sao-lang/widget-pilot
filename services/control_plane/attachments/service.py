@@ -57,10 +57,18 @@ class AttachmentService:
         objects: InMemoryObjectStore,
         attachments: InMemoryAttachmentStore,
         tenant: FakeTenantGuard,
+        processor: object | None = None,
     ) -> None:
+        """注入存储/租户守卫；processor 为可选真实处理器（§8.1 fake 默认）。
+
+        Args:
+            processor: 提供 process(data, role, kind, source_ref) -> ProcessorResult
+                的对象；None 时用静态桩 dispatch（独立提测路径）。
+        """
         self.objects = objects
         self.attachments = attachments
         self.tenant = tenant
+        self.processor = processor
         self.state_sink = FakeStateSink()
         self.clarify_signals: list[dict[str, str]] = []
         self.dispatch_log: dict[str, str] = {}
@@ -127,16 +135,26 @@ class AttachmentService:
         row.role = decision.role
         row.role_confidence = decision.role_confidence
         row.handler = _HANDLERS[decision.role]
-        # S-6：服务真实调用静态处理器（注入 fake handler 可由 fail_next_dispatch 模拟失败）
+        # S-6：优先用注入的真实处理器（生产）；无注入时用静态桩 dispatch（单测）
         source_ref = f"{original.key}#sha256:{original.hash}"
+        insight_quality = 1.0
         try:
             if self.fail_next_dispatch:
                 self.fail_next_dispatch = False
                 raise TimeoutError("processor timeout")
-            dispatched = dispatch(decision.role, kind, source_ref)
-            extracted = dispatched.extracted
-            self.dispatch_log[attachment_id] = dispatched.handler
-            row.handler = dispatched.handler
+            if self.processor is not None:
+                processed = self.processor.process(
+                    data, decision.role, kind, source_ref
+                )
+                extracted = processed.extracted
+                insight_quality = processed.insight_quality
+                handler_name = processed.handler
+            else:
+                dispatched = dispatch(decision.role, kind, source_ref)
+                extracted = dispatched.extracted
+                handler_name = dispatched.handler
+            self.dispatch_log[attachment_id] = handler_name
+            row.handler = handler_name
         except (TimeoutError, ValueError) as exc:
             # A17：处理器不可恢复失败 → FAILED + evidenceRef，不进 INSIGHT_READY
             row.processing_state = "FAILED"
@@ -145,7 +163,6 @@ class AttachmentService:
             result = self._to_result(row)
             return _with_error(result, str(exc))
         row.processing_state = "INSIGHT_READY"
-        insight_quality = 1.0
         insight = {
             "source_ref": source_ref,
             "extracted": extracted,
@@ -181,13 +198,11 @@ class AttachmentService:
 
         # 旧洞察版本化保留（A9：不物理删）
         if row.insight_ref:
-            version = self.objects.insight_versions.get(attachment_id, 0) + 1
-            self.objects.insight_versions[attachment_id] = version
+            # 前缀提示 = 旧洞察 key 去掉末尾文件名；S3 实现据此精确 list。
             old_key = row.insight_ref.partition("#sha256:")[0]
-            if old_key in self.objects.objects:
-                old_data = self.objects.objects[old_key]
-                vkey = old_key.replace("insight.json", f"insight.v{version}.json")
-                self.objects.objects[vkey] = old_data
+            prefix_hint = old_key.rpartition("/")[0] + "/"
+            version = self.objects.bump_version(attachment_id, prefix_hint)
+            self.objects.archive_insight(row.insight_ref, version)
 
         # 重新分派处理器 → 新洞察（只动目标附件）
         source_ref = f"{row.object_key}#sha256:{row.hash}"
@@ -225,7 +240,7 @@ class AttachmentService:
     def external_refs(self) -> list[str]:
         """列出所有对外可见引用（供 A10 红线扫描：不含 original）。"""
         refs: list[str] = []
-        for row in self.attachments.rows.values():
+        for row in self.attachments.all_rows():
             if row.insight_ref:
                 refs.append(row.insight_ref)
             if row.object_key and "/original" not in row.object_key:
@@ -239,11 +254,11 @@ class AttachmentService:
         extracted 派生引用，故只取该段并递归覆盖其内嵌字符串。
         """
         chunks: list[str] = []
-        for row in self.attachments.rows.values():
+        for row in self.attachments.all_rows():
             if not row.insight_ref:
                 continue
             ref_key = row.insight_ref.partition("#sha256:")[0]
-            data = self.objects.objects.get(ref_key)
+            data = self.objects.get_raw(ref_key)
             if data is not None:
                 insight = json.loads(data.decode("utf-8"))
                 chunks.append(_json_bytes(insight.get("extracted")).decode("utf-8"))
@@ -254,8 +269,8 @@ class AttachmentService:
         ref, _, tagged = insight_ref.partition("#sha256:")
         if not tagged:
             ref = insight_ref
-            # 内存桩：insight_ref 存裸 key，取回时从对象反查 hash 不确定，直接解析
-            data = self.objects.objects[ref]
+            # 裸 key：直接读取（生产 ref 必带 hash；此分支仅兼容历史数据）
+            data = self.objects.get_raw(ref)
         else:
             data = self.objects.get_with_hash_verify(ref, tagged)
         return AttachmentInsight(**json.loads(data.decode("utf-8")))

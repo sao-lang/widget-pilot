@@ -15,6 +15,12 @@ from services._health import create_health_app
 from services.control_plane.accounts.constants import SSE_WINDOW_N
 from services.control_plane.accounts.pg_stores import PgUserStore
 from services.control_plane.api.server import create_app as create_m04_app
+from services.control_plane.attachments.pg_stores import PgAttachmentStore
+from services.control_plane.attachments.processor_adapter import RealProcessor
+from services.control_plane.attachments.s3_store import S3ObjectStore
+from services.control_plane.attachments.service import AttachmentService
+from services.control_plane.attachments.tenant_guard import SessionTenantGuard
+from services.control_plane.audit.pg_ledger import PgAuditLedger
 from services.control_plane.sessions.pg_stores import PgSessionStore
 from services.control_plane.sessions.sse import RedisEventSource
 from services.orchestrator.adapters import RedisEventBus, make_event_decoder
@@ -54,8 +60,22 @@ def create_prod_app() -> FastAPI:
     # SSE 生产事件源：Redis Streams → SSEEvent（§4.1 events 端点真实扇出）
     bus = RedisEventBus(redis_url, SSE_WINDOW_N, make_event_decoder())
     event_source = RedisEventSource(bus.window, SSE_WINDOW_N)
+    user_store = PgUserStore(dsn)
+    session_store = PgSessionStore(dsn)
+    # M05 生产附件服务：真实 S3 对象存储 + PG 索引 + 真实处理器 + 会话归属守卫
+    attachments = AttachmentService(
+        objects=S3ObjectStore(),
+        attachments=PgAttachmentStore(dsn),
+        tenant=SessionTenantGuard(session_store),
+        processor=RealProcessor(),
+    )
     app = create_m04_app(
-        PgUserStore(dsn), PgSessionStore(dsn), secret, event_source=event_source
+        user_store,
+        session_store,
+        secret,
+        event_source=event_source,
+        attachment_service=attachments,
+        audit=PgAuditLedger(dsn),  # A18：审计落 PG，跨实例可重放（B2 生产接线）
     )
     health = create_health_app("control-plane", 8000)
 

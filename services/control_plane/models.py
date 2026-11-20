@@ -13,12 +13,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, BigInteger, Boolean, Index, Integer, Text, func
+from sqlalchemy import JSON, BigInteger, Boolean, Float, Index, Integer, Text, func
 from sqlalchemy.dialects.postgresql import TIMESTAMP
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from packages.contracts.enums import SessionState, UserRole
 from services.control_plane.accounts.stores import UserRow
+from services.control_plane.attachments.stores import AttachmentRow
 from services.control_plane.sessions.stores import SessionRow
 
 # 时区感知时间戳（对齐迁移的 sa.DateTime(timezone=True)）
@@ -239,3 +240,85 @@ class AuditEvent(Base):
         _TzDateTime, nullable=False, server_default=func.now()
     )
     """写入时间（UTC）。"""
+
+
+class Attachment(Base):
+    """attachments 表：M05 附件索引（§6.1，迁移 0003）。
+
+    大对象（原文/洞察/关键帧）只存对象存储 key 引用；本表只放索引、
+    hash 与 v1.7 拆分的双 confidence。user_id 为租户隔离键。
+    """
+
+    __tablename__ = "attachments"
+    __table_args__ = (
+        Index("ix_attachments_user_id", "user_id"),
+        Index("ix_attachments_session_id", "session_id"),
+        Index("ix_attachments_idem_key", "idem_key"),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    """附件标识（uuid）。"""
+    user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    """租户隔离键。"""
+    session_id: Mapped[str] = mapped_column(Text, nullable=False)
+    """所属会话。"""
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    """附件类别（image/video/text）。"""
+    mime: Mapped[str] = mapped_column(Text, nullable=False)
+    """嗅探确认后的真实 mime。"""
+    size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    """字节数。"""
+    object_key: Mapped[str] = mapped_column(Text, nullable=False)
+    """原文对象 key（att/*/original）。"""
+    hash: Mapped[str] = mapped_column(Text, nullable=False)
+    """原文 sha256（读时校验）。"""
+    role: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """由描述判定的 role；歧义时 NULL。"""
+    role_confidence: Mapped[float] = mapped_column(
+        Float, nullable=False, server_default="0"
+    )
+    """role 判定置信度（M06 据此判明确性，S1）。"""
+    insight_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """AttachmentInsight 引用（带 hash）。"""
+    insight_quality: Mapped[float] = mapped_column(
+        Float, nullable=False, server_default="0"
+    )
+    """处理结果质量（不参与 role 判定，S1）。"""
+    handler: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    """处理器名（静态注册白名单）。"""
+    processing_state: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="RECEIVED"
+    )
+    """附件处理状态机（§5.1）。"""
+    clarify_hint: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    """歧义澄清建议。"""
+    idem_key: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    """上传幂等键（内容 + session + description）。"""
+    evidence_ref: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    """失败证据引用。"""
+    created_at: Mapped[datetime] = mapped_column(
+        _TzDateTime, nullable=False, server_default=func.now()
+    )
+    """创建时间（UTC）。"""
+
+    def to_row(self) -> AttachmentRow:
+        """ORM 实例 → AttachmentRow dataclass（集中容错，规则 5/6）。"""
+        return AttachmentRow(
+            id=str(self.id),
+            user_id=str(self.user_id),
+            session_id=str(self.session_id),
+            kind=str(self.kind),
+            mime=str(self.mime),
+            size=_as_int(self.size),
+            object_key=str(self.object_key),
+            hash=str(self.hash),
+            role=self.role if isinstance(self.role, str) else None,
+            role_confidence=float(self.role_confidence or 0),
+            insight_ref=self.insight_ref if isinstance(self.insight_ref, str) else None,
+            insight_quality=float(self.insight_quality or 0),
+            handler=str(self.handler or ""),
+            processing_state=str(self.processing_state or "RECEIVED"),
+            clarify_hint=str(self.clarify_hint or ""),
+            idem_key=str(self.idem_key or ""),
+            evidence_ref=str(self.evidence_ref or ""),
+        )
