@@ -135,34 +135,34 @@ def process_video(data: bytes) -> ProcessorResult:
     with tempfile.TemporaryDirectory() as tmp:
         src = Path(tmp) / "input.mp4"
         src.write_bytes(data)
+        out_pattern = Path(tmp) / "frame_%04d.jpg"
         exe = imageio_ffmpeg.get_ffmpeg_exe()
+        # 单次 ffmpeg 调用：fps 抽帧 + 帧数上限（§2.1 不整段入内存、有超时）
+        proc = subprocess.run(
+            [
+                exe,
+                "-y",
+                "-i",
+                str(src),
+                "-vf",
+                "fps=1",
+                "-frames:v",
+                str(MAX_KEYFRAMES),
+                "-q:v",
+                "5",
+                str(out_pattern),
+            ],
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )
         frames: list[str] = []
-        for i in range(MAX_KEYFRAMES):
-            out = Path(tmp) / f"frame_{i:04d}.jpg"
-            proc = subprocess.run(
-                [
-                    exe,
-                    "-y",
-                    "-i",
-                    str(src),
-                    "-vf",
-                    f"select=eq(n\\,{i * 30})",
-                    "-frames:v",
-                    "1",
-                    "-q:v",
-                    "5",
-                    str(out),
-                ],
-                capture_output=True,
-                timeout=20,
-                check=False,
-            )
-            if proc.returncode != 0 or not out.exists():
-                break
-            frames.append(
-                "data:image/jpeg;base64,"
-                + base64.b64encode(out.read_bytes()).decode("ascii")
-            )
+        if proc.returncode == 0:
+            for frame_file in sorted(Path(tmp).glob("frame_*.jpg")):
+                frames.append(
+                    "data:image/jpeg;base64,"
+                    + base64.b64encode(frame_file.read_bytes()).decode("ascii")
+                )
     return ProcessorResult(
         "VideoFrameProcessor",
         {"frames": frames, "frame_count": len(frames)},

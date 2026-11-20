@@ -65,18 +65,18 @@ def test_real_png_upload_and_insight(real_service: AttachmentService) -> None:
     Image.new("RGB", (8, 8), (255, 0, 0)).save(buf, format="PNG")
     png = buf.getvalue()
 
-    sessions = PgSessionStore(_DSN)
-    if sessions.get("m05-real-s1") is None:  # 幂等：重跑不撞主键
-        sessions.insert(
-            SessionRow(id="m05-real-s1", user_id="m05-real-user", state="DRAFT")
-        )
+    # 唯一 ID：避免并行 agent/测试复用同一 session 与 MinIO 前缀互相干扰
+    from uuid import uuid4
 
-    result = real_service.upload(
-        "m05-real-user", "m05-real-s1", png, "image", "image/png", "把这张图当背景"
-    )
+    uid = "m05-real-" + uuid4().hex[:8]
+    sid = "m05-s-" + uuid4().hex[:8]
+    sessions = PgSessionStore(_DSN)
+    sessions.insert(SessionRow(id=sid, user_id=uid, state="DRAFT"))
+
+    result = real_service.upload(uid, sid, png, "image", "image/png", "把这张图当背景")
     assert result.role == "visual_reference"
     assert result.insight_ref and "#sha256:" in result.insight_ref
-    assert result.object_key.startswith("att/m05-real-user/")
+    assert result.object_key.startswith(f"att/{uid}/")
 
     # 原文真实可读 + hash 校验
     data = real_service.objects.get_with_hash_verify(result.object_key, result.hash)
@@ -93,4 +93,72 @@ def test_real_png_upload_and_insight(real_service: AttachmentService) -> None:
     # PG 真实落行
     row = real_service.attachments.get(result.attachment_id)
     assert row is not None and row.role == "visual_reference"
-    assert row.user_id == "m05-real-user"
+    assert row.user_id == uid
+
+
+def test_real_ocr_extracts_text_with_regions() -> None:
+    """真实 OCR：带文字的图片经 rapidocr 识别，返回文本 + bbox 区域 + 质量 1。"""
+    import io
+
+    from PIL import Image, ImageDraw
+
+    from services.control_plane.attachments.real_processors import process_ocr
+
+    img = Image.new("RGB", (400, 120), "white")
+    draw = ImageDraw.Draw(img)
+    draw.text((20, 40), "2026-11-20 MEETING", fill="black")
+    draw.text((20, 75), "DATE: 2026/11/20", fill="black")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+
+    result = process_ocr(buf.getvalue())
+    assert result.handler == "ContentExtractProcessor"
+    assert result.insight_quality == 1.0
+    assert result.extracted["ocr_text"]  # 真识别出文字
+    assert len(result.extracted["regions"]) >= 1
+    assert all(len(r["bbox"]) == 4 for r in result.extracted["regions"])
+
+
+def test_real_video_keyframes() -> None:
+    """真实 ffmpeg：MP4 抽关键帧 ≤ MAX_KEYFRAMES，帧为 base64 JPEG。"""
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    import imageio_ffmpeg
+    from PIL import Image
+
+    from services.control_plane.attachments.constants import MAX_KEYFRAMES
+    from services.control_plane.attachments.real_processors import process_video
+
+    exe = imageio_ffmpeg.get_ffmpeg_exe()
+    with tempfile.TemporaryDirectory() as tmp:
+        for i in range(10):
+            Image.new("RGB", (160, 120), (i * 25, 80, 160)).save(
+                Path(tmp) / f"f{i:03d}.png"
+            )
+        encode = subprocess.run(
+            [
+                exe,
+                "-y",
+                "-framerate",
+                "1",
+                "-i",
+                str(Path(tmp) / "f%03d.png"),
+                "-c:v",
+                "mpeg4",
+                "-q:v",
+                "5",
+                str(Path(tmp) / "out.mp4"),
+            ],
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        assert encode.returncode == 0
+        result = process_video((Path(tmp) / "out.mp4").read_bytes())
+
+    assert result.handler == "VideoFrameProcessor"
+    assert result.insight_quality == 1.0
+    assert 1 <= result.extracted["frame_count"] <= MAX_KEYFRAMES
+    assert result.extracted["frames"][0].startswith("data:image/jpeg;base64,")
