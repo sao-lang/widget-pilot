@@ -8,28 +8,37 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
+from packages.contracts.enums import SessionState
 from services.control_plane.accounts.service import AuthService
-from services.control_plane.accounts.stores import InMemoryUserStore
-from services.control_plane.api.server import create_app
 from services.control_plane.attachments.constants import MAX_ATTACHMENT_BYTES
 from services.control_plane.attachments.service import AttachmentService
-from services.control_plane.attachments.stores import (
+from services.control_plane.attachments.validate import validate_transfer
+from services.control_plane.sessions.stores import SessionRow
+from tests.support import (
+    DispatchProcessor,
+    FailingProcessor,
     FakeTenantGuard,
     InMemoryAttachmentStore,
+    InMemoryEventSink,
     InMemoryObjectStore,
+    InMemorySessionStore,
+    InMemoryUserStore,
+    build_test_app,
 )
-from services.control_plane.attachments.validate import validate_transfer
-from services.control_plane.sessions.stores import InMemorySessionStore, SessionRow
 
 _PNG = bytes.fromhex("89504e470d0a1a0a") + b"\x00" * 8
 _TEXT = b"date,value\n2026-01-01,42\n"
 
 
-def _svc(owner: str = "u1") -> AttachmentService:
+def _svc(
+    owner: str = "u1", processor: DispatchProcessor | FailingProcessor | None = None
+) -> AttachmentService:
     return AttachmentService(
         objects=InMemoryObjectStore(),
         attachments=InMemoryAttachmentStore(),
         tenant=FakeTenantGuard({owner: ["s1"]}),
+        processor=processor or DispatchProcessor(),
+        event_sink=InMemoryEventSink(),
     )
 
 
@@ -69,17 +78,17 @@ def test_s2_patch_same_role_is_noop() -> None:
 # ---- S-6：服务走 processors.dispatch，handler 有真实调用记录 ----
 def test_s6_service_dispatch_logged() -> None:
     """S-6：服务上传应记录真实处理器调用（不是只读字典字符串）。"""
-    svc = _svc()
+    processor = DispatchProcessor()
+    svc = _svc(processor=processor)
     r = svc.upload("u1", "s1", _PNG, "image", "image/png", "把这张图当背景")
-    assert r.attachment_id in svc.dispatch_log
-    assert svc.dispatch_log[r.attachment_id] == "VisualRefProcessor"
+    assert r.handler == "VisualRefProcessor"
+    assert processor.handlers == ["VisualRefProcessor"]
 
 
 # ---- S-6：处理器失败 → FAILED + evidenceRef ----
 def test_s6_processor_failure_marks_failed() -> None:
     """A17/S-6：处理器超时 → processing_state=FAILED + evidenceRef 非空。"""
-    svc = _svc()
-    svc.fail_next_dispatch = True
+    svc = _svc(processor=FailingProcessor())
     r = svc.upload("u1", "s1", _PNG, "image", "image/png", "把这张图当背景")
     assert r.processing_state == "FAILED"
     assert r.evidence_ref
@@ -106,12 +115,12 @@ def _api_client(svc: AttachmentService) -> tuple[TestClient, dict[str, str]]:
     reg = auth.register("review@m05.test", "password123")
     user = users.find_by_email("review@m05.test")
     assert user is not None
-    sessions.insert(SessionRow(id="s1", user_id=user.id, state="DRAFT"))
+    sessions.insert(SessionRow(id="s1", user_id=user.id, state=SessionState.DRAFT))
     svc.tenant = FakeTenantGuard({user.id: ["s1"]})
-    app = create_app(
-        users,
-        sessions,
-        "a-very-long-test-secret-key-for-hs256-32bytes",
+    app = build_test_app(
+        user_store=users,
+        session_store=sessions,
+        jwt_secret="a-very-long-test-secret-key-for-hs256-32bytes",
         attachment_service=svc,
     )
     return TestClient(app), {"Authorization": f"Bearer {reg.access_token}"}
@@ -177,8 +186,7 @@ def test_n4_empty_description_returns_422() -> None:
 # ---- R-1：FAILED 行不得被幂等键复用（重试应能重新处理）----
 def test_r1_failed_row_not_reused_by_idempotency() -> None:
     """R-1：处理器失败后同输入重试不得复用 FAILED 行，应重新走成功路径。"""
-    svc = _svc()
-    svc.fail_next_dispatch = True
+    svc = _svc(processor=FailingProcessor())
     first = svc.upload("u1", "s1", _PNG, "image", "image/png", "把这张图当背景")
     assert first.processing_state == "FAILED"
     second = svc.upload("u1", "s1", _PNG, "image", "image/png", "把这张图当背景")

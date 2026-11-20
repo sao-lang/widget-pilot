@@ -31,6 +31,12 @@ x-app-env: &app-env
   JWT_SECRET: ${JWT_SECRET:-change-me-dev-only}
   JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-15m}
   JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-7d}
+  # 真实模型网关（orchestrator 用；build_deps 缺一即 fail-fast，不降级 fake）
+  # 本机无 key 时留空 → orchestrator worker 明确退出，属预期非故障；
+  # 真实联调时在 .env 注入下面三项即可（不硬编码密钥）。
+  MODEL_ENDPOINT: ${MODEL_ENDPOINT:-}
+  MODEL_API_KEY: ${MODEL_API_KEY:-}
+  MODEL_NAME: ${MODEL_NAME:-}
 
 services:
   # ---------- core：日常开发最小集 ----------

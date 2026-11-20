@@ -1,8 +1,7 @@
 // M02 生成物：事件/三协议 Zod 运行时校验 schema（禁止手改）
 import { z } from "zod";
 
-export const Schemas = {
-  AgentEvent: z.object({
+const AgentEvent = z.object({
   "seq": z.number().int().min(0),
   "sessionId": z.string().min(1),
   "runId": z.string().min(1),
@@ -11,8 +10,9 @@ export const Schemas = {
   "phase": z.enum(["DRAFT","RUNNING","PAUSED","AWAITING_INPUT","VALIDATING","COMPLETED","FAILED","CANCELLED"]),
   "payload": z.unknown(),
   "traceId": z.string().min(1),
-}),
-  WidgetSpec: z.object({
+});
+
+const WidgetSpec = z.object({
   "spec_version": z.string().min(1),
   "widget_id": z.string().min(1),
   "grid": z.enum(["2x2","2x4","4x2","4x4","2x1","1x2"]),
@@ -43,17 +43,18 @@ export const Schemas = {
 }),
   "language": z.literal("tsx"),
   "react_version": z.string().min(1),
-  "import_allowlist": z.literal(["react","@widget/bridge"]),
+  "import_allowlist": z.tuple([z.literal("react"),z.literal("@widget/bridge")]),
   "export_contract": z.object({
   "default": z.literal("Widget"),
 }),
-  "props_contract": z.literal(["grid","theme","locale","tick","data"]),
-}),
-  WidgetBundle: z.object({
+  "props_contract": z.tuple([z.literal("grid"),z.literal("theme"),z.literal("locale"),z.literal("tick"),z.literal("data")]),
+});
+
+const WidgetBundle = z.object({
   "bundle_id": z.string().min(1),
   "user_id": z.string().min(1),
   "session_id": z.string().min(1),
-  "spec": Schemas.widget_spec.schema.json,
+  "spec": WidgetSpec,
   "source": z.object({
   "path": z.literal("widget.tsx"),
   "content_ref": z.string().min(1),
@@ -69,7 +70,7 @@ export const Schemas = {
   "grid": z.enum(["2x2","2x4","4x2","4x4","2x1","1x2"]),
   "widget_type": z.enum(["calendar","clock","alarm","task","custom"]),
   "capabilities": z.array(z.enum(["date","timer","local_storage","static_data","theme","locale"])),
-  "import_allowlist": z.literal(["react","@widget/bridge"]),
+  "import_allowlist": z.tuple([z.literal("react"),z.literal("@widget/bridge")]),
   "exports": z.object({
   "default": z.literal("Widget"),
 }),
@@ -97,8 +98,9 @@ export const Schemas = {
   "state": z.enum(["GENERATED","INSTALLED","DELETED"]),
   "hash": z.string(),
   "created_at": z.string().datetime({ offset: true }),
-}),
-  WidgetRuntime: z.object({
+});
+
+const WidgetRuntime = z.object({
   "card": z.object({
   "grid": z.enum(["2x2","2x4","4x2","4x4","2x1","1x2"]),
   "px": z.object({
@@ -107,18 +109,19 @@ export const Schemas = {
 }),
 }),
   "iframe": z.object({
-  "sandbox": z.literal(["allow-scripts"]),
+  "sandbox": z.tuple([z.literal("allow-scripts")]),
   "csp": z.string().min(1),
   "srcdoc_ref": z.string().min(1),
 }),
-  "bridge_messages": z.literal(["widget:ready","widget:resize","widget:error","host:theme","host:locale","host:tick","host:data"]),
+  "bridge_messages": z.tuple([z.literal("widget:ready"),z.literal("widget:resize"),z.literal("widget:error"),z.literal("host:theme"),z.literal("host:locale"),z.literal("host:tick"),z.literal("host:data")]),
   "capability_bridge": z.array(z.enum(["date","timer","local_storage","static_data","theme","locale"])),
   "limits": z.object({
   "render_timeout_ms": z.number().int().min(1),
   "max_message_rate": z.number().int().min(1),
 }),
-}),
-} as const;
+});
+
+export const Schemas = { AgentEvent, WidgetSpec, WidgetBundle, WidgetRuntime } as const;
 
 export const AgentEventSchema = Schemas.AgentEvent;
 export const WidgetSpecSchema = Schemas.WidgetSpec;

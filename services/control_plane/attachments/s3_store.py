@@ -2,7 +2,7 @@
 
 用 httpx + AWS SigV4 签名直连 MinIO（无 boto3 依赖，减少运行期重量）；
 写原文/洞察/派生件到 att/{user_id}/{session_id}/{attachment_id}/* 前缀，
-读必校验 sha256。与 InMemoryObjectStore 同方法集，可插拔（编码规则 8/9）。
+读必校验 sha256。实现 ObjectStorePort 协议，可插拔（编码规则 8/9）。
 """
 
 from __future__ import annotations

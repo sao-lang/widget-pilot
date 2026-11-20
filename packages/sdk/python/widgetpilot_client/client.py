@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import httpx
 
-from .models import ApiResponse, AgentEvent
+from .models import AgentEvent, ApiResponse
 
 
 class WidgetPilotClient:

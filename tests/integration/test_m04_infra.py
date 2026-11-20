@@ -21,6 +21,7 @@ import psycopg
 import pytest
 import redis
 
+from packages.agent_core.errors import CoreError
 from packages.agent_core.types import CheckpointNode
 from packages.contracts.enums import SessionState
 from services.control_plane.accounts.pg_stores import PgUserStore
@@ -35,6 +36,7 @@ from services.orchestrator.adapters import (
     RedisEventBus,
     RedisIdempotencyStore,
 )
+from tests.support import AuditLedger
 
 PG_DSN = "postgresql://widgetpilot:widgetpilot_dev@127.0.0.1:5432/widgetpilot"
 REDIS_URL = "redis://127.0.0.1:6379/0"
@@ -82,9 +84,11 @@ class TestPgLease:
         provider = PgLeaseProvider(PG_DSN)
         run_id = f"run-{uuid4()}"
         lease_a = provider.acquire(run_id, "worker-a", ttl_s=30)
-        lease_b = provider.acquire(run_id, "worker-b", ttl_s=30)
         assert lease_a is not None
-        assert lease_b is None  # 第二抢锁者被 UPDATE ... WHERE 挡回
+        # 第二抢锁者被 UPDATE ... WHERE 挡回，抛业务冲突而非返回 None
+        with pytest.raises(CoreError) as ei:
+            provider.acquire(run_id, "worker-b", ttl_s=30)
+        assert ei.value.code == "HUMAN_REQUIRED"
 
     def test_lease_survives_checkpoint_save(self) -> None:
         """B2 回归：持锁 worker 写新 rev 后，第二 worker 不能抢占（单持锁者贯穿 super-step）。
@@ -106,8 +110,10 @@ class TestPgLease:
                 f"checkpoint/{run_id}/{rev}.json",
                 f"h{rev}",
             )
-        # 新 max rev 行仍应带 worker-a 的租约 → B 抢不到
-        assert provider.acquire(run_id, "worker-b", ttl_s=30) is None
+        # 新 max rev 行仍应带 worker-a 的租约 → B 抢不到（抛业务冲突）
+        with pytest.raises(CoreError) as ei:
+            provider.acquire(run_id, "worker-b", ttl_s=30)
+        assert ei.value.code == "HUMAN_REQUIRED"
 
     def test_expired_lease_takeover(self) -> None:
         """租约过期后另一 worker 可接管（A3 崩溃恢复的 SQL 判定）。"""
@@ -220,7 +226,7 @@ class TestPgStores:
     def test_session_state_machine_persists(self) -> None:
         """会话状态迁移落 PG：建→提交→打断→恢复，跨实例可读（跨天恢复基础）。"""
         store = PgSessionStore(PG_DSN)
-        svc = SessionService(store)
+        svc = SessionService(store, audit=AuditLedger())
         sid = str(uuid4())
         row = SessionRow(
             id=sid, user_id="pg-user", state=SessionState.DRAFT, grid="4x4"
@@ -238,8 +244,8 @@ class TestPgStores:
         from services.control_plane.sessions.service import ConflictError
 
         store = PgSessionStore(PG_DSN)
-        svc_a = SessionService(store)
-        svc_b = SessionService(store)  # 模拟另一个 worker 的独立实例
+        svc_a = SessionService(store, audit=AuditLedger())
+        svc_b = SessionService(store, audit=AuditLedger())  # 模拟另一个 worker 的独立实例
         sid = str(uuid4())
         store.insert(SessionRow(id=sid, user_id="u", state=SessionState.DRAFT))
         # A 先提交 DRAFT→RUNNING
@@ -256,7 +262,7 @@ class TestPgStores:
         from services.control_plane.api.guard import ForbiddenError
 
         store = PgSessionStore(PG_DSN)
-        svc = SessionService(store)
+        svc = SessionService(store, audit=AuditLedger())
         sid = str(uuid4())
         store.insert(SessionRow(id=sid, user_id="owner", state=SessionState.DRAFT))
         with pytest.raises(ForbiddenError):

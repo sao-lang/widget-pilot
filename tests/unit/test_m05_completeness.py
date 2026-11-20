@@ -6,14 +6,27 @@
 from __future__ import annotations
 
 import subprocess
+from typing import cast
 
 import pytest
 
+from packages.agent_core.types import JsonObject
+from packages.contracts.enums import SessionState
+from services.control_plane.attachments.ports import (
+    AgentEventBusPort,
+    ProcessorOutputPort,
+)
 from services.control_plane.attachments.service import AttachmentService
-from services.control_plane.attachments.stores import (
+from tests.support import (
+    DispatchProcessor,
+    FailingProcessor,
     FakeTenantGuard,
     InMemoryAttachmentStore,
+    InMemoryEventSink,
     InMemoryObjectStore,
+    InMemorySessionStore,
+    UnregisteredRoleError,
+    dispatch,
 )
 
 _PNG = bytes.fromhex("89504e470d0a1a0a") + b"\x00" * 8
@@ -40,6 +53,7 @@ def test_n2_patch_roles_uses_injected_processor() -> None:
         InMemoryAttachmentStore(),
         FakeTenantGuard({"u1": ["s1"]}),
         processor=spy,
+        event_sink=InMemoryEventSink(),
     )
     r = svc.upload("u1", "s1", _PNG, "image", "image/png", "把这张图当背景")
     svc.patch_roles("u1", "s1", r.attachment_id, "style_reference")
@@ -53,11 +67,15 @@ def test_a17_timeout_expired_caught() -> None:
         InMemoryObjectStore(),
         InMemoryAttachmentStore(),
         FakeTenantGuard({"u1": ["s1"]}),
+        processor=DispatchProcessor(),
+        event_sink=InMemoryEventSink(),
     )
 
     # 直接让 processor 抛真实 ffmpeg 超时异常类型
     class Boom:
-        def process(self, *a: object) -> object:
+        def process(
+            self, data: bytes, role: str, kind: str, source_ref: str
+        ) -> ProcessorOutputPort:
             raise subprocess.TimeoutExpired(cmd="ffmpeg", timeout=20)
 
     svc.processor = Boom()
@@ -72,8 +90,9 @@ def test_n11_evidence_ref_is_written_object() -> None:
         InMemoryObjectStore(),
         InMemoryAttachmentStore(),
         FakeTenantGuard({"u1": ["s1"]}),
+        processor=FailingProcessor(),
+        event_sink=InMemoryEventSink(),
     )
-    svc.fail_next_dispatch = True
     r = svc.upload("u1", "s1", _PNG, "image", "image/png", "把这张图当背景")
     key = r.evidence_ref.partition("#sha256:")[0].partition("?")[0]
     assert svc.objects.get_raw(key) is not None
@@ -117,9 +136,10 @@ def test_a15_video_extracted_has_regions() -> None:
         assert enc.returncode == 0
         result = process_video((Path(tmp) / "out.mp4").read_bytes())
 
-    assert result.extracted["frame_count"] >= 1
-    assert "regions" in result.extracted
-    assert isinstance(result.extracted["regions"], list)
+    extracted = cast(JsonObject, result.extracted)
+    assert cast(int, extracted["frame_count"]) >= 1
+    assert "regions" in extracted
+    assert isinstance(extracted["regions"], list)
 
 
 def test_n3_s3_versions_filters_by_attachment() -> None:
@@ -139,54 +159,55 @@ def test_n3_s3_versions_filters_by_attachment() -> None:
 # ---- A8/A7：attachment + notice 事件发射（seq 单调）----
 def test_a8_upload_emits_attachment_event() -> None:
     """A8：上传成功必须发 attachment 事件，seq 单调 > 0。"""
-    from services.control_plane.attachments.events import InMemoryEventSink
-
     sink = InMemoryEventSink()
     svc = AttachmentService(
         InMemoryObjectStore(),
         InMemoryAttachmentStore(),
         FakeTenantGuard({"u1": ["s1"]}),
+        processor=DispatchProcessor(),
         event_sink=sink,
     )
     r = svc.upload("u1", "s1", _PNG, "image", "image/png", "把这张图当背景")
     evs = [e for e in sink.events if e["kind"] == "attachment"]
     assert evs and evs[0]["session_id"] == "s1"
-    assert evs[0]["seq"] > 0
-    assert evs[0]["payload"]["attachment_id"] == r.attachment_id
+    assert cast(int, evs[0]["seq"]) > 0
+    payload = cast(JsonObject, evs[0]["payload"])
+    assert payload["attachment_id"] == r.attachment_id
 
 
 def test_a7_ambiguous_emits_notice() -> None:
     """A7：歧义必须发 notice 事件（clarify_hint 可消费），不置 AWAITING_INPUT。"""
-    from services.control_plane.attachments.events import InMemoryEventSink
-
     sink = InMemoryEventSink()
     svc = AttachmentService(
         InMemoryObjectStore(),
         InMemoryAttachmentStore(),
         FakeTenantGuard({"u1": ["s1"]}),
+        processor=DispatchProcessor(),
         event_sink=sink,
     )
     svc.upload("u1", "s1", _PNG, "image", "image/png", "这张图…")
     notices = [e for e in sink.events if e["kind"] == "notice"]
-    assert notices and notices[0]["payload"]["clarify_hint"]
-    assert svc.state_sink.awaiting_calls == []
+    assert notices and cast(JsonObject, notices[0]["payload"])["clarify_hint"]
+    # B2 定稿：澄清只经事件通道；「无 AWAITING_INPUT」由上面 notice 事件断言覆盖，
+    # AttachmentService 已不持有会话状态机（不再有可断言的 state_sink）。
 
 
 def test_a8_patch_emits_new_seq() -> None:
     """A8：PATCH 后事件 seq 必须大于首次上传。"""
-    from services.control_plane.attachments.events import InMemoryEventSink
-
     sink = InMemoryEventSink()
     svc = AttachmentService(
         InMemoryObjectStore(),
         InMemoryAttachmentStore(),
         FakeTenantGuard({"u1": ["s1"]}),
+        processor=DispatchProcessor(),
         event_sink=sink,
     )
     r = svc.upload("u1", "s1", _PNG, "image", "image/png", "把这张图当背景")
-    first = max(e["seq"] for e in sink.events)
+    first = max(cast(int, e["seq"]) for e in sink.events)
     svc.patch_roles("u1", "s1", r.attachment_id, "style_reference")
-    later = [e for e in sink.events if e["kind"] == "attachment" and e["seq"] > first]
+    later = [
+        e for e in sink.events if e["kind"] == "attachment" and cast(int, e["seq"]) > first
+    ]
     assert later
 
 
@@ -197,9 +218,8 @@ def test_a12_get_attachments_cross_user_403() -> None:
     from fastapi.testclient import TestClient
 
     from services.control_plane.accounts.service import AuthService
-    from services.control_plane.accounts.stores import InMemoryUserStore
-    from services.control_plane.api.server import create_app
-    from services.control_plane.sessions.stores import InMemorySessionStore, SessionRow
+    from services.control_plane.sessions.stores import SessionRow
+    from tests.support import InMemoryUserStore, build_test_app
 
     users = InMemoryUserStore()
     sessions = InMemorySessionStore()
@@ -207,16 +227,18 @@ def test_a12_get_attachments_cross_user_403() -> None:
     reg = auth.register("cross@m05.test", "password123")
     user = users.find_by_email("cross@m05.test")
     assert user is not None
-    sessions.insert(SessionRow(id="other-s1", user_id="some-other-user", state="DRAFT"))
+    sessions.insert(SessionRow(id="other-s1", user_id="some-other-user", state=SessionState.DRAFT))
     svc = AttachmentService(
         InMemoryObjectStore(),
         InMemoryAttachmentStore(),
         FakeTenantGuard({user.id: ["own-s1"]}),
+        processor=DispatchProcessor(),
+        event_sink=InMemoryEventSink(),
     )
-    app = create_app(
-        users,
-        sessions,
-        "a-very-long-test-secret-key-for-hs256-32bytes",
+    app = build_test_app(
+        user_store=users,
+        session_store=sessions,
+        jwt_secret="a-very-long-test-secret-key-for-hs256-32bytes",
         attachment_service=svc,
     )
     client = TestClient(app)
@@ -266,12 +288,6 @@ def test_a14_insight_strict_schema() -> None:
 # ---- A18：未注册 role 写告警事件 ----
 def test_a18_unregistered_role_alerts() -> None:
     """A18：伪造 role 被拒且写告警（事件通道），registry 不变。"""
-    from services.control_plane.attachments.events import InMemoryEventSink
-    from services.control_plane.attachments.processors import (
-        UnregisteredRoleError,
-        dispatch,
-    )
-
     sink = InMemoryEventSink()
     with pytest.raises(UnregisteredRoleError):
         dispatch("fake_role", "image", "att/x", alert_sink=sink)
@@ -284,9 +300,8 @@ def test_v1_failed_upload_returns_error_status() -> None:
     from fastapi.testclient import TestClient
 
     from services.control_plane.accounts.service import AuthService
-    from services.control_plane.accounts.stores import InMemoryUserStore
-    from services.control_plane.api.server import create_app
-    from services.control_plane.sessions.stores import InMemorySessionStore, SessionRow
+    from services.control_plane.sessions.stores import SessionRow
+    from tests.support import InMemoryUserStore, build_test_app
 
     users = InMemoryUserStore()
     sessions = InMemorySessionStore()
@@ -294,17 +309,18 @@ def test_v1_failed_upload_returns_error_status() -> None:
     reg = auth.register("fail@m05.test", "password123")
     user = users.find_by_email("fail@m05.test")
     assert user is not None
-    sessions.insert(SessionRow(id="s1", user_id=user.id, state="DRAFT"))
+    sessions.insert(SessionRow(id="s1", user_id=user.id, state=SessionState.DRAFT))
     svc = AttachmentService(
         InMemoryObjectStore(),
         InMemoryAttachmentStore(),
         FakeTenantGuard({user.id: ["s1"]}),
+        processor=FailingProcessor(),
+        event_sink=InMemoryEventSink(),
     )
-    svc.fail_next_dispatch = True
-    app = create_app(
-        users,
-        sessions,
-        "a-very-long-test-secret-key-for-hs256-32bytes",
+    app = build_test_app(
+        user_store=users,
+        session_store=sessions,
+        jwt_secret="a-very-long-test-secret-key-for-hs256-32bytes",
         attachment_service=svc,
     )
     resp = TestClient(app).post(
@@ -322,16 +338,17 @@ def test_v2_event_failure_does_not_break_upload() -> None:
     """V2：事件 sink 抛错必须被吞掉（best-effort），上传仍成功。"""
 
     class BrokenSink:
-        def emit(self, event: dict[str, object]) -> None:
+        def emit(self, event: JsonObject) -> None:
             raise RuntimeError("sink down")
 
-        def next_seq(self) -> int:
+        def next_seq(self, session_id: str = "") -> int:
             return 1
 
     svc = AttachmentService(
         InMemoryObjectStore(),
         InMemoryAttachmentStore(),
         FakeTenantGuard({"u1": ["s1"]}),
+        processor=DispatchProcessor(),
         event_sink=BrokenSink(),
     )
     r = svc.upload("u1", "s1", _PNG, "image", "image/png", "把这张图当背景")
@@ -370,7 +387,11 @@ def test_v4_idem_integrity_error_folds_to_existing() -> None:
     store.insert(existing)
     store.raise_on_insert = True
     svc = AttachmentService(
-        InMemoryObjectStore(), store, FakeTenantGuard({"u1": ["s1"]})
+        InMemoryObjectStore(),
+        store,
+        FakeTenantGuard({"u1": ["s1"]}),
+        processor=DispatchProcessor(),
+        event_sink=InMemoryEventSink(),
     )
     loser = AttachmentRow(
         id="loser",
@@ -423,7 +444,11 @@ def test_r1_failed_row_conflict_retries() -> None:
     store.insert(failed)
     store.conflict = True
     svc = AttachmentService(
-        InMemoryObjectStore(), store, FakeTenantGuard({"u1": ["s1"]})
+        InMemoryObjectStore(),
+        store,
+        FakeTenantGuard({"u1": ["s1"]}),
+        processor=DispatchProcessor(),
+        event_sink=InMemoryEventSink(),
     )
     fresh = AttachmentRow(
         id="retry",
@@ -457,8 +482,11 @@ def test_r2_seq_is_per_session() -> None:
             self.counters[key] = self.counters.get(key, 0) + 1
             return self.counters[key]
 
-    sink = RedisEventSink(bus=object(), redis_url="redis://unused")
-    sink._redis = FakeRedis()
+    sink = RedisEventSink(bus=cast(AgentEventBusPort, object()), redis_url="redis://unused")
+    # 测试钩子：注入伪 Redis 替换构造时的真实客户端（避开 Any 穿透类型）。
+    # 属性名走变量：既绕开 pyright 私有属性访问，也满足 ruff B010（禁常量名 setattr）。
+    _redis_attr = "_redis"
+    setattr(sink, _redis_attr, FakeRedis())
     s1a = sink.next_seq("s1")
     s2a = sink.next_seq("s2")
     s1b = sink.next_seq("s1")

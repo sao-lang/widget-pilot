@@ -1,6 +1,6 @@
 """M05 生产租户守卫：用 M04 SessionStore 查 session 归属（§4.3 assert_owner）。
 
-与 FakeTenantGuard 同接口（assert_owner(user_id, session_id)），越权抛
+实现 TenantGuardPort（assert_owner(user_id, session_id)），越权抛
 PermissionError（API 层映射 403），不泄漏会话是否存在（§7）。
 """
 

@@ -17,7 +17,7 @@ daemon 时 §8 验收用 conftest 内存替身跑全用例；真实 PG SQL 原�
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from typing import Final
 
@@ -27,6 +27,7 @@ from sqlalchemy import func, literal, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
+from packages.agent_core.errors import CoreError
 from packages.agent_core.types import AgentEvent, CheckpointNode, State
 from services.control_plane.accounts.constants import LEASE_TTL_S
 from services.control_plane.db import make_session_factory, session_scope
@@ -43,7 +44,7 @@ _FIELD_RESULT_REF: Final[str] = "result_ref"
 _LEASE_UNOWNED: Final[str] = ""
 
 
-def _to_str(value: object) -> str:
+def _to_str(value: bytes | str | None) -> str:
     """把 redis-py 返回的 bytes/str 统一解码为 str（wire 契约全用字符串）。
 
     redis-py 默认 decode_responses=False，GET/XRANGE 返回 bytes；直接 str(bytes)
@@ -54,7 +55,7 @@ def _to_str(value: object) -> str:
     return str(value) if value is not None else ""
 
 
-def _stream_data(fields: object) -> str:
+def _stream_data(fields: Mapping[bytes | str, bytes | str]) -> str:
     """从 Redis Stream 的 fields 映射取 'data' 字段并解码（键可能是 bytes）。
 
     XRANGE/XREVRANGE 返回 {b'data': b'...'}（键与值皆 bytes）；用 str 键直取
@@ -225,8 +226,8 @@ class PgLeaseProvider:
         """
         self._factory = make_session_factory(dsn)
 
-    def acquire(self, run_id: str, owner: str, ttl_s: int) -> PgLease | None:
-        """原子抢锁；成功返回 PgLease，已被他人持有返回 None（A4 单持锁者）。
+    def acquire(self, run_id: str, owner: str, ttl_s: int) -> PgLease:
+        """原子抢锁；成功返回 PgLease，抢不到抛 CoreError（A4 单持锁者）。
 
         先 ON CONFLICT DO NOTHING 建 rev=0 锚点，再条件 UPDATE（租约空闲/过期
         才命中）。RETURNING 判赢家 —— PG 行锁保证并发恰好一个成功。
@@ -237,7 +238,11 @@ class PgLeaseProvider:
             ttl_s: 租约有效期秒数。
 
         Returns:
-            抢锁成功返回 PgLease；已被他人持有且未过期返回 None。
+            抢锁成功返回 PgLease（符合 M03 LeaseProvider 协议的非空返回约定）。
+
+        Raises:
+            CoreError: 已被他人持有且未过期，抛业务冲突 HUMAN_REQUIRED；
+                与 FakeLeaseProvider 行为一致，防止未持锁的 worker 继续跑 run()。
         """
         ttl_expr = func.now() + (literal(ttl_s) * text("interval '1 second'"))
         with session_scope(self._factory) as session:
@@ -268,7 +273,9 @@ class PgLeaseProvider:
                 .returning(Checkpoint.run_id)
             )
             won = session.execute(stmt).first() is not None
-        return PgLease(self, run_id, owner) if won else None
+        if not won:
+            raise CoreError.business("HUMAN_REQUIRED", "lease held by another owner")
+        return PgLease(self, run_id, owner)
 
     def heartbeat(self, run_id: str, owner: str) -> bool:
         """续租：仅 owner 匹配且未过期时刷新；返回是否成功（§11.4 step 2）。
@@ -477,7 +484,7 @@ class RedisEventBus:
         # XREVRANGE 返回新→旧，反转为按 seq 升序（I5：续传要求顺序）
         events: list[AgentEvent] = []
         for _msg_id, fields in reversed(raw):
-            decoded = self._event_decode(_stream_data(fields))
+            decoded = self._event_decode(_stream_data(fields or {}))
             # 未知 kind 返回 None → 跳过（§4.5 前端/服务端对未知 kind 忽略而非报错）
             if decoded is not None:
                 events.append(decoded)
@@ -489,7 +496,7 @@ class RedisEventBus:
         events: list[AgentEvent] = []
         for key in client.scan_iter(match=f"{_KEY_CHECKPOINT}:events:*"):
             for _msg_id, fields in client.xrange(_to_str(key)) or []:
-                decoded = self._event_decode(_stream_data(fields))
+                decoded = self._event_decode(_stream_data(fields or {}))
                 if decoded is not None:
                     events.append(decoded)
         return events

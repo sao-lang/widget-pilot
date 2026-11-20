@@ -18,6 +18,7 @@ from sqlalchemy.dialects.postgresql import TIMESTAMP
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from packages.contracts.enums import SessionState, UserRole
+from packages.contracts.types import JsonObject
 from services.control_plane.accounts.stores import UserRow
 from services.control_plane.attachments.stores import AttachmentRow
 from services.control_plane.sessions.stores import SessionRow
@@ -30,12 +31,12 @@ class Base(DeclarativeBase):
     """声明式基类（所有 M04 ORM 模型的共同元数据容器）。"""
 
 
-def _as_int(value: object) -> int:
+def _as_int(value: int | str | None) -> int:
     """把 DB 数值列收窄为 int（异常/None 回退 0，fail-safe）。"""
     return int(value) if isinstance(value, (int, str)) else 0
 
 
-def _as_datetime(value: object) -> datetime:
+def _as_datetime(value: datetime | str | None) -> datetime:
     """把 DB 时间列收窄为 aware datetime（异常回退当前 UTC，fail-safe）。"""
     return value if isinstance(value, datetime) else datetime.now(UTC)
 
@@ -110,6 +111,10 @@ class Session(Base):
     """已回答澄清次数（上限 2，D-7）。"""
     clarification_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
     """澄清答案槽位（P0-2 跨天恢复）。"""
+    original_description: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=""
+    )
+    """首次提交原始描述（R3-1 v1.8）：护栏前置挂起无 checkpoint，澄清重入据此恢复上下文。"""
     last_seq: Mapped[int] = mapped_column(
         BigInteger, nullable=False, server_default="0"
     )
@@ -150,6 +155,7 @@ class Session(Base):
             clarification_answer=self.clarification_answer
             if isinstance(self.clarification_answer, str)
             else None,
+            original_description=str(self.original_description or ""),
             last_seq=_as_int(self.last_seq),
             checkpoint_rev=_as_int(self.checkpoint_rev),
             run_id=self.run_id if isinstance(self.run_id, str) else None,
@@ -226,7 +232,7 @@ class AuditEvent(Base):
     """动作（AuditActions 常量）。"""
     decision: Mapped[str] = mapped_column(Text, nullable=False)
     """判定结果（OK / reason_code / FORBIDDEN）。"""
-    payload: Mapped[dict[str, object]] = mapped_column(
+    payload: Mapped[JsonObject] = mapped_column(
         JSON, nullable=False, server_default="{}"
     )
     """证据载荷（无 PII 原文）。"""

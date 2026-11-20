@@ -8,7 +8,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 from fastapi import (
@@ -23,9 +24,10 @@ from fastapi import (
     status,
 )
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from packages.contracts.enums import SessionState
+from packages.contracts.types import ApiEnvelope, JsonObject, JsonValue
 from services.control_plane.accounts.service import (
     AuthError,
     AuthService,
@@ -33,13 +35,21 @@ from services.control_plane.accounts.service import (
 )
 from services.control_plane.accounts.stores import UserRow, UserStore
 from services.control_plane.api.guard import ForbiddenError
+from services.control_plane.attachments.ports import AttachmentServicePort
+from services.control_plane.audit.ledger import AuditLedgerPort
 from services.control_plane.sessions.service import (
     ConflictError,
     SessionError,
     SessionService,
 )
-from services.control_plane.sessions.sse import EventWindow, SSEWindow
+from services.control_plane.sessions.sse import EventWindow
 from services.control_plane.sessions.stores import SessionRow, SessionStore
+from services.guardrails.grid_resolver import resolve_grid
+
+if TYPE_CHECKING:
+    # task_enqueuer 的生产实现是 RedisTaskQueue.enqueue(task: Task) -> str；
+    # 用精确 Task 别名与 str 返回值才能通过调用点的类型校验（无裸 object）。
+    from services.orchestrator.dispatcher import Task
 
 # 业务码常量（编码规则 5：语义字符串具名）
 _CODE_OK: str = "OK"
@@ -95,11 +105,16 @@ class MessageReq(BaseModel):
 
 
 class ClarificationReq(BaseModel):
-    """澄清回答请求体（v1.3 D-7）。"""
+    """澄清回答请求体（v1.3 D-7，v1.8 A2 补 grid 回注）。"""
 
     model_config = ConfigDict(extra="forbid")
     question_id: str
-    answer: str
+    # R2-2（v1.8 复审）：空回答不得越过护栏（grid_confirmed 跳过充分性后，
+    # 空串会连带绕过 R1）——用 min_length 强制非空。
+    answer: str = Field(min_length=1)
+    # A2（v1.8）：规格询问的回答若已定稿为 grid，前端一并回传，
+    # 作为 clarified_grid 重入队，使 validate_chain 溯源 grid_source="clarified"。
+    grid: str | None = None
 
 
 class PatchRoleItem(BaseModel):
@@ -117,7 +132,7 @@ class PatchRolesReq(BaseModel):
     roles: list[PatchRoleItem]
 
 
-def _m05_ok(data: object, evidence_ref: str = "") -> dict[str, Any]:
+def _m05_ok(data: JsonValue, evidence_ref: str = "") -> ApiEnvelope:
     """M05 成功响应（openapi ApiResponse 完整字段，S-1/N5）。"""
     return {
         "code": _CODE_OK,
@@ -129,7 +144,7 @@ def _m05_ok(data: object, evidence_ref: str = "") -> dict[str, Any]:
     }
 
 
-def _m05_error(code: str, detail: str, evidence_ref: str = "") -> dict[str, Any]:
+def _m05_error(code: str, detail: str, evidence_ref: str = "") -> ApiEnvelope:
     """M05 失败响应（code 对齐 ReasonCode + data.detail.code + evidenceRef，S-1/A4/N5）。"""
     return {
         "code": code,
@@ -141,7 +156,7 @@ def _m05_error(code: str, detail: str, evidence_ref: str = "") -> dict[str, Any]
     }
 
 
-def _ok(data: object) -> dict[str, Any]:
+def _ok(data: JsonValue) -> ApiEnvelope:
     """成功响应包装（基线 §5.1 ApiResponse 的最小形态）。"""
     return {"code": _CODE_OK, "data": data}
 
@@ -150,20 +165,26 @@ def create_app(
     user_store: UserStore,
     session_store: SessionStore,
     jwt_secret: str,
-    event_source: EventWindow | None = None,
-    attachment_service: Any | None = None,
+    event_source: EventWindow,
+    attachment_service: AttachmentServicePort | None,
+    audit: AuditLedgerPort,
+    task_enqueuer: Callable[[Task], str],
 ) -> FastAPI:
-    """构造 M04 API app（注入存储与密钥，便于测试替身与生产适配器切换）。
+    """构造 M04 API app（所有真实依赖必须显式注入，源码不保留测试桩）。
 
     Args:
-        event_source: SSE 事件源；None 时用空 SSEWindow（无事件流的部署可缺省）。
-        attachment_service: M05 附件服务；None 时不挂载 M05 路由（向后兼容既有测试）。
+        user_store: 用户存储（生产为 PgUserStore）。
+        session_store: 会话存储（生产为 PgSessionStore）。
+        jwt_secret: JWT 签名密钥（无默认值，缺配置即 fail-fast）。
+        event_source: SSE 事件源（生产为 RedisEventSource）。
+        attachment_service: M05 附件服务；None 时不挂载附件路由（部署形态，非兼容桩）。
+        audit: 审计账本（生产为 PgAuditLedger）。
+        task_enqueuer: 任务入队回调（生产为 RedisTaskQueue.enqueue）。
     """
     app = FastAPI(title="WidgetPilot control-plane M04", docs_url=None, redoc_url=None)
     auth = AuthService(user_store, jwt_secret)
-    sessions = SessionService(session_store)
-    # 事件源缺省为空窗口（规则 9：协议必有默认实现）
-    events = event_source or SSEWindow(window_n=500)
+    sessions = SessionService(session_store, audit=audit)
+    events = event_source
 
     def current_user(authorization: str | None = Header(default=None)) -> UserRow:
         """Bearer JWT 鉴权依赖：解析 token → 还原用户，失败 401。"""
@@ -186,7 +207,7 @@ def create_app(
     CurrentUser = Depends(current_user)
 
     @app.post("/api/auth/register")
-    def register(req: RegisterReq) -> dict[str, Any]:
+    def register(req: RegisterReq) -> ApiEnvelope:
         """注册：签发双令牌 + 用户信息；重复邮箱 409（§4.1）。"""
         try:
             result = auth.register(req.email, req.password)
@@ -206,7 +227,7 @@ def create_app(
         )
 
     @app.post("/api/auth/login")
-    def login(req: LoginReq) -> dict[str, Any]:
+    def login(req: LoginReq) -> ApiEnvelope:
         """登录：校验凭据；失败 401（不泄漏账号是否存在）。"""
         try:
             result = auth.login(req.email, req.password)
@@ -223,7 +244,7 @@ def create_app(
         )
 
     @app.post("/api/auth/refresh")
-    def refresh(req: RefreshReq) -> dict[str, Any]:
+    def refresh(req: RefreshReq) -> ApiEnvelope:
         """S4：刷新 access token（M02 Q3 定稿路径；失效 refresh → 401）。"""
         try:
             access = auth.refresh(req.refresh_token)
@@ -234,20 +255,20 @@ def create_app(
         return _ok({"access_token": access})
 
     @app.get("/api/sessions")
-    def list_sessions(user: UserRow = CurrentUser) -> dict[str, Any]:
+    def list_sessions(user: UserRow = CurrentUser) -> ApiEnvelope:
         """会话列表：按 user_id 隔离（§4.1）。"""
         return _ok({"items": [s.id for s in session_store.list_by_user(user.id)]})
 
     @app.post("/api/sessions", status_code=status.HTTP_200_OK)
     def create_session(
         req: CreateSessionReq, user: UserRow = CurrentUser
-    ) -> dict[str, Any]:
+    ) -> ApiEnvelope:
         """新建会话：state=DRAFT（§5.2）。"""
         row = sessions.create(user.id, req.title, req.grid)
         return _ok(_session_view(row))
 
     @app.get("/api/sessions/{session_id}")
-    def get_session(session_id: str, user: UserRow = CurrentUser) -> dict[str, Any]:
+    def get_session(session_id: str, user: UserRow = CurrentUser) -> ApiEnvelope:
         """会话快照：跨用户 403（A1）。"""
         try:
             row = sessions.snapshot(session_id, user.id)
@@ -264,7 +285,7 @@ def create_app(
         session_id: str,
         req: MessageReq,
         user: UserRow = CurrentUser,
-    ) -> dict[str, Any]:
+    ) -> ApiEnvelope:
         """提交描述：DRAFT→RUNNING，202 已受理（§5.5 异步语义）。"""
         try:
             row = sessions.submit_message(
@@ -276,6 +297,19 @@ def create_app(
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST, _CODE_INPUT_INVALID
             ) from exc
+        # B1b：迁移成功后入队，dispatcher 消费驱动 agent loop（生产注入真实队列）
+        task_enqueuer(
+            {
+                "session_id": session_id,
+                "user_id": user.id,  # review B1：挂起回写需真实 owner 做租户校验
+                "run_id": row.run_id or "",
+                "description": req.description,
+                "grid": req.grid or "",
+                # C1/A1（v1.8）：附件 id 随任务下传，dispatcher 过校验链时
+                # 由 guardrail_adapter 解析成 AttachmentView（此前是死参数）。
+                "attachment_ids": req.attachment_ids,
+            }
+        )
         return _ok({"runId": row.run_id, "state": row.state.value})
 
     @app.post(
@@ -286,7 +320,7 @@ def create_app(
         session_id: str,
         req: ClarificationReq,
         user: UserRow = CurrentUser,
-    ) -> dict[str, Any]:
+    ) -> ApiEnvelope:
         """回答澄清：AWAITING_INPUT→RUNNING（D-7）。"""
         try:
             row = sessions.answer_clarification(
@@ -300,10 +334,39 @@ def create_app(
             ) from exc
         except ConflictError as exc:
             raise HTTPException(status.HTTP_409_CONFLICT, _CODE_CONFLICT) from exc
+        # A2/B1（v1.8）：澄清后重入队，带澄清标记 + clarified_grid 走同一条校验链。
+        # R2-1（复审）：answer 用 M06 resolve_grid 的别名规则解析（"四行四列"/"4X4"/
+        # "就用4x4吧" 等），不再只做精确枚举匹配——否则合法纯文本回答仍死循环。
+        # R2-2（复审）：澄清重入是独立语义（clarification_reply=1），grid_confirmed
+        # 由该标记决定、不依赖 grid 是否解析成功（role 澄清等非规格回答也适用）；
+        # 空 answer 已由 ClarificationReq.min_length 拒绝，防越过 R1。
+        clarified = req.grid or ""
+        if not clarified:
+            try:
+                resolved = resolve_grid(None, req.answer)
+                if resolved.grid is not None:
+                    clarified = resolved.grid.value
+            except ValueError:
+                clarified = ""
+        task_enqueuer(
+            {
+                "session_id": session_id,
+                "user_id": user.id,
+                "run_id": row.run_id or "",
+                # R3-1（v1.8 终审）：description 用首次提交的原始需求（已持久化到
+                # SessionRow.original_description），answer 只进 clarification_answer
+                # 槽位——否则澄清后模型只收到"四行四列"，丢失控件/特征需求。
+                # 澄清态已跳过描述充分性，原描述过长不会误拒；注入扫描照常执行。
+                "description": row.original_description or req.answer,
+                "grid": clarified,
+                "clarified_grid": clarified,
+                "clarification_reply": "1",
+            }
+        )
         return _ok({"state": row.state.value})
 
     @app.post("/api/sessions/{session_id}/interrupt")
-    def interrupt(session_id: str, user: UserRow = CurrentUser) -> dict[str, Any]:
+    def interrupt(session_id: str, user: UserRow = CurrentUser) -> ApiEnvelope:
         """打断：幂等（A6）；越权 403 / 状态冲突 409。"""
         try:
             row = sessions.interrupt(session_id, user.id)
@@ -320,7 +383,7 @@ def create_app(
         )
 
     @app.post("/api/sessions/{session_id}/resume")
-    def resume(session_id: str, user: UserRow = CurrentUser) -> dict[str, Any]:
+    def resume(session_id: str, user: UserRow = CurrentUser) -> ApiEnvelope:
         """继续：终态 409（A13）；越权 403。"""
         try:
             row = sessions.resume(session_id, user.id)
@@ -331,7 +394,7 @@ def create_app(
         return _ok({"state": row.state.value, "runId": row.run_id})
 
     @app.post("/api/sessions/{session_id}/cancel")
-    def cancel(session_id: str, user: UserRow = CurrentUser) -> dict[str, Any]:
+    def cancel(session_id: str, user: UserRow = CurrentUser) -> ApiEnvelope:
         """取消：任意非终态→CANCELLED；越权 403。"""
         try:
             row = sessions.cancel(session_id, user.id)
@@ -359,7 +422,7 @@ def create_app(
         except SessionError as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, _CODE_INPUT_INVALID) from exc
 
-        def frames() -> object:
+        def frames() -> Iterator[str]:
             """生成 SSE 帧：id/event/data 三行 + 空行，末尾心跳注释帧。"""
             for event in events.since(last_event_id or 0, session_id):
                 payload = json.dumps(event["payload"], default=str)
@@ -367,7 +430,7 @@ def create_app(
             yield ": keepalive\n\n"
 
         return StreamingResponse(
-            frames(),  # type: ignore[arg-type]
+            frames(),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -376,6 +439,9 @@ def create_app(
         )
 
     # M05 附件路由（v1.7：description 随上传提交，角色判定在上传时完成）
+    # 【已登记的框架边界豁免】返回标注用 Any：成功分支是契约 dict，错误分支直接返回
+    # JSONResponse；FastAPI 会把 dict | JSONResponse 之类联合注解当 response_model 解析
+    # 并拒绝注册，故此处不能用 ApiEnvelope 联合注解。
     if attachment_service is not None:
 
         @app.post("/api/attachments")
@@ -384,7 +450,7 @@ def create_app(
             session_id: str = _SESSION_FORM,
             description: str = _DESCRIPTION_FORM,
             user: UserRow = CurrentUser,
-        ) -> dict[str, Any]:
+        ) -> Any:
             """附件上传：流式限量读取 + 传输层校验 + 存储 + role 判定。"""
             from services.control_plane.attachments.constants import (
                 MAX_ATTACHMENT_BYTES,
@@ -466,15 +532,18 @@ def create_app(
                     "role_confidence": uploaded.role_confidence,
                     "insight_ref": uploaded.insight_ref,
                     "insight_quality": uploaded.insight_quality,
+                    # C2（v1.8）：role 歧义时透出澄清提示（与 notice 事件同值），
+                    # 调用方无需订阅 SSE 即可立即拿到（M05 §1.4 v1.8 标注）。
+                    "clarify_hint": uploaded.clarify_hint,
                 }
             )
 
         @app.patch("/api/sessions/{session_id}/attachment-roles")
         def patch_attachment_roles(
             session_id: str, req: PatchRolesReq, user: UserRow = CurrentUser
-        ) -> dict[str, Any]:
+        ) -> Any:
             """role 纠偏 + 从该步重跑（§4.1 / S3 双入口态）。"""
-            updated: list[dict[str, str]] = []
+            updated: list[JsonObject] = []
             for item in req.roles:
                 try:
                     result = attachment_service.patch_roles(
@@ -497,12 +566,17 @@ def create_app(
                         "insight_ref": result.insight_ref or "",
                     }
                 )
-            return _m05_ok({"updated": updated, "rerun_from": "ROLE_ASSIGNED"})
+            return _m05_ok(
+                cast(
+                    JsonObject,
+                    {"updated": updated, "rerun_from": "ROLE_ASSIGNED"},
+                )
+            )
 
         @app.get("/api/sessions/{session_id}/attachments")
         def list_attachments(
             session_id: str, user: UserRow = CurrentUser
-        ) -> dict[str, Any]:
+        ) -> Any:
             """列出会话附件（§4.1 / A12：越权 403，不泄漏是否存在）。"""
             try:
                 rows = attachment_service.attachments.list_by_session(
@@ -535,6 +609,7 @@ def create_app(
                             "role_confidence": r.role_confidence,
                             "insight_ref": r.insight_ref,
                             "insight_quality": r.insight_quality,
+                            "clarify_hint": r.clarify_hint,
                             "processing_state": r.processing_state,
                         }
                         for r in rows
@@ -543,23 +618,10 @@ def create_app(
             )
 
     # 测试钩子：把会话置为 AWAITING_INPUT（生产由 M06 语义层触发，此处仅供接线测试）
-    @app.post("/api/sessions/{session_id}/_test_awaiting")
-    def test_awaiting(session_id: str, user: UserRow = CurrentUser) -> dict[str, Any]:
-        """测试专用：模拟语义层判定转 AWAITING_INPUT（生产环境不注册此路由）。"""
-        try:
-            row = sessions.mark_awaiting_input(
-                session_id, user.id, "CLARIFICATION_REQUIRED"
-            )
-        except ForbiddenError as exc:
-            raise HTTPException(status.HTTP_403_FORBIDDEN, _CODE_FORBIDDEN) from exc
-        except ConflictError as exc:
-            raise HTTPException(status.HTTP_409_CONFLICT, _CODE_CONFLICT) from exc
-        return _ok({"state": row.state.value})
-
     return app
 
 
-def _session_view(row: SessionRow) -> dict[str, object]:
+def _session_view(row: SessionRow) -> JsonObject:
     """Session 行 → 响应视图（确定键，避免暴露内部字段）。"""
     return {
         "id": row.id,

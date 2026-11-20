@@ -1,26 +1,150 @@
-"""orchestrator worker 进程探针壳（M01 §3.3：无端口 worker 用进程级探针）。
+"""orchestrator worker 主进程（B1b：真实编排回路 + 进程健康探针）。
 
-真实编排回路（checkpoint/lease/事件流）归 M04/M07；此壳仅维持进程存活
-供 HEALTHCHECK pgrep 探测，并写最近心跳文件兜底。
+用生产 Deps（真实 PG checkpoint/lease、Redis 幂等/事件/任务队列、真实模型网关）
+构造 Dispatcher，持续消费任务驱动 agent loop；同时每 10s 刷新心跳文件供
+Docker HEALTHCHECK 探测（M01 §3.3 无端口 worker 探针）。
+
+模型网关从 env 读取，缺失时 fail-fast 退出——禁止静默降级 fake。
+恢复扫描：周期把过期租约的 run 重新入队（worker 被杀后另一实例接管）。
 """
+
 from __future__ import annotations
 
 import asyncio
 import json
 import os
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
+from sqlalchemy import select
+
+from services.control_plane.db import make_session_factory, session_scope
+from services.control_plane.models import Checkpoint
+from services.control_plane.sessions.pg_stores import PgSessionStore
+from services.orchestrator.deps import build_deps
+from services.orchestrator.dispatcher import (
+    TASK_QUEUE_KEY,
+    Dispatcher,
+    RedisTaskQueue,
+    Task,
+)
+
 HEARTBEAT_INTERVAL_S = 10
+SCAN_INTERVAL_S = 30
+_ENV_REDIS_URL = "REDIS_URL"
+_ENV_DATABASE_URL = "DATABASE_URL"
+_ENV_OWNER = "WORKER_OWNER"
+_DEFAULT_OWNER = "orchestrator-1"
+
+
+def scan_expired_tasks(dsn: str) -> list[Task]:
+    """扫过期租约的 run，反查会话构造完整恢复任务（review B3）。
+
+    只带回真实 session_id/user_id，避免恢复任务因空 session_id 回写失败。
+
+    Args:
+        dsn: PG 连接串。
+
+    Returns:
+        恢复任务列表（含 session_id/user_id/run_id），无匹配会话的 run 跳过。
+    """
+    with session_scope(make_session_factory(dsn)) as session:
+        run_ids = session.scalars(
+            select(Checkpoint.run_id)
+            .where(Checkpoint.lease_until < datetime.now(UTC))
+            .where(Checkpoint.lease_owner.is_not(None))
+            .distinct()
+        ).all()
+    sessions = PgSessionStore(dsn)
+    tasks: list[Task] = []
+    for raw_run_id in run_ids:
+        run_id = str(raw_run_id)
+        row = sessions.find_by_run_id(run_id)
+        if row is None:
+            continue  # 会话已删/无匹配：跳过，避免构造空 session 任务
+        tasks.append(
+            {
+                "session_id": row.id,
+                "user_id": row.user_id,
+                "run_id": run_id,
+                "description": "",
+                # M5（v1.8）：恢复任务标记 resume=1——首次提交已过校验链，
+                # 恢复是续跑而非新请求；dispatcher 据此跳过校验避免空描述被误挂起。
+                "resume": "1",
+            }
+        )
+    return tasks
 
 
 async def main() -> None:
+    """启动编排主循环 + 心跳 + 恢复扫描。
+
+    Raises:
+        RuntimeError: 模型网关 env 未配齐（build_deps fail-fast，不降级 fake）。
+    """
     hb_path = Path(os.getenv("HEARTBEAT_FILE", "/tmp/orchestrator.heartbeat"))
-    print(f"[orchestrator] worker started env={os.getenv('ENV', 'dev')} (health shell)", flush=True)
+    try:
+        redis_url = os.environ[_ENV_REDIS_URL]
+        dsn = os.environ[_ENV_DATABASE_URL]
+    except KeyError as exc:
+        raise RuntimeError(f"worker requires {exc.args[0]} env var") from exc
+    owner = os.getenv(_ENV_OWNER, _DEFAULT_OWNER)
+
+    # 延迟导入：避免与 control_plane 健康壳的循环依赖
+    from services.control_plane.attachments.pg_stores import PgAttachmentStore
+    from services.control_plane.audit.pg_ledger import PgAuditLedger
+    from services.control_plane.sessions.pg_stores import PgSessionStore
+    from services.control_plane.sessions.service import SessionService
+    from services.orchestrator.guardrail_adapter import build_validator
+
+    deps = build_deps(dsn, redis_url, owner=owner)  # 缺模型配置 → fail-fast
+    queue = RedisTaskQueue(redis_url, TASK_QUEUE_KEY, consumer=owner)
+    sessions = SessionService(PgSessionStore(dsn), audit=PgAuditLedger(dsn))
+    # A1（v1.8）：把 M06 校验链接进生产编排入口（run() 前过护栏）。
+    # L2/L3/L4 真实模型端口不注入（M20/M07 提供，属排除项），走默认结构化兜底。
+    attachment_store = PgAttachmentStore(dsn)
+    # A3（v1.8）：传 dsn 注入四表 PG 留证（guard_hit + IntentRouteLog/SkillPrefetchLog/
+    # NeedSkillLog）；guard_hit PG 不可用时保守拒绝放行。表由迁移 0005/0007 建立。
+    validator = build_validator(attachment_store.get, redis_url, dsn=dsn)
+    dispatcher = Dispatcher(
+        queue=queue, deps=deps, sessions=sessions, validator=validator
+    )
+
+    print(
+        f"[orchestrator] worker started owner={owner} (real orchestration loop)",
+        flush=True,
+    )
+    loop = asyncio.get_running_loop()
+    last_hb = time.monotonic()
+    last_scan = time.monotonic()
     while True:
-        hb_path.parent.mkdir(parents=True, exist_ok=True)
-        hb_path.write_text(json.dumps({"ts": time.time(), "service": "orchestrator"}))
-        await asyncio.sleep(HEARTBEAT_INTERVAL_S)
+        # consume 是同步阻塞（Redis XREADGROUP 短 block）；放线程池避免卡住事件循环
+        # 复审 Major：单任务失败（run() 抛错）只记日志继续——任务留 PEL 由重投/死信
+        # 处理，不能击穿主循环导致进程崩溃-重启循环。
+        try:
+            processed = await loop.run_in_executor(None, dispatcher.process_one)
+        except Exception as exc:  # noqa: BLE001 - 单任务容错，主循环必须存活
+            print(f"[orchestrator] task failed (left in PEL): {exc}", flush=True)
+            processed = 0
+        now = time.monotonic()
+        if now - last_hb >= HEARTBEAT_INTERVAL_S:
+            hb_path.parent.mkdir(parents=True, exist_ok=True)
+            hb_path.write_text(
+                json.dumps(
+                    {"ts": time.time(), "service": "orchestrator", "owner": owner}
+                )
+            )
+            last_hb = now
+        if now - last_scan >= SCAN_INTERVAL_S:
+            # 恢复扫描失败只记日志，不崩主循环（租约最终会过期重试）
+            try:
+                queue.replay_expired(scan_expired_tasks(dsn))
+            except Exception as exc:  # noqa: BLE001 - 后台扫描容错，主循环继续
+                print(f"[orchestrator] scan_expired failed: {exc}", flush=True)
+            last_scan = now
+        if processed == 0:
+            await asyncio.sleep(0.2)  # 空转让出 CPU（consume 自带 1s block）
 
 
 if __name__ == "__main__":

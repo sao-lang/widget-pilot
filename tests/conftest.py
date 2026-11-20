@@ -18,6 +18,7 @@ from packages.agent_core.state.checkpoint import CheckpointRow
 from packages.agent_core.types import (
     AgentEvent,
     CheckpointNode,
+    JsonObject,
     Message,
     ModelOutput,
     State,
@@ -54,7 +55,7 @@ class RaiseSpec(TypedDict):
     retryable: bool | None
 
 
-type ScriptItem = ModelOutput | Exception | str | dict[str, object]
+type ScriptItem = ModelOutput | Exception | str | JsonObject
 """FakeModel 脚本项：预置输出 / 异常 / 文本 / 原始 dict（含 {"raise": ...}）。"""
 
 

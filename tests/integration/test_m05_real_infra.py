@@ -8,9 +8,12 @@ skip 守卫：依赖不可达时明确 skip（不冒充通过）；Docker core �
 from __future__ import annotations
 
 import os
+from typing import cast
 
 import pytest
 
+from packages.agent_core.types import JsonObject, JsonValue
+from packages.contracts.enums import SessionState
 from services.control_plane.attachments.pg_stores import PgAttachmentStore
 from services.control_plane.attachments.processor_adapter import RealProcessor
 from services.control_plane.attachments.s3_store import S3ObjectStore
@@ -18,6 +21,7 @@ from services.control_plane.attachments.service import AttachmentService
 from services.control_plane.attachments.tenant_guard import SessionTenantGuard
 from services.control_plane.sessions.pg_stores import PgSessionStore
 from services.control_plane.sessions.stores import SessionRow
+from tests.support import InMemoryEventSink
 
 _DSN = "postgresql://widgetpilot:widgetpilot_dev@127.0.0.1:5432/widgetpilot"
 
@@ -51,6 +55,7 @@ def real_service() -> AttachmentService:
         attachments=PgAttachmentStore(_DSN),
         tenant=SessionTenantGuard(sessions),
         processor=RealProcessor(),
+        event_sink=InMemoryEventSink(),
     )
 
 
@@ -71,7 +76,7 @@ def test_real_png_upload_and_insight(real_service: AttachmentService) -> None:
     uid = "m05-real-" + uuid4().hex[:8]
     sid = "m05-s-" + uuid4().hex[:8]
     sessions = PgSessionStore(_DSN)
-    sessions.insert(SessionRow(id=sid, user_id=uid, state="DRAFT"))
+    sessions.insert(SessionRow(id=sid, user_id=uid, state=SessionState.DRAFT))
 
     result = real_service.upload(uid, sid, png, "image", "image/png", "把这张图当背景")
     assert result.role == "visual_reference"
@@ -84,11 +89,11 @@ def test_real_png_upload_and_insight(real_service: AttachmentService) -> None:
 
     # 洞察真实（Pillow 主色 + 尺寸）
     insight = real_service.read_insight(result.insight_ref)
-    extracted = insight.extracted
-    assert isinstance(extracted, dict)
+    extracted = cast(JsonObject, insight.extracted)
     assert extracted["width"] == 8 and extracted["height"] == 8
     assert extracted["palette"]  # 真实主色非空
-    assert extracted["thumbnail_ref"].startswith("data:image/webp;base64,")
+    ref = cast(str, extracted["thumbnail_ref"])
+    assert ref.startswith("data:image/webp;base64,")
 
     # PG 真实落行
     row = real_service.attachments.get(result.attachment_id)
@@ -114,9 +119,11 @@ def test_real_ocr_extracts_text_with_regions() -> None:
     result = process_ocr(buf.getvalue())
     assert result.handler == "ContentExtractProcessor"
     assert result.insight_quality == 1.0
-    assert result.extracted["ocr_text"]  # 真识别出文字
-    assert len(result.extracted["regions"]) >= 1
-    assert all(len(r["bbox"]) == 4 for r in result.extracted["regions"])
+    extracted_ocr = cast(JsonObject, result.extracted)
+    assert extracted_ocr["ocr_text"]  # 真识别出文字
+    regions = cast(list[JsonObject], extracted_ocr["regions"])
+    assert len(regions) >= 1
+    assert all(len(cast(list[JsonValue], r["bbox"])) == 4 for r in regions)
 
 
 def test_real_video_keyframes() -> None:
@@ -160,8 +167,10 @@ def test_real_video_keyframes() -> None:
 
     assert result.handler == "VideoFrameProcessor"
     assert result.insight_quality == 1.0
-    assert 1 <= result.extracted["frame_count"] <= MAX_KEYFRAMES
-    assert result.extracted["frames"][0].startswith("data:image/jpeg;base64,")
+    extracted_video = cast(JsonObject, result.extracted)
+    assert 1 <= cast(int, extracted_video["frame_count"]) <= MAX_KEYFRAMES
+    frames = cast(list[str], extracted_video["frames"])
+    assert frames[0].startswith("data:image/jpeg;base64,")
 
 
 def test_real_patch_roles_uses_processor_and_emits_event() -> None:
@@ -175,8 +184,6 @@ def test_real_patch_roles_uses_processor_and_emits_event() -> None:
 
     from PIL import Image
 
-    from services.control_plane.attachments.events import InMemoryEventSink
-
     uid = "m05-patch-" + uuid4().hex[:8]
     sid = "m05-patch-s-" + uuid4().hex[:8]
     sink = InMemoryEventSink()
@@ -187,19 +194,19 @@ def test_real_patch_roles_uses_processor_and_emits_event() -> None:
         processor=RealProcessor(),
         event_sink=sink,
     )
-    PgSessionStore(_DSN).insert(SessionRow(id=sid, user_id=uid, state="DRAFT"))
+    PgSessionStore(_DSN).insert(SessionRow(id=sid, user_id=uid, state=SessionState.DRAFT))
     buf = io.BytesIO()
     Image.new("RGB", (8, 8), (255, 0, 0)).save(buf, format="PNG")
 
     first = svc.upload(uid, sid, buf.getvalue(), "image", "image/png", "把这张图当背景")
     assert first.role == "visual_reference"
-    first_sequenced = max(e["seq"] for e in sink.events)
+    first_sequenced = max(cast(int, e["seq"]) for e in sink.events)
 
     patched = svc.patch_roles(uid, sid, first.attachment_id, "style_reference")
     assert patched.role == "style_reference"
     assert patched.insight_ref != first.insight_ref
     assert patched.handler == "StyleRefProcessor"  # N2：真实注入处理器
-    assert any(e["seq"] > first_sequenced for e in sink.events)  # A8
+    assert any(cast(int, e["seq"]) > first_sequenced for e in sink.events)  # A8
 
     # PG 真落行
     row = svc.attachments.get(first.attachment_id)

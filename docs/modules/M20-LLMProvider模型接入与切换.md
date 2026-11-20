@@ -953,6 +953,22 @@ embedding_active: "emb_a"             # 当前激活 embedding；切换必须走
 
 ## 9. 依赖、风险与待决
 
+### 9.0 【M06 协同】本模块对 M06 的接线义务（v1.5，勿遗漏）
+
+> M06 的四级意图级联（ADR-001 D-8）中 **L2 embedding / L3 分类器**的模型能力由本模块提供。
+> M06 已定义好可注入端口与默认零依赖实现，本模块只需按 Protocol 提供真实实现并注入。
+> 背景见 `docs/modules/M06-模型依赖与测试缺口标注.md` §1.1/§1.2。实现本模块时逐项核对：
+
+| # | 接线义务 | M06 侧接线点 | 不接的后果 |
+|---|---|---|---|
+| 1 | **L2 embed 端点 → `Embedder`**：提供 embedding provider（本地权重或 emb 端点），实现 `services.guardrails.ports.Embedder`（`embed(text)->Embedding` + `similarity(a,b)->float`），注入 `classify_intent(embedder=...)` / `SemanticRouter(embedder=...)`；权重 + 意图样本库放 `infra/models/intents/<version>/`（≥30 条/意图） | `ports.py::Embedder`（runtime_checkable） | L2 只能用默认 bigram，真实相似度/阈值 0.75 无法校准，长尾描述裁定质量不可验收 |
+| 2 | **L3 classify 低档端点 → `IntentClassifier`**：经 ModelGateway 低档档位（token ≤ `MAX_CLARIFY_TOKENS=512`）实现 `ports.IntentClassifier`（`classify(text, max_tokens)->LowTierResult`），注入 `classify_intent(classifier=...)` | `ports.py::IntentClassifier` | L3 恒返回"不可解析"→ 全部升级 L4，LLM 成本失控（D-8 初衷失效） |
+| 3 | **切换回归联动**：embedding provider / 样本库 / 低档模型版本变更时，触发 M10 回归门禁复算意图路由准确率与升级率（见 M10 §9.0 与 M06 `change_gate.py`） | M06 `ConfigSnapshot` / `RegressionGate.check()` hook | 换模型后阈值失配无门禁，L2/L3 静默劣化 |
+| 4 | **契约对照**：真实实现类须通过 M06 mock 桩同契约自检（`tests/unit/test_m06_routing_ports.py` 的 `test_*_satisfy_protocols`） | 三个 Protocol 的 `runtime_checkable` | 签名不符导致注入后运行期报错 |
+
+> 责任边界：M06 只做级联判定与留证；**embedding 推理、端点调用、凭证持有全部归 M20/M07**，护栏进程不持凭证。
+> L4 主 LLM 兜底（`ports.IntentGateway`）由 M07 经 ModelGateway 前沿档位注入，见 M07 §9.0。
+
 | 项 | 说明 | 处理 / 责任建议 |
 |---|---|---|
 | `ProviderAdapter` Protocol 定稿 | 本模块新增接口，需与 M03 `ModelGateway` 注入接口、L1/L2 签名对齐 | **【推导·需评审】** M03 + M02 评审后固化到 `providers/protocol.py` |
@@ -966,6 +982,7 @@ embedding_active: "emb_a"             # 当前激活 embedding；切换必须走
 | `sse_quirks` 值域随供应商扩充 | 新供应商可能引入未登记 quirk | 扩充须登记 + 契约测试 + post-processor 用例；未登记 quirk 触发 `MODEL_ERROR` 而非静默错帧 |
 | 配置热加载的原子性 | 半加载（部分 provider 新版）风险 | 版本号原子替换 + 半加载自检（reload 失败整体回滚到旧版本），需评审 |
 | 与 M19 回归范围矩阵的衔接 | 模型变更触发的回归范围由 M19 定义 | 本模块只触发，范围判定引用 M19 矩阵概念；M19 定稿前按全量回放执行（保守） |
+| 来自 M04 的待接线：生产模型网关配置（2026-11-21 标注） | M04 生产编排回路已接通，但本机无真实模型端点/key，端到端生成无法真测；`deps._EnvModelGateway` 用统一 `MODEL_NAME`，未接 M20 的多 Provider 矩阵/分档/切换 | M04 已就绪接线点：`MODEL_ENDPOINT`/`MODEL_API_KEY`/`MODEL_NAME`（`deps.py:37-39`，compose `x-app-env` 已注入），`build_deps` 缺一即 fail-fast；`Deps.model.complete(messages, tier, stream)` 的 tier 参数已按契约传入（`run.py:142`） | 本模块定稿 `model_providers.yaml` 后，把 M04 的 `_EnvModelGateway` 接到 `ProviderAdapter`（`complete`/`stream`/`normalize_usage`/`health_check`/`capabilities`），按 tier 选端点并落分档矩阵；`wire_api` 切换走本模块的双 wire 策略；切换后按 M19 回归门禁验证，勿让 M04 裸连单一端点 |
 
 **变更触发的回归范围**：`model_providers.yaml` schema / `ProviderAdapter` Protocol / 能力矩阵 / fallback 链 / 状态机 / embedding 绑定规则任一变更 → 本模块全量用例 + M03 内核测试 + M02 CI + M10 回归门禁；`model_config_version` 升版 / `tier_mapping` / `model_version` / `embedding_active` 任一运行时变更 → 按 M19 回归范围矩阵触发 M10 回归门禁 + 影子对比（按 §3.4 A 场景表）。
 

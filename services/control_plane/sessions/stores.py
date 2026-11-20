@@ -1,12 +1,12 @@
 """M04 会话存储（§6.1 Session/Run 实体的持久化抽象）。
 
-生产实现为 PG（alembic 迁移）；内存实现供 §8.1 无 Docker 环境跑全用例。
+生产实现只有 PG（alembic 迁移）；测试内存替身位于 `tests/support/control_plane.py`。
 租户隔离键 user_id 贯穿每条记录，与 TenantGuard 配合（§7）。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
@@ -33,6 +33,9 @@ class SessionRow:
     """已回答澄清次数（上限 2，D-7）。"""
     clarification_answer: str | None = None
     """当前待回注的澄清答案（P0-2 落点，跨天恢复可还原）。"""
+    original_description: str = ""
+    """首次提交的用户原始描述（R3-1，v1.8）：M06 护栏前置挂起时不产生 checkpoint，
+    澄清重入须用它恢复模型上下文，否则生成只收到规格答案（如"四行四列"）。"""
     last_seq: int = 0
     """SSE 重连锚点（每会话单调）。"""
     checkpoint_rev: int = 0
@@ -51,7 +54,7 @@ class SessionRow:
 
 @runtime_checkable
 class SessionStore(Protocol):
-    """会话存储协议（编码规则 8/9：PG/内存双实现可插拔）。"""
+    """会话存储协议（编码规则 8/9：生产 PG 与测试替身可插拔）。"""
 
     def insert(self, row: SessionRow) -> None:
         """插入会话行。"""
@@ -70,36 +73,3 @@ class SessionStore(Protocol):
     def list_by_user(self, user_id: str) -> list[SessionRow]:
         """按 user_id 过滤列出会话（租户隔离）。"""
         ...
-
-
-class InMemorySessionStore:
-    """内存会话表：按 id 索引，保留插入顺序供列表查询。"""
-
-    def __init__(self) -> None:
-        """初始化空表与 id 索引。"""
-        self._rows: dict[str, SessionRow] = {}
-
-    def insert(self, row: SessionRow) -> None:
-        """插入会话行（id 服务端生成，重复覆盖由上层保证不重复）。"""
-        self._rows[row.id] = row
-
-    def get(self, session_id: str) -> SessionRow | None:
-        """按 id 查会话快照（返回副本，改后须显式 update；对齐 PG fetchone 语义）。"""
-        row = self._rows.get(session_id)
-        return replace(row) if row is not None else None
-
-    def update(
-        self, row: SessionRow, expected_state: SessionState | None = None
-    ) -> None:
-        """写回变更后的会话行（内存即覆盖；生产为 PG UPDATE）。"""
-        # S2：乐观锁——前态不符说明并发已被他人改过（规则 10 不丢更新）
-        if expected_state is not None:
-            current = self._rows.get(row.id)
-            if current is not None and current.state is not expected_state:
-                raise ValueError("CONFLICT: state changed by another request")
-        row.updated_at = datetime.now(UTC)
-        self._rows[row.id] = row
-
-    def list_by_user(self, user_id: str) -> list[SessionRow]:
-        """按 user_id 过滤列出会话（租户隔离，§7）。"""
-        return [r for r in self._rows.values() if r.user_id == user_id]

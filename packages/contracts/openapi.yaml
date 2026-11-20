@@ -23,6 +23,7 @@ tags:
   - name: bundles       # M09 / M16
   - name: corpus        # M10
   - name: ops           # M10 / M11
+  - name: guardrails    # M06（只读查询：guard_hit / skills manifest）
   - name: bff           # M02（可选 BFF，不做鉴权判定）
 
 paths:
@@ -251,6 +252,89 @@ paths:
                           insight_ref: { type: string, nullable: true }
                           insight_quality: { type: number, minimum: 0, maximum: 1, description: 处理结果质量，不参与 role 明确性判定（v1.7 S1） }
         "400": { $ref: "#/components/responses/BadRequest" }
+
+  # ---------- guardrails / skills（M06 只读查询，契约固化 M02 §9.0 义务1）----------
+  /api/guardrails/hits:
+    get:
+      tags: [guardrails]
+      summary: guard_hit 命中列表 + FPR（§4.1；对外 excerpt 已脱敏）
+      operationId: listGuardHits
+      parameters:
+        - name: hit_type
+          in: query
+          description: 命中类型过滤（非法枚举由服务端返回 422）
+          schema: { $ref: "#/components/schemas/GuardHitType" }
+        - name: rule_id
+          in: query
+          description: 规则 ID 过滤
+          schema: { type: string }
+        - name: limit
+          in: query
+          description: 每页条数（默认 50，1..200）
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: cursor
+          in: query
+          description: 分页游标（从 0 起）
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: OK——hits 分页 + 误拦截率 + 下一页游标
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items, false_positive_rate, next_cursor]
+                        properties:
+                          items:
+                            type: array
+                            items: { $ref: "#/components/schemas/GuardHit" }
+                          false_positive_rate:
+                            type: number
+                            minimum: 0
+                            maximum: 1
+                            description: 误拦截率（FPR，标注「应放行」命中数 / 标注总数）
+                          next_cursor:
+                            type: integer
+                            nullable: true
+                            description: 下一页游标；无更多数据时为 null
+        "422": { $ref: "#/components/responses/Unprocessable" }
+  /api/skills:
+    get:
+      tags: [guardrails]
+      summary: 技能 manifest 只读查询（§4.1；只读静态预取映射，不触发生成）
+      operationId: listSkills
+      parameters:
+        - name: widget_type
+          in: query
+          description: 控件类型过滤（非法枚举由服务端返回 422）
+          schema: { $ref: "#/components/schemas/WidgetType" }
+        - name: grid
+          in: query
+          description: 规格过滤（非法枚举由服务端返回 422）
+          schema: { $ref: "#/components/schemas/GridSpec" }
+      responses:
+        "200":
+          description: OK——技能 manifest 条目（widget_type + grid + recipe_ids）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items: { $ref: "#/components/schemas/SkillManifest" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
 
   # ---------- events（M04 / M15，SSE 长连接）----------
   /api/sessions/{session_id}/events:
@@ -636,6 +720,35 @@ components:
     AttachmentRole:
       type: string
       enum: [visual_reference, content_extraction, data_source, style_reference]
+    WidgetType:
+      type: string
+      description: 控件类型（与 enums.WidgetType 同源，M06 /api/skills 过滤参数与 manifest 使用）
+      enum: [calendar, clock, alarm, task, custom]
+    GuardHitType:
+      type: string
+      description: 进护栏命中类型（§5.1；大写枚举，与 M03 小写 _HitType 区分）
+      enum: [INJECTION, PII, INTENT, BUDGET]
+    GuardHit:
+      type: object
+      description: 单条 guard_hit 留证（§3.4 E / §6.5；excerpt 对外回传前已再次脱敏）
+      required: [id, hit_type, rule_id, judgement, excerpt, trace_id]
+      properties:
+        id: { type: string }
+        hit_type: { $ref: "#/components/schemas/GuardHitType" }
+        rule_id: { type: string }
+        judgement: { type: string }
+        excerpt: { type: string, description: 已脱敏的命中片段 }
+        trace_id: { type: string }
+    SkillManifest:
+      type: object
+      description: 技能预取 manifest 条目（§4.1；只读静态映射，不触发生成）
+      required: [widget_type, grid, recipe_ids]
+      properties:
+        widget_type: { $ref: "#/components/schemas/WidgetType" }
+        grid: { $ref: "#/components/schemas/GridSpec" }
+        recipe_ids:
+          type: array
+          items: { type: string }
     AgentEvent:
       type: object
       description: 完整结构见 packages/contracts/events.schema.json（单一事实来源）

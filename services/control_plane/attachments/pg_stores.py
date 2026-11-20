@@ -1,6 +1,6 @@
 """M05 PG 版附件索引（AttachmentStore Protocol 的生产实现，§6.1 / 迁移 0003）。
 
-与 InMemoryAttachmentStore 同构可插拔（编码规则 8/9）；租户隔离键 user_id
+实现 AttachmentStorePort 协议（编码规则 8/9）；租户隔离键 user_id
 贯穿 insert/get/list/update，越权由 AttachmentService 的 TenantGuard 挡住。
 """
 

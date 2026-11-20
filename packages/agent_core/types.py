@@ -703,6 +703,7 @@ class ToolSpec:
     """参数校验模型（Pydantic）。"""
     surfaces: set[str]
     """允许调用的表面集合。"""
+    # 【已登记的框架边界豁免】handler 由外部 args_model 决定，返回类型无法静态收窄。
     handler: Callable[..., object]
     """执行函数；参数由 args_model 校验后传入，返回值不确定故用 object。"""
     max_output_chars: int

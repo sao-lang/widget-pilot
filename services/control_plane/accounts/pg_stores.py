@@ -1,7 +1,7 @@
 """M04 PG 版账号存储（UserStore Protocol 的生产实现，§6.1 users 表）。
 
 v1.5 ORM 化：手写 SQL → SQLAlchemy ORM（models.User + db.session_scope）。
-与 InMemoryUserStore 同协议，email 唯一性由 PG UNIQUE 约束保证，
+实现 UserStore 协议，email 唯一性由 PG UNIQUE 约束保证，
 冲突映射为 DuplicateEmailError（register 409）。
 """
 

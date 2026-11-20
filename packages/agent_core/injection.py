@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from types import TracebackType
 from typing import Protocol, Self, runtime_checkable
 
 from packages.agent_core.types import (
@@ -31,8 +32,13 @@ class Span(Protocol):
         """进入 span 作用域，返回自身。"""
         ...
 
-    def __exit__(self, *args: object) -> None:
-        """退出 span 作用域；异常信息由 args 传入但不吞掉。"""
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        """退出 span 作用域；异常信息由参数传入但不吞掉。"""
         ...
 
     def set_attribute(self, key: str, value: JsonValue) -> None:
@@ -189,7 +195,12 @@ class NoOpTracer:
             """返回自身。"""
             return self
 
-        def __exit__(self, *args: object) -> None:
+        def __exit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc_value: BaseException | None,
+            traceback: TracebackType | None,
+        ) -> None:
             """无操作。"""
             return
 

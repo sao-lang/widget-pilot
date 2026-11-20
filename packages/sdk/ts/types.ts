@@ -184,8 +184,42 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** 附件上传（传输层校验 → 对象存储 att/{user_id}/{session_id}/{attachment_id}/original），返回 attachment_id */
+        /** 附件上传（传输层校验 → 对象存储 → role 判定），返回附件元数据与 role 结论 */
         post: operations["uploadAttachment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/guardrails/hits": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** guard_hit 命中列表 + FPR（§4.1；对外 excerpt 已脱敏） */
+        get: operations["listGuardHits"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/skills": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 技能 manifest 只读查询（§4.1；只读静态预取映射，不触发生成） */
+        get: operations["listSkills"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -471,6 +505,32 @@ export interface components {
         GridSpec: "2x2" | "2x4" | "4x2" | "4x4" | "2x1" | "1x2";
         /** @enum {string} */
         AttachmentRole: "visual_reference" | "content_extraction" | "data_source" | "style_reference";
+        /**
+         * @description 控件类型（与 enums.WidgetType 同源，M06 /api/skills 过滤参数与 manifest 使用）
+         * @enum {string}
+         */
+        WidgetType: "calendar" | "clock" | "alarm" | "task" | "custom";
+        /**
+         * @description 进护栏命中类型（§5.1；大写枚举，与 M03 小写 _HitType 区分）
+         * @enum {string}
+         */
+        GuardHitType: "INJECTION" | "PII" | "INTENT" | "BUDGET";
+        /** @description 单条 guard_hit 留证（§3.4 E / §6.5；excerpt 对外回传前已再次脱敏） */
+        GuardHit: {
+            id: string;
+            hit_type: components["schemas"]["GuardHitType"];
+            rule_id: string;
+            judgement: string;
+            /** @description 已脱敏的命中片段 */
+            excerpt: string;
+            trace_id: string;
+        };
+        /** @description 技能预取 manifest 条目（§4.1；只读静态映射，不触发生成） */
+        SkillManifest: {
+            widget_type: components["schemas"]["WidgetType"];
+            grid: components["schemas"]["GridSpec"];
+            recipe_ids: string[];
+        };
         /** @description 完整结构见 packages/contracts/events.schema.json（单一事实来源） */
         AgentEvent: {
             seq: number;
@@ -836,12 +896,14 @@ export interface operations {
                 "multipart/form-data": {
                     /** Format: binary */
                     file: string;
-                    session_id?: string;
+                    session_id: string;
+                    /** @description 用户描述，M05 据此判定附件 role（v1.7 B1） */
+                    description: string;
                 };
             };
         };
         responses: {
-            /** @description OK——返回 attachment_id */
+            /** @description OK——返回附件元数据 + role 判定结论（v1.7 B3 完整字段） */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -849,13 +911,92 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ApiResponse"] & {
                         data?: {
-                            attachment_id?: string;
-                            hash?: string;
+                            attachment_id: string;
+                            /** @enum {string} */
+                            kind: "image" | "video" | "text";
+                            mime: string;
+                            size: number;
+                            object_key: string;
+                            hash: string;
+                            role: components["schemas"]["AttachmentRole"];
+                            /** @description role 判定置信度，M06 据此判明确性（v1.7 S1） */
+                            role_confidence: number;
+                            insight_ref: string | null;
+                            /** @description 处理结果质量，不参与 role 明确性判定（v1.7 S1） */
+                            insight_quality: number;
                         };
                     };
                 };
             };
             400: components["responses"]["BadRequest"];
+        };
+    };
+    listGuardHits: {
+        parameters: {
+            query?: {
+                /** @description 命中类型过滤（非法枚举由服务端返回 422） */
+                hit_type?: components["schemas"]["GuardHitType"];
+                /** @description 规则 ID 过滤 */
+                rule_id?: string;
+                /** @description 每页条数（默认 50，1..200） */
+                limit?: number;
+                /** @description 分页游标（从 0 起） */
+                cursor?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK——hits 分页 + 误拦截率 + 下一页游标 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse"] & {
+                        data?: {
+                            items: components["schemas"]["GuardHit"][];
+                            /** @description 误拦截率（FPR，标注「应放行」命中数 / 标注总数） */
+                            false_positive_rate: number;
+                            /** @description 下一页游标；无更多数据时为 null */
+                            next_cursor: number | null;
+                        };
+                    };
+                };
+            };
+            422: components["responses"]["Unprocessable"];
+        };
+    };
+    listSkills: {
+        parameters: {
+            query?: {
+                /** @description 控件类型过滤（非法枚举由服务端返回 422） */
+                widget_type?: components["schemas"]["WidgetType"];
+                /** @description 规格过滤（非法枚举由服务端返回 422） */
+                grid?: components["schemas"]["GridSpec"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK——技能 manifest 条目（widget_type + grid + recipe_ids） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse"] & {
+                        data?: {
+                            items: components["schemas"]["SkillManifest"][];
+                        };
+                    };
+                };
+            };
+            422: components["responses"]["Unprocessable"];
         };
     };
     streamEvents: {
@@ -1164,3 +1305,5 @@ export interface operations {
         };
     };
 }
+
+export type ApiResponse<T = unknown> = components["schemas"]["ApiResponse"] & { data?: T };

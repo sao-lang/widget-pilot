@@ -1,9 +1,12 @@
 """packages/sdk/python —— 自动生成物（M02 §7.2），禁止手改。"""
 from __future__ import annotations
 
-from typing import Any
+from pydantic import BaseModel
 
-from pydantic import BaseModel, ConfigDict
+# JSON 边界具名别名：生成物自包含（SDK 独立分发，不依赖 agent_core）。
+type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
+type JsonObject = dict[str, JsonValue]
+
 
 class AgentEvent(BaseModel):
     """自动生成（禁止手改）；源: schema"""
@@ -11,49 +14,63 @@ class AgentEvent(BaseModel):
     sessionId: str
     runId: str
     ts: str
-    kind: Any
-    phase: Any
-    payload: Any
+    kind: str
+    phase: str
+    payload: JsonValue
     traceId: str
+
 
 class WidgetSpec(BaseModel):
     """自动生成（禁止手改）；源: schema"""
     spec_version: str
     widget_id: str
-    grid: Any
-    widget_type: Any
+    grid: str
+    widget_type: str
     intent: str
-    attachments: list[Any]
-    layout_slots: list[Any]
-    capabilities: list[Any]
-    data_contract: dict[str, Any]
-    style: dict[str, Any]
-    constraints: dict[str, Any]
-    language: Any
+    attachments: list[JsonValue]
+    layout_slots: list[JsonValue]
+    capabilities: list[JsonValue]
+    data_contract: JsonObject
+    style: JsonObject
+    constraints: JsonObject
+    language: str
     react_version: str
-    import_allowlist: Any
-    export_contract: dict[str, Any]
-    props_contract: Any
+    import_allowlist: str
+    export_contract: JsonObject
+    props_contract: str
+
 
 class WidgetBundle(BaseModel):
     """自动生成（禁止手改）；源: schema"""
     bundle_id: str
     user_id: str
     session_id: str
-    spec: widget_spec.schema.json
-    source: dict[str, Any]
-    compiled: dict[str, Any]
-    manifest: dict[str, Any]
-    static_check: dict[str, Any]
-    sandbox_test: dict[str, Any]
-    state: Any
+    spec: WidgetSpec
+    source: JsonObject
+    compiled: JsonObject
+    manifest: JsonObject
+    static_check: JsonObject
+    sandbox_test: JsonObject
+    state: str
     hash: str
     created_at: str
 
+
 class WidgetRuntime(BaseModel):
     """自动生成（禁止手改）；源: schema"""
-    card: dict[str, Any]
-    iframe: dict[str, Any]
-    bridge_messages: Any
-    capability_bridge: list[Any]
-    limits: dict[str, Any]
+    card: JsonObject
+    iframe: JsonObject
+    bridge_messages: str
+    capability_bridge: list[JsonValue]
+    limits: JsonObject
+
+
+class ApiResponse(BaseModel):
+    """统一响应（源: openapi.yaml components.schemas.ApiResponse）"""
+    code: str
+    message: str
+    traceId: str
+    retryable: bool
+    evidenceRef: str | None = None
+    data: JsonValue | None = None
+

@@ -12,7 +12,7 @@ from uuid import uuid4
 from packages.contracts import enums as _contracts_enums
 from packages.contracts.enums import SessionState
 from services.control_plane.api.guard import ForbiddenError, TenantGuard
-from services.control_plane.audit.ledger import AuditActions, AuditLedger
+from services.control_plane.audit.ledger import AuditActions, AuditLedgerPort
 from services.control_plane.sessions.stores import (
     SessionRow,
     SessionStore,
@@ -32,15 +32,15 @@ class ConflictError(Exception):
 class SessionService:
     """会话状态机服务（§5.2 流转表的唯一执行点）。"""
 
-    def __init__(self, store: SessionStore, audit: AuditLedger | None = None) -> None:
+    def __init__(self, store: SessionStore, audit: AuditLedgerPort) -> None:
         """注入会话存储与审计账本（S1：R10 迁移留痕）。
 
         Args:
-            store: 会话存储（PG/内存）。
-            audit: 审计账本；None 时用内存默认实现（规则 9：协议必有默认实现）。
+            store: 会话存储（生产为 PG）。
+            audit: 审计账本；生产为 PgAuditLedger，测试传入 tests/support 的替身。
         """
         self.store = store
-        self.audit = audit or AuditLedger()
+        self.audit = audit
 
     def _commit(self, row: SessionRow, expected_state: SessionState) -> None:
         """带乐观锁的写回；存储层冲突（ValueError）折叠为领域 ConflictError（409）。"""
@@ -162,12 +162,19 @@ class SessionService:
         before_state = row.state
         row.state = SessionState.RUNNING
         row.run_id = str(uuid4())
+        # R3-1（v1.8）：持久化原始描述——M06 护栏前置挂起（SPEC_MISSING 等）
+        # 发生在 run() 之前、不产生 checkpoint；澄清重入须据此恢复模型上下文。
+        row.original_description = description
         self._commit(row, before_state)
         self._audit(row, AuditActions.STATE_TRANSITION)
         return row
 
     def mark_awaiting_input(
-        self, session_id: str, user_id: str, reason_code: str
+        self,
+        session_id: str,
+        user_id: str,
+        reason_code: str,
+        evidence_ref: str | None = None,
     ) -> SessionRow:
         """RUNNING→AWAITING_INPUT，记录触发原因码（§5.2 / §5.3）。B1：先租户校验。
 
@@ -175,6 +182,9 @@ class SessionService:
             session_id: 会话标识。
             user_id: 请求者；经 _assert_owner 校验归属。
             reason_code: 触发原因（如 SPEC_MISSING / ASK_USER），落审计 decision 字段。
+            evidence_ref: 触发挂起的输入快照证据引用（A4，v1.8 接线）；
+                M06 ValidationResult.evidence_ref（带 sha256），供前端回放为何挂起。
+                可选以兼容模型 ask_user 等非护栏挂起来源（无快照时留空）。
 
         Raises:
             ForbiddenError: 非会话 owner。
@@ -186,15 +196,21 @@ class SessionService:
             raise ConflictError("only RUNNING can await input")
         # N2：reason_code 不落 Session 主记录（按 §6.1 字段归属，过程数据走事件流），
         # 但写入审计 payload（SPEC_MISSING vs ask_user 可区分，供 M11 重放）。
+        # A4（v1.8）：evidence_ref 落 Session 主记录，与 fail 对齐——挂起也须可回放证据。
         before_state = row.state
         row.state = SessionState.AWAITING_INPUT
+        row.evidence_ref = evidence_ref
         self._commit(row, before_state)
         self.audit.append(
             user_id=row.user_id,
             session_id=row.id,
             action=AuditActions.STATE_TRANSITION,
             decision=reason_code,  # 触发原因码落审计决策字段
-            payload={"state": row.state.value, "reason_code": reason_code},
+            payload={
+                "state": row.state.value,
+                "reason_code": reason_code,
+                "evidence_ref": evidence_ref or "",
+            },
             trace_id="",
         )
         return row

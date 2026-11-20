@@ -30,3 +30,8 @@ Thumbs.db
 # Local overview backup & session pointer
 .overview-archive/
 .conductor-session.json
+
+# Local tool state / coverage artifacts
+.VSCodeCounter/
+.coverage
+.migration-ledger.json

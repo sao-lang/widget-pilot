@@ -10,11 +10,17 @@ from __future__ import annotations
 import base64
 import io
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, cast
 
+from packages.contracts.types import JsonObject
 from services.control_plane.attachments.constants import (
     MAX_KEYFRAMES,
     PROCESSOR_TIMEOUT_S,
 )
+
+if TYPE_CHECKING:
+    # Pillow 为可选依赖（缺失时按 §2.3 降级），只在类型检查期导入，避免运行期强依赖
+    from PIL import Image
 
 _PIXEL_CAP = 4096
 """解码像素上限（§2.1 图片只读解码、防压缩炸弹）。"""
@@ -25,7 +31,7 @@ class ProcessorResult:
     """真实处理器产出（extracted + 质量 + handler 名）。"""
 
     handler: str
-    extracted: object
+    extracted: JsonObject
     insight_quality: float
 
 
@@ -56,21 +62,25 @@ def process_visual(data: bytes, source_ref: str) -> ProcessorResult:
         ).decode("ascii")
     return ProcessorResult(
         "VisualRefProcessor",
-        {
-            "thumbnail_ref": thumb_ref,
-            "palette": palette,
-            "layout_hint": f"{width}x{height}",
-            "width": width,
-            "height": height,
-        },
+        # JSON 边界收口：list[str] 因 list 不可变不能自动提升为 list[JsonValue]
+        cast(
+            JsonObject,
+            {
+                "thumbnail_ref": thumb_ref,
+                "palette": palette,
+                "layout_hint": f"{width}x{height}",
+                "width": width,
+                "height": height,
+            },
+        ),
         1.0,
     )
 
 
-def _dominant_colors(img: object) -> list[str]:
+def _dominant_colors(img: Image.Image) -> list[str]:
     """从缩略图取 Top-3 主色（量化桶计数，纯代码无模型）。"""
     colors: dict[tuple[int, int, int], int] = {}
-    raw = img.tobytes()  # type: ignore[attr-defined]
+    raw = img.tobytes()
     for i in range(0, len(raw), 3):
         r, g, b = raw[i], raw[i + 1], raw[i + 2]
         bucket = (r // 32 * 32, g // 32 * 32, b // 32 * 32)
@@ -95,7 +105,7 @@ def process_ocr(data: bytes) -> ProcessorResult:
         )
     engine = RapidOCR()
     result, _ = engine(data)
-    regions: list[dict[str, object]] = []
+    regions: list[JsonObject] = []
     texts: list[str] = []
     for box, text, score in result or []:
         texts.append(str(text))
@@ -111,7 +121,10 @@ def process_ocr(data: bytes) -> ProcessorResult:
         )
     return ProcessorResult(
         "ContentExtractProcessor",
-        {"ocr_text": "\n".join(texts), "regions": regions, "parsed_fields": []},
+        cast(
+            JsonObject,
+            {"ocr_text": "\n".join(texts), "regions": regions, "parsed_fields": []},
+        ),
         1.0 if regions else 0.0,
     )
 
@@ -160,7 +173,7 @@ def process_video(data: bytes) -> ProcessorResult:
             check=False,
         )
         frames: list[str] = []
-        regions: list[dict[str, object]] = []
+        regions: list[JsonObject] = []
         if proc.returncode == 0:
             for idx, frame_file in enumerate(sorted(Path(tmp).glob("frame_*.jpg"))):
                 raw = frame_file.read_bytes()
@@ -188,7 +201,10 @@ def process_video(data: bytes) -> ProcessorResult:
                     break  # OCR 可选依赖缺失 → regions 为空，降级契约生效
     return ProcessorResult(
         "VideoFrameProcessor",
-        {"frames": frames, "frame_count": len(frames), "regions": regions},
+        cast(
+            JsonObject,
+            {"frames": frames, "frame_count": len(frames), "regions": regions},
+        ),
         1.0 if frames else 0.0,
     )
 
@@ -203,18 +219,24 @@ def process_data_source(data: bytes) -> ProcessorResult:
         rows = parsed if isinstance(parsed, list) else [parsed]
         return ProcessorResult(
             "DataSourceProcessor",
-            {"format": "json", "rows": rows, "row_count": len(rows)},
+            cast(
+                JsonObject,
+                {"format": "json", "rows": rows, "row_count": len(rows)},
+            ),
             1.0,
         )
     except (json.JSONDecodeError, ValueError):
         lines = [line.split(",") for line in text.splitlines() if line.strip()]
         return ProcessorResult(
             "DataSourceProcessor",
-            {
-                "format": "csv",
-                "columns": lines[0] if lines else [],
-                "rows": lines[1:] if len(lines) > 1 else [],
-                "row_count": max(len(lines) - 1, 0),
-            },
+            cast(
+                JsonObject,
+                {
+                    "format": "csv",
+                    "columns": lines[0] if lines else [],
+                    "rows": lines[1:] if len(lines) > 1 else [],
+                    "row_count": max(len(lines) - 1, 0),
+                },
+            ),
             1.0,
         )

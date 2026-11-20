@@ -23,17 +23,42 @@ function runPnpm(args: string[], cwd: string): void {
 // ---------- gen:openapi ----------
 export function generateTsTypes(specPath: string, outPath: string): void {
   runPnpm(["exec", "openapi-typescript", resolve(HERE, specPath), "-o", resolve(HERE, outPath)], HERE);
+  // openapi-typescript 只输出 components/paths 命名空间；客户端用的 ApiResponse<T>
+  // 别名必须在生成阶段补上，否则 packages/sdk/ts/client.ts 导入不存在的符号。
+  const target = resolve(HERE, outPath);
+  const generated = readFileSync(target, "utf8");
+  const alias =
+    '\nexport type ApiResponse<T = unknown> = components["schemas"]["ApiResponse"] & { data?: T };\n';
+  if (!generated.includes("export type ApiResponse<")) {
+    writeFileSync(target, generated + alias);
+  }
 }
 
 // ---------- gen:zod（JSON Schema → Zod，紧凑递归发射器）----------
 function zodOf(node: any, name?: string): string {
   if (node.$ref) {
-    const ref = String(node.$ref).split("/").pop()!;
-    return `Schemas.${ref}`;
+    const ref = String(node.$ref);
+    // 跨文件 $ref 形如 "widget_spec.schema.json"——须映射为生成物变量名，
+    // 直接拼出 Schemas.widget_spec.schema.json 会产生非法 TypeScript。
+    const crossFile: Record<string, string> = {
+      "widget_spec.schema.json": "WidgetSpec",
+      "widget_bundle.schema.json": "WidgetBundle",
+      "widget_runtime.schema.json": "WidgetRuntime",
+      "events.schema.json": "AgentEvent",
+    };
+    const tail = ref.split("/").pop()!;
+    return crossFile[tail] ?? "z.unknown()";
   }
   if (node.enum && node.meta === "string") return `z.enum(${JSON.stringify(node.enum)})`;
   if (node.enum) return `z.enum([${node.enum.map((v: any) => JSON.stringify(v)).join(",")}])`;
-  if ("const" in node) return `z.literal(${JSON.stringify(node.const)})`;
+  // z.literal 只接受 primitive；契约里的 const 数组（import_allowlist / sandbox /
+  // bridge_messages）必须用 tuple of literals，生成物才能通过 tsc 且保留精确值。
+  if ("const" in node) {
+    if (Array.isArray(node.const)) {
+      return `z.tuple([${node.const.map((v: any) => `z.literal(${JSON.stringify(v)})`).join(",")}])`;
+    }
+    return `z.literal(${JSON.stringify(node.const)})`;
+  }
   switch (node.type) {
     case "string": {
       let z = "z.string()";
@@ -75,13 +100,17 @@ export function generateZodSchemas(schemaDir: string, outPath: string): void {
     "// M02 生成物：事件/三协议 Zod 运行时校验 schema（禁止手改）",
     'import { z } from "zod";',
     "",
-    "export const Schemas = {",
   ];
+  // 先生成独立 const，再聚合 Schemas：若把相互引用直接写进同一个对象字面量，
+  // tsc 会报 TS7022（变量在自身初始化中被间接引用）。
   for (const [name, file] of files) {
     const schema = JSON.parse(readFileSync(resolve(schemaDir, file), "utf8"));
-    chunks.push(`  ${name}: ${zodOf(schema)},`);
+    chunks.push(`const ${name} = ${zodOf(schema)};`, "");
   }
-  chunks.push("} as const;", "");
+  chunks.push(
+    `export const Schemas = { ${files.map(([name]) => name).join(", ")} } as const;`,
+    "",
+  );
   // 具名导出（M02 §4.3 契约：AgentEventSchema 等）
   for (const [name] of files) {
     chunks.push(`export const ${name}Schema = Schemas.${name};`);
@@ -132,6 +161,7 @@ export function generateEnums(srcPath: string, tsOut: string, pyOut: string): vo
     "from __future__ import annotations",
     "",
     "from enum import StrEnum",
+    "",
     "",
   ];
   for (const n of names) {

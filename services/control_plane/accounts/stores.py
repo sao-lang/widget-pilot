@@ -1,7 +1,7 @@
 """M04 用户存储（§6.1 User 实体的持久化抽象）。
 
-生产实现为 PG（alembic 迁移建表）；内存实现供 §8.1 无 Docker 环境跑全用例。
-两者都按 email 唯一索引约束，租户隔离键为 user.id。
+生产实现只有 PG（alembic 迁移建表）；测试内存替身位于 `tests/support/control_plane.py`。
+email 唯一索引约束由 PG 保证，租户隔离键为 user.id。
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ class UserRow:
     email: str
     """登录名（citext，唯一）。"""
     password_hash: str
-    """ argon2/bcrypt 哈希，只存 hash 不存明文。"""
+    """argon2/bcrypt 哈希，只存 hash 不存明文。"""
     role: UserRole = UserRole.USER
     """两角色（D-3）：user / curator。"""
     share_enabled: bool = True
@@ -39,7 +39,7 @@ class DuplicateEmailError(Exception):
 
 @runtime_checkable
 class UserStore(Protocol):
-    """用户存储协议（编码规则 8/9：服务依赖抽象，PG/内存双实现可插拔）。"""
+    """用户存储协议（编码规则 8/9：服务依赖抽象，生产 PG 与测试替身可插拔）。"""
 
     def insert(self, row: UserRow) -> None:
         """插入用户；email 重复抛 DuplicateEmailError。"""
@@ -52,27 +52,3 @@ class UserStore(Protocol):
     def find_by_id(self, user_id: str) -> UserRow | None:
         """按 id 查用户（供 JWT claims 还原）。"""
         ...
-
-
-class InMemoryUserStore:
-    """内存用户表：按 email 与 id 双索引，唯一性由注册路径保证。"""
-
-    def __init__(self) -> None:
-        """初始化空表与双索引。"""
-        self._by_email: dict[str, UserRow] = {}
-        self._by_id: dict[str, UserRow] = {}
-
-    def insert(self, row: UserRow) -> None:
-        """插入用户；email 重复抛 DuplicateEmailError（对齐 PG UNIQUE 约束）。"""
-        if row.email in self._by_email:
-            raise DuplicateEmailError(row.email)
-        self._by_email[row.email] = row
-        self._by_id[row.id] = row
-
-    def find_by_email(self, email: str) -> UserRow | None:
-        """按 email（大小写不敏感，模拟 citext）查用户，无则返回 None。"""
-        return self._by_email.get(email.lower())
-
-    def find_by_id(self, user_id: str) -> UserRow | None:
-        """按 id 查用户，无则返回 None（供 JWT claims → 用户还原）。"""
-        return self._by_id.get(user_id)

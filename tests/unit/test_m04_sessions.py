@@ -15,13 +15,13 @@ from services.control_plane.sessions.service import (
     SessionError,
     SessionService,
 )
-from services.control_plane.sessions.stores import InMemorySessionStore
+from tests.support import AuditLedger, InMemorySessionStore
 
 
 @pytest.fixture
 def sessions() -> SessionService:
     """独立会话服务：内存存储，不依赖 auth（租户隔离单独测）。"""
-    return SessionService(InMemorySessionStore())
+    return SessionService(InMemorySessionStore(), audit=AuditLedger())
 
 
 def _new_session(sessions: SessionService, owner: str = "user-a") -> str:

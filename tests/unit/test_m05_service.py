@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 
 from services.control_plane.attachments.constants import ROLE_CLARIFY_THRESHOLD
 from services.control_plane.attachments.role_resolver import resolve_role
 from services.control_plane.attachments.service import AttachmentService
-from services.control_plane.attachments.stores import (
+from tests.support import (
+    DispatchProcessor,
     FakeTenantGuard,
     InMemoryAttachmentStore,
+    InMemoryEventSink,
     InMemoryObjectStore,
 )
 
 _PNG = bytes.fromhex("89504e470d0a1a0a") + b"\x00" * 8
+_MP4 = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 8
 
 
 def test_a1_description_drives_visual_role() -> None:
@@ -35,6 +40,8 @@ def test_a2_same_attachment_two_descriptions_two_paths() -> None:
         objects=InMemoryObjectStore(),
         attachments=InMemoryAttachmentStore(),
         tenant=FakeTenantGuard({"u1": ["s1"]}),
+        processor=DispatchProcessor(),
+        event_sink=InMemoryEventSink(),
     )
     r1 = svc.upload("u1", "s1", _PNG, "image", "image/png", "把这张图当背景")
     r2 = svc.upload("u1", "s1", _PNG, "image", "image/png", "提取图片右上角的日期")
@@ -50,21 +57,25 @@ def test_a7_ambiguous_role_no_default() -> None:
     assert decision.role is None
     assert decision.role_confidence < ROLE_CLARIFY_THRESHOLD
 
+    sink = InMemoryEventSink()
     svc = AttachmentService(
         objects=InMemoryObjectStore(),
         attachments=InMemoryAttachmentStore(),
         tenant=FakeTenantGuard({"u1": ["s1"]}),
+        processor=DispatchProcessor(),
+        event_sink=sink,
     )
     r = svc.upload("u1", "s1", _PNG, "image", "image/png", "这张图…")
     assert r.role is None
     assert r.insight_ref is None
     assert r.clarify_hint
-    assert (
-        svc.clarify_signals
-        and svc.clarify_signals[-1]["attachment_id"] == r.attachment_id
-    )
-    # B2 定稿：M05 不直接置 AWAITING_INPUT
-    assert svc.state_sink.awaiting_calls == []
+    notices = [e for e in sink.events if e["kind"] == "notice"]
+    assert notices
+    payload = notices[-1]["payload"]
+    assert isinstance(payload, dict)
+    assert payload["attachment_id"] == r.attachment_id
+    # B2 定稿：澄清只经事件通道；「无 AWAITING_INPUT」由上面 notice 事件断言覆盖，
+    # AttachmentService 已不持有会话状态机（不再有可断言的 state_sink）。
 
 
 def test_a11_hash_verify_and_tamper() -> None:
@@ -83,11 +94,15 @@ def test_a13_upload_idempotent() -> None:
         objects=InMemoryObjectStore(),
         attachments=InMemoryAttachmentStore(),
         tenant=FakeTenantGuard({"u1": ["s1"]}),
+        processor=DispatchProcessor(),
+        event_sink=InMemoryEventSink(),
     )
     r1 = svc.upload("u1", "s1", _PNG, "image", "image/png", "当背景")
     r2 = svc.upload("u1", "s1", _PNG, "image", "image/png", "当背景")
     assert r1.attachment_id == r2.attachment_id
-    originals = [k for k in svc.objects.objects if k.endswith("/original")]
+    originals = [
+        k for k in cast(InMemoryObjectStore, svc.objects).objects if k.endswith("/original")
+    ]
     assert len(originals) == 1
 
 
@@ -97,12 +112,57 @@ def test_a14_insight_structure() -> None:
         objects=InMemoryObjectStore(),
         attachments=InMemoryAttachmentStore(),
         tenant=FakeTenantGuard({"u1": ["s1"]}),
+        processor=DispatchProcessor(),
+        event_sink=InMemoryEventSink(),
     )
     r = svc.upload("u1", "s1", _PNG, "image", "image/png", "把这张图当背景")
+    assert r.insight_ref is not None
     insight = svc.read_insight(r.insight_ref)
     assert "#sha256:" in insight.source_ref
     assert 0.0 <= insight.insight_quality <= 1.0
     assert insight.extracted is not None
+
+
+def test_video_no_role_hint_still_produces_insight() -> None:
+    """v1.9：视频描述无线索时不误入歧义分支——处理器不依赖 role，照常产出洞察。"""
+    sink = InMemoryEventSink()
+    svc = AttachmentService(
+        objects=InMemoryObjectStore(),
+        attachments=InMemoryAttachmentStore(),
+        tenant=FakeTenantGuard({"u1": ["s1"]}),
+        processor=DispatchProcessor(),
+        event_sink=sink,
+    )
+    # "看看这个" 无 role 关键词 → decision.role=None，但视频不该被卡在澄清态
+    r = svc.upload("u1", "s1", _MP4, "video", "video/mp4", "看看这个")
+    assert r.processing_state == "INSIGHT_READY"
+    assert r.insight_ref is not None
+    assert not r.clarify_hint
+    assert not [e for e in sink.events if e["kind"] == "notice"]
+
+
+def test_clarify_hint_varies_by_kind() -> None:
+    """v1.9：歧义提示按附件类别给不同文案，且与 notice 事件同值。"""
+    for kind, data, mime, word in (
+        ("image", _PNG, "image/png", "图"),
+        ("text", b"plain,text,rows", "text/csv", "文件"),
+    ):
+        sink = InMemoryEventSink()
+        svc = AttachmentService(
+            objects=InMemoryObjectStore(),
+            attachments=InMemoryAttachmentStore(),
+            tenant=FakeTenantGuard({"u1": ["s1"]}),
+            processor=DispatchProcessor(),
+            event_sink=sink,
+        )
+        r = svc.upload("u1", "s1", data, kind, mime, "看看这个")
+        assert r.processing_state == "CLARIFICATION_NEEDED"
+        assert word in r.clarify_hint
+        notices = [e for e in sink.events if e["kind"] == "notice"]
+        assert notices
+        payload = notices[-1]["payload"]
+        assert isinstance(payload, dict)
+        assert payload["clarify_hint"] == r.clarify_hint
 
 
 def test_tenant_guard_denies_cross_user() -> None:
@@ -111,6 +171,8 @@ def test_tenant_guard_denies_cross_user() -> None:
         objects=InMemoryObjectStore(),
         attachments=InMemoryAttachmentStore(),
         tenant=FakeTenantGuard({"u1": ["s1"]}),
+        processor=DispatchProcessor(),
+        event_sink=InMemoryEventSink(),
     )
     with pytest.raises(PermissionError, match="FORBIDDEN"):
         svc.upload("u2", "s1", _PNG, "image", "image/png", "当背景")

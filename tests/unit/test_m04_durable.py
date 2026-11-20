@@ -25,13 +25,13 @@ from packages.agent_core.state.lease import (
     scan_expired,
 )
 from packages.agent_core.types import CheckpointNode, State
-from services.control_plane.sessions.sse import SSEWindow
 from tests.conftest import (
     FakeClock,
     FakeLeaseProvider,
     InMemoryCheckpointStore,
     InMemoryIdempotencyStore,
 )
+from tests.support import SSEWindow
 
 
 class TestCheckpointChain:

@@ -10,6 +10,7 @@ v1.3 新增的 SPEC_MISSING / CLARIFICATION_REQUIRED / CLARIFICATION_LIMIT
 """
 from __future__ import annotations
 
+from packages.agent_core.types import JsonValue
 from packages.contracts.enums import ReasonCode
 
 # 业务失败：出护栏 / 契约 / 沙箱 / final schema 失败、回边超限、预算触顶
@@ -71,8 +72,11 @@ def classify(code: str) -> str:
     return "unknown"
 
 
-def assert_partition(codes: object) -> bool:
-    """T15：BUSINESS_FAILURE 与 INFRA_FAILURE 并集 = ReasonCode 全集，交集为空。"""
+def assert_partition(_codes: JsonValue) -> bool:
+    """T15：BUSINESS_FAILURE 与 INFRA_FAILURE 并集 = ReasonCode 全集，交集为空。
+
+    ``_codes`` 仅为兼容旧调用的占位入参（函数不读取它，判定基于两个常量集合）。
+    """
     all_codes = {c.value for c in ReasonCode}
     union = BUSINESS_FAILURE | INFRA_FAILURE
     overlap = BUSINESS_FAILURE & INFRA_FAILURE

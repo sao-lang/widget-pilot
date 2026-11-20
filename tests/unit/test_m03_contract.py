@@ -10,7 +10,7 @@ from packages.agent_core.errors import (
     INFRA_FAILURE,
     assert_partition,
 )
-from packages.agent_core.types import AgentEvent
+from packages.agent_core.types import AgentEvent, JsonValue
 from packages.contracts.enums import AgentEventKind, ReasonCode
 
 SCHEMA = "packages/contracts/events.schema.json"
@@ -25,13 +25,21 @@ def test_T14_all_event_kinds_validate():
     # 每种 kind 的枚举值都在 schema 的 kind enum 中
     allowed = set(schema["properties"]["kind"]["enum"])
     assert {k.value for k in AgentEventKind} <= allowed
-    # payload 用字符串（只唯一命中 plan 分支），使完整 schema 校验聚焦 kind/字段合法性。
-    # 注：events.schema.json 的 payload oneOf 各 object 分支字段全 optional、彼此重叠，
-    # 这是 M02 schema 的已知宽松点，不在 M03 范围；T14 关注 kind 值合法与字段齐备。
+    # M3（v1.8）：error/notice kind 的 discriminator 已生效（string 兜底移除，
+    # 必填约束生效），故按 kind 给合法 payload，其余 kind 仍用字符串（命中 plan 兜底）。
+    # T14 仍聚焦 kind 值合法与字段齐备，不再依赖事件级宽松兜底。
+    def _payload_for(kind: AgentEventKind) -> JsonValue:
+        """按 discriminator 要求提供合法 payload。"""
+        if kind is AgentEventKind.ERROR:
+            return {"code": "MODEL_ERROR", "evidenceRef": "evidence/x#sha256:abc"}
+        if kind is AgentEventKind.NOTICE:
+            return {"code": "SPEC_MISSING", "message": "请选择规格"}
+        return "plan text"
+
     for kind in AgentEventKind:
         event = AgentEvent(
             seq=1, session_id="s", run_id="r", ts="2026-01-01T00:00:00+00:00",
-            kind=kind.value, phase="RUNNING", payload="plan text", trace_id="t",
+            kind=kind.value, phase="RUNNING", payload=_payload_for(kind), trace_id="t",
         )
         validator.validate(event.to_dict())  # 不抛即通过
 

@@ -2,23 +2,28 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 from fastapi.testclient import TestClient
 
-from services.control_plane.accounts.stores import InMemoryUserStore
-from services.control_plane.api.server import create_app
+from packages.agent_core.types import JsonObject, JsonValue
+from packages.contracts.enums import SessionState
 from services.control_plane.attachments.constants import ROLE_CLARIFY_THRESHOLD
-from services.control_plane.attachments.processors import (
-    UnregisteredRoleError,
-    dispatch,
-)
 from services.control_plane.attachments.service import AttachmentService
-from services.control_plane.attachments.stores import (
+from services.control_plane.sessions.stores import SessionRow
+from tests.support import (
+    DispatchProcessor,
     FakeTenantGuard,
     InMemoryAttachmentStore,
+    InMemoryEventSink,
     InMemoryObjectStore,
+    InMemorySessionStore,
+    InMemoryUserStore,
+    UnregisteredRoleError,
+    build_test_app,
+    dispatch,
 )
-from services.control_plane.sessions.stores import InMemorySessionStore, SessionRow
 
 _PNG = bytes.fromhex("89504e470d0a1a0a") + b"\x00" * 8
 
@@ -28,6 +33,8 @@ def _svc() -> AttachmentService:
         objects=InMemoryObjectStore(),
         attachments=InMemoryAttachmentStore(),
         tenant=FakeTenantGuard({"u1": ["s1"]}),
+        processor=DispatchProcessor(),
+        event_sink=InMemoryEventSink(),
     )
 
 
@@ -70,13 +77,15 @@ def test_a15_video_uses_keyframes() -> None:
 
     result = dispatch("visual_reference", "video", "att/u1/s1/a/video")
     assert result.handler == "VideoFrameProcessor"
-    assert len(result.extracted["frames"]) <= MAX_KEYFRAMES
+    extracted = cast(JsonObject, result.extracted)
+    assert len(cast(list[JsonValue], extracted["frames"])) <= MAX_KEYFRAMES
 
 
 def test_a16_text_cell_not_evaluated() -> None:
     """A16：CSV 单元格 "=1+1" 保持字符串，不执行表达式。"""
     result = dispatch("data_source", "text", "=1+1,plain\n=2+2,x")
-    assert any(cell == "=1+1" for cell in result.extracted["cells"])
+    extracted = cast(JsonObject, result.extracted)
+    assert any(cell == "=1+1" for cell in cast(list[str], extracted["cells"]))
 
 
 def test_a17_processor_timeout_fails_state() -> None:
@@ -97,7 +106,7 @@ def test_api_upload_contract() -> None:
     """API：POST /api/attachments 带 description，返回 v1.7 完整字段。"""
     users = InMemoryUserStore()
     sessions = InMemorySessionStore()
-    sessions.insert(SessionRow(id="s1", user_id="u1", state="DRAFT"))
+    sessions.insert(SessionRow(id="s1", user_id="u1", state=SessionState.DRAFT))
     auth = __import__(
         "services.control_plane.accounts.service", fromlist=["AuthService"]
     ).AuthService(users, "test-secret")
@@ -114,11 +123,13 @@ def test_api_upload_contract() -> None:
         objects=InMemoryObjectStore(),
         attachments=InMemoryAttachmentStore(),
         tenant=FakeTenantGuard({user_row.id: ["s1"]}),
+        processor=DispatchProcessor(),
+        event_sink=InMemoryEventSink(),
     )
-    app = create_app(
-        users,
-        sessions,
-        "test-secret",
+    app = build_test_app(
+        user_store=users,
+        session_store=sessions,
+        jwt_secret="test-secret",
         attachment_service=attachments,
     )
     client = TestClient(app)
@@ -142,5 +153,6 @@ def test_api_upload_contract() -> None:
         "role_confidence",
         "insight_ref",
         "insight_quality",
+        "clarify_hint",  # C2（v1.8）：role 歧义提示透出 REST（无歧义时空串）
     ):
         assert key in data

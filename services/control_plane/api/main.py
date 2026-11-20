@@ -25,6 +25,7 @@ from services.control_plane.audit.pg_ledger import PgAuditLedger
 from services.control_plane.sessions.pg_stores import PgSessionStore
 from services.control_plane.sessions.sse import RedisEventSource
 from services.orchestrator.adapters import RedisEventBus, make_event_decoder
+from services.orchestrator.dispatcher import TASK_QUEUE_KEY, RedisTaskQueue
 
 # 环境变量名（结构性字面量集中一处）
 _ENV_JWT_SECRET = "JWT_SECRET"
@@ -71,6 +72,7 @@ def create_prod_app() -> FastAPI:
         processor=RealProcessor(),
         event_sink=RedisEventSink(bus, redis_url),  # A8：事件跨 worker 可达 SSE
     )
+    task_queue = RedisTaskQueue(redis_url, TASK_QUEUE_KEY)
     app = create_m04_app(
         user_store,
         session_store,
@@ -78,6 +80,7 @@ def create_prod_app() -> FastAPI:
         event_source=event_source,
         attachment_service=attachments,
         audit=PgAuditLedger(dsn),  # A18：审计落 PG，跨实例可重放（B2 生产接线）
+        task_enqueuer=task_queue.enqueue,  # B1b：提交描述真实入队，驱动编排
     )
     health = create_health_app("control-plane", 8000)
 

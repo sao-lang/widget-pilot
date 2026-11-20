@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from services.control_plane.audit.ledger import AuditActions, AuditLedger
+from services.control_plane.audit.ledger import AuditActions
 from services.control_plane.sessions.service import SessionService
-from services.control_plane.sessions.stores import InMemorySessionStore
+from tests.support import AuditLedger, InMemorySessionStore
 
 
 @pytest.fixture

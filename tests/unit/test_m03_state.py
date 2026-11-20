@@ -7,13 +7,13 @@ from __future__ import annotations
 from typing import cast
 
 import pytest
-from conftest import FakeLease
 
 from packages.agent_core.errors import CoreError
 from packages.agent_core.state.checkpoint import chain_valid, save_checkpoint
 from packages.agent_core.state.idempotency import get_or_reserve
 from packages.agent_core.state.lease import acquire, heartbeat, release, scan_expired
 from packages.agent_core.types import CheckpointNode, State
+from tests.conftest import FakeLease
 
 
 # ---- T17：rev 单调 + prev_hash 链可校验 ----

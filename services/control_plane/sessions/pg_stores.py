@@ -44,6 +44,7 @@ class PgSessionStore:
             grid_source=row.grid_source,
             clarify_count=row.clarify_count,
             clarification_answer=row.clarification_answer,
+            original_description=row.original_description,
             last_seq=row.last_seq,
             checkpoint_rev=row.checkpoint_rev,
             run_id=row.run_id,
@@ -94,6 +95,7 @@ class PgSessionStore:
                 grid_source=row.grid_source,
                 clarify_count=row.clarify_count,
                 clarification_answer=row.clarification_answer,
+                original_description=row.original_description,
                 last_seq=row.last_seq,
                 checkpoint_rev=row.checkpoint_rev,
                 run_id=row.run_id,
@@ -128,3 +130,18 @@ class PgSessionStore:
         with session_scope(self._factory) as session:
             objs = session.scalars(stmt).all()
         return [obj.to_row() for obj in objs]
+
+    def find_by_run_id(self, run_id: str) -> SessionRow | None:
+        """按 run_id 反查会话（review B3：恢复扫描重建完整任务）。
+
+        Args:
+            run_id: 执行记录标识（checkpoint 租约里的 run）。
+
+        Returns:
+            该 run 归属的会话行；无匹配返回 None。
+        """
+        with session_scope(self._factory) as session:
+            obj = session.scalar(
+                select(Session).where(Session.run_id == run_id).limit(1)
+            )
+        return obj.to_row() if obj is not None else None

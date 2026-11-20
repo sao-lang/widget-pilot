@@ -11,28 +11,31 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from services.control_plane.accounts.stores import InMemoryUserStore
-from services.control_plane.api.server import create_app
-from services.control_plane.sessions.stores import InMemorySessionStore
+from tests.support import (
+    InMemorySessionStore,
+    InMemoryUserStore,
+    SSEWindow,
+    build_test_app,
+    install_test_awaiting_route,
+)
 
 
 @pytest.fixture
 def client() -> TestClient:
     """构造真实 API app（内存存储 + 测试密钥），走完整请求链。"""
-    app = create_app(
+    app = build_test_app(
         user_store=InMemoryUserStore(),
         session_store=InMemorySessionStore(),
         jwt_secret="test-secret-not-production-32bytes-minimum",
     )
+    install_test_awaiting_route(app)
     return TestClient(app)
 
 
-def _sse_client() -> tuple[TestClient, object]:
+def _sse_client() -> tuple[TestClient, SSEWindow]:
     """构造带 SSE 事件源的 app（测试注入内存窗口，验证流式端点接线）。"""
-    from services.control_plane.sessions.sse import SSEWindow
-
     window = SSEWindow(window_n=500)
-    app = create_app(
+    app = build_test_app(
         user_store=InMemoryUserStore(),
         session_store=InMemorySessionStore(),
         jwt_secret="test-secret-not-production-32bytes-minimum",
@@ -177,8 +180,6 @@ class TestSSEEventsEndpoint:
 
     def test_events_stream_frames_and_resume(self) -> None:
         """SSE 帧格式 + Last-Event-ID 续传（只补 seq 之后的事件，无重复）。"""
-        from services.control_plane.sessions.sse import SSEWindow
-
         client, source = _sse_client()
         assert isinstance(source, SSEWindow)
         token = _register(client, "sse-owner@example.com")["access_token"]

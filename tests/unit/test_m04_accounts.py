@@ -14,7 +14,7 @@ from services.control_plane.accounts.service import (
     AuthService,
     DuplicateEmailError,
 )
-from services.control_plane.accounts.stores import InMemoryUserStore
+from tests.support import InMemoryUserStore
 
 
 @pytest.fixture

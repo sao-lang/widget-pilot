@@ -9,21 +9,19 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from packages.contracts.types import JsonObject, JsonValue
 from services.control_plane.attachments.constants import ROLE_CLARIFY_THRESHOLD
-from services.control_plane.attachments.events import (
-    AttachmentEventEmitter,
-    InMemoryEventSink,
+from services.control_plane.attachments.events import AttachmentEventEmitter
+from services.control_plane.attachments.ports import (
+    AttachmentStorePort,
+    EventSinkPort,
+    ObjectStorePort,
+    ProcessorPort,
+    TenantGuardPort,
 )
-from services.control_plane.attachments.processors import dispatch
 from services.control_plane.attachments.role_resolver import resolve_role
 from services.control_plane.attachments.sniff import sniff_mime
-from services.control_plane.attachments.stores import (
-    AttachmentRow,
-    FakeStateSink,
-    FakeTenantGuard,
-    InMemoryAttachmentStore,
-    InMemoryObjectStore,
-)
+from services.control_plane.attachments.stores import AttachmentRow
 
 # role → 处理器名（§4.3 registry 静态表；本模块用命名字符串，库级注册归 M03）
 _HANDLERS: dict[str, str] = {
@@ -33,7 +31,18 @@ _HANDLERS: dict[str, str] = {
     "style_reference": "StyleRefProcessor",
 }
 
-_CLARIFY_HINT = "请说明这张图是当背景、提取内容、作为数据源还是风格参考"
+# v1.9：澄清提示按附件类别给措辞——原固定文案写死"这张图"，对 video/text 不符。
+_CLARIFY_HINTS: dict[str, str] = {
+    "image": "请说明这张图是当背景、提取内容、作为数据源还是风格参考",
+    "video": "请说明这段视频是要提取画面文字、抽取关键帧还是作为背景素材",
+    "text": "请说明这份文件是作为数据源、提取内容还是风格参考",
+}
+_CLARIFY_HINT_DEFAULT = "请说明这份附件是作为背景、提取内容、数据源还是风格参考"
+
+
+def _clarify_hint_for(kind: str) -> str:
+    """按附件类别取歧义澄清提示（未知类别回退通用文案）。"""
+    return _CLARIFY_HINTS.get(kind, _CLARIFY_HINT_DEFAULT)
 
 
 @dataclass(slots=True, frozen=True)
@@ -61,27 +70,23 @@ class AttachmentService:
 
     def __init__(
         self,
-        objects: InMemoryObjectStore,
-        attachments: InMemoryAttachmentStore,
-        tenant: FakeTenantGuard,
-        processor: object | None = None,
-        event_sink: object | None = None,
+        objects: ObjectStorePort,
+        attachments: AttachmentStorePort,
+        tenant: TenantGuardPort,
+        processor: ProcessorPort,
+        event_sink: EventSinkPort,
     ) -> None:
-        """注入存储/租户守卫；processor 为可选真实处理器（§8.1 fake 默认）。
+        """注入存储、租户守卫、处理器与事件 sink（生产全部为真实实现）。
 
         Args:
-            processor: 提供 process(data, role, kind, source_ref) -> ProcessorResult
-                的对象；None 时用静态桩 dispatch（独立提测路径）。
+            processor: 提供 process(data, role, kind, source_ref) 的真实处理器。
+            event_sink: 附件生命周期事件的接收端（生产为 RedisEventSink）。
         """
         self.objects = objects
         self.attachments = attachments
         self.tenant = tenant
         self.processor = processor
-        self.state_sink = FakeStateSink()
-        self.clarify_signals: list[dict[str, str]] = []
-        self.events = AttachmentEventEmitter(event_sink or InMemoryEventSink())
-        self.dispatch_log: dict[str, str] = {}
-        self.fail_next_dispatch: bool = False
+        self.events = AttachmentEventEmitter(event_sink)
 
     def upload(
         self,
@@ -125,46 +130,36 @@ class AttachmentService:
         row.idem_key = idem_key
 
         # 4. role 歧义：不落默认 role、不生成 insight、不置会话状态（B2）
-        if decision.role is None or decision.role_confidence < ROLE_CLARIFY_THRESHOLD:
+        # v1.9：video 的处理器无条件 process_video（按 kind 分派、不看 role），
+        # role 判不出不构成伪歧义——照常产出洞察，不把视频卡在 CLARIFICATION_NEEDED。
+        if (
+            kind != "video"
+            and (decision.role is None or decision.role_confidence < ROLE_CLARIFY_THRESHOLD)
+        ):
             row.role = None
             row.role_confidence = decision.role_confidence
             row.processing_state = "CLARIFICATION_NEEDED"
-            row.clarify_hint = _CLARIFY_HINT
+            hint = _clarify_hint_for(kind)
+            row.clarify_hint = hint
             row = self._insert_or_reuse(row, user_id, session_id)
-            self.clarify_signals.append(
-                {
-                    "attachment_id": attachment_id,
-                    "role_confidence": f"{decision.role_confidence:.3f}",
-                    "clarify_hint": _CLARIFY_HINT,
-                }
-            )
-            self.events.emit_notice(session_id, attachment_id, _CLARIFY_HINT)
+            self.events.emit_notice(session_id, attachment_id, hint)
             return self._to_result(row)
 
-        # 5. role 明确：分派处理器 → 封装 AttachmentInsight（v1.7 拆双字段）
+        # 5. role 明确（或视频免判定）：分派处理器 → 封装 AttachmentInsight（v1.7 拆双字段）
+        # 视频没有 role 也需要 handler 名：用固定的 VideoFrameProcessor 标识，
+        # 实际分派由 processor_adapter 按 kind 决定（与本处 role 无关）。
+        effective_role = decision.role or "visual_reference"
         row.role = decision.role
         row.role_confidence = decision.role_confidence
-        row.handler = _HANDLERS[decision.role]
-        # S-6：优先用注入的真实处理器（生产）；无注入时用静态桩 dispatch（单测）
+        row.handler = _HANDLERS[effective_role]
+        # 真实处理器必注入；失败（超时/非法数据）按 A17 落失败证据并回传
         source_ref = f"{original.key}#sha256:{original.hash}"
         insight_quality = 1.0
         try:
-            if self.fail_next_dispatch:
-                self.fail_next_dispatch = False
-                raise TimeoutError("processor timeout")
-            if self.processor is not None:
-                processed = self.processor.process(
-                    data, decision.role, kind, source_ref
-                )
-                extracted = processed.extracted
-                insight_quality = processed.insight_quality
-                handler_name = processed.handler
-            else:
-                dispatched = dispatch(decision.role, kind, source_ref)
-                extracted = dispatched.extracted
-                handler_name = dispatched.handler
-            self.dispatch_log[attachment_id] = handler_name
-            row.handler = handler_name
+            processed = self.processor.process(data, effective_role, kind, source_ref)
+            extracted = processed.extracted
+            insight_quality = processed.insight_quality
+            row.handler = processed.handler
         except (TimeoutError, subprocess.TimeoutExpired, ValueError) as exc:
             # A17：subprocess.TimeoutExpired 不是 TimeoutError 子类，必须显式捕获；
             # 失败证据真实写入对象存储（N11：evidenceRef 不能悬空）。
@@ -225,22 +220,14 @@ class AttachmentService:
 
         # 重新分派处理器 → 新洞察（只动目标附件）
         source_ref = f"{row.object_key}#sha256:{row.hash}"
-        # N2：纠偏重跑必须走注入的真实处理器（生产），与 upload 同路径
-        if self.processor is not None:
-            processed = self.processor.process(
-                self.objects.get_raw(row.object_key) or b"",
-                new_role,
-                kind_for_dispatch(row.kind),
-                source_ref,
-            )
-            extracted = processed.extracted
-            handler_name = processed.handler
-        else:
-            dispatched = dispatch(new_role, kind_for_dispatch(row.kind), source_ref)
-            extracted = dispatched.extracted
-            handler_name = dispatched.handler
-        self.dispatch_log[attachment_id] = handler_name
-        row.handler = handler_name
+        processed = self.processor.process(
+            self.objects.get_raw(row.object_key) or b"",
+            new_role,
+            kind_for_dispatch(row.kind),
+            source_ref,
+        )
+        extracted = processed.extracted
+        row.handler = processed.handler
         insight = {
             "source_ref": source_ref,
             "extracted": extracted,
@@ -307,6 +294,8 @@ class AttachmentService:
             data = self.objects.get_raw(ref)
         else:
             data = self.objects.get_with_hash_verify(ref, tagged)
+        if data is None:
+            raise ValueError(f"CONTRACT_MISMATCH: insight object missing: {ref}")
         return AttachmentInsight(**json.loads(data.decode("utf-8")))
 
     def _insert_or_reuse(
@@ -397,7 +386,7 @@ class AttachmentInsight(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
     source_ref: str
-    extracted: object
+    extracted: JsonObject
     insight_quality: float = Field(ge=0.0, le=1.0)
 
 
@@ -408,7 +397,7 @@ def _content_hash(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _json_bytes(obj: object) -> bytes:
+def _json_bytes(obj: JsonValue) -> bytes:
     """序列化洞察为 UTF-8 JSON（确定性排序，便于快照断言）。"""
     return json.dumps(obj, ensure_ascii=False, sort_keys=True).encode("utf-8")
 

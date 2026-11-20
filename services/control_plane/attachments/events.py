@@ -1,33 +1,19 @@
 """M05 事件发射（§3.2 step12 / §6.4 attachment 通道）。
 
-事件是 M06/前端消费澄清与纠偏结果的唯一通道（A7/A8）。生产用 RedisEventBus
-包装器（seq 由会话序号分配器单调分配），测试用内存 sink 可断言。
+事件是 M06/前端消费澄清与纠偏结果的唯一通道（A7/A8）。生产用 RedisEventSink
+把事件写入 M04 Redis 总线；测试内存 sink 位于 `tests/support/attachments.py`。
 本模块不碰会话状态机——AWAITING_INPUT 仍由 M06 判定（v1.7 B2）。
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+
+from packages.contracts.types import JsonObject
+from services.control_plane.attachments.ports import AgentEventBusPort, EventSinkPort
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(slots=True)
-class InMemoryEventSink:
-    """内存事件 sink（测试桩）：记录全部 emit 的事件 dict。"""
-
-    events: list[dict[str, object]] = field(default_factory=list)
-    _seq: int = 0
-
-    def emit(self, event: dict[str, object]) -> None:
-        """记录事件并分配会话内单调 seq。"""
-        self.events.append(dict(event))
-
-    def next_seq(self, session_id: str = "") -> int:
-        """分配下一个 seq（内存桩：单计数器；生产按 session 分桶）。"""
-        self._seq += 1
-        return self._seq
 
 
 @dataclass(slots=True, frozen=True)
@@ -36,15 +22,19 @@ class AttachmentEvent:
 
     kind: str
     session_id: str
-    payload: dict[str, object]
+    payload: JsonObject
     seq: int = 0
 
 
 class AttachmentEventEmitter:
     """把附件生命周期事件写入 sink（生产注入 RedisEventBus 适配器）。"""
 
-    def __init__(self, sink: InMemoryEventSink) -> None:
-        """注入事件 sink。"""
+    def __init__(self, sink: EventSinkPort) -> None:
+        """注入事件 sink。
+
+        Args:
+            sink: 实现 emit/next_seq 的事件接收端（生产为 RedisEventSink）。
+        """
         self._sink = sink
 
     def emit_attachment(
@@ -97,11 +87,16 @@ class AttachmentEventEmitter:
 class RedisEventSink:
     """生产事件 sink：把 M05 事件写入 M04 的 RedisEventBus（A8 跨 worker 可消费）。
 
-    与 InMemoryEventSink 同接口（emit/next_seq）；seq 用 Redis INCR 分配，
+    与测试替身同接口（emit/next_seq）；seq 用 Redis INCR 分配，
     避免多 worker 各自从 1 开始造成 SSE 序号冲突。
+
+    Attributes:
+        _bus: M04 事件总线（生产为 RedisEventBus）。
+        _redis: Redis 客户端（会话级 seq 自增）。
+        _seq_prefix: Redis seq key 前缀。
     """
 
-    def __init__(self, bus: object, redis_url: str) -> None:
+    def __init__(self, bus: AgentEventBusPort, redis_url: str) -> None:
         """注入 M04 RedisEventBus 与 Redis URL。"""
         self._bus = bus
         import redis
@@ -109,21 +104,22 @@ class RedisEventSink:
         self._redis = redis.from_url(redis_url)
         self._seq_prefix = "wp:m05:eventseq:"
 
-    def emit(self, event: dict[str, object]) -> None:
+    def emit(self, event: JsonObject) -> None:
         """把事件字典转成 AgentEvent 写入总线（best-effort 由 emitter 保证）。"""
         from datetime import UTC, datetime
 
         from packages.agent_core.types import AgentEvent
 
+        seq_raw = event.get("seq", 0)
         self._bus.emit(
             AgentEvent(
-                seq=int(event.get("seq", 0)),
+                seq=int(seq_raw) if isinstance(seq_raw, (int, str, bytes)) else 0,
                 session_id=str(event.get("session_id", "")),
                 run_id="",
                 ts=datetime.now(UTC).isoformat(),
                 kind=str(event.get("kind", "notice")),
                 phase="",
-                payload=event.get("payload", {}),  # type: ignore[arg-type]
+                payload=event.get("payload", {}),
                 trace_id="",
             )
         )
