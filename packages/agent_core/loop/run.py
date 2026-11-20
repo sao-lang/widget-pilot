@@ -14,10 +14,13 @@ from uuid import uuid4
 
 from packages.agent_core.budget import meter
 from packages.agent_core.constants import LEASE_TTL_S, MAX_ITER
+from packages.agent_core.context.slots import assemble
+from packages.agent_core.errors import CoreError
 from packages.agent_core.events import seq as events_seq
 from packages.agent_core.injection import Deps, Lease
 from packages.agent_core.loop.decide import decide
 from packages.agent_core.state.checkpoint import CheckpointStoreExtras, save_checkpoint
+from packages.agent_core.tools.invoke import load as load_capability
 from packages.agent_core.types import (
     CheckpointNode,
     Decision,
@@ -25,7 +28,9 @@ from packages.agent_core.types import (
     Input,
     JsonObject,
     JsonValue,
+    Message,
     ModelOutput,
+    SlotConfig,
     SpecState,
     State,
     TerminalKind,
@@ -36,7 +41,7 @@ from packages.contracts.enums import AgentEventKind, ReasonCode, SessionState
 # 模型 final JSON 中会被认定为「可信结论」并写入 SpecState 的字段白名单。
 # 键为 JSON 字段名，值为 SpecState 上的目标属性名；白名单之外一律忽略。
 _TRUSTED_SIGNAL_KEYS: tuple[str, ...] = (
-    "signal", "reason", "bundle_ref", "evidence", "question", "tool", "args", "tier",
+    "signal", "reason", "bundle_ref", "evidence", "question", "capability_id", "level", "args", "surface", "tier",
 )
 
 
@@ -77,13 +82,67 @@ def apply_model_output(state: State, out: ModelOutput) -> State:
     return state.bump(spec=spec)
 
 
-def apply_tool_result(state: State, result_ref: str | None) -> State:
-    """工具结果对象引用回灌：写入 tool_result_ref 并把信号切回 CALL_MODEL。"""
-    spec = state.spec.model_copy(update={
+def apply_capability_result(
+    state: State,
+    result_ref: str | None,
+    *,
+    denied_reason: str | None = None,
+    count: int | None = None,
+    tokens: int | None = None,
+) -> State:
+    """能力结果引用回灌：写入 tool_result_ref 并把信号切回 CALL_MODEL。
+
+    ADR-003 / B3：拒绝时带 reason 让下一轮 decide/模型自纠正（不抛异常卡死）。
+    """
+    update: dict[str, JsonValue] = {
         "tool_result_ref": result_ref,
-        "signal": DecisionKind.CALL_MODEL,  # 工具结果回灌后继续生成
-    })
+        "signal": DecisionKind.CALL_MODEL.value,
+    }
+    if denied_reason is not None:
+        update["reason"] = denied_reason
+    if count is not None:
+        update["capability_count"] = count
+    if tokens is not None:
+        update["capability_tokens"] = tokens
+    spec = state.spec.model_copy(update=update)
     return state.bump(spec=spec)
+
+
+def _append_denial_message(state: State, capability_id: str, reason: str | None) -> State:
+    """把能力拒绝事实注入 system 消息，让下一轮模型自纠正（B3）。"""
+    msg = Message(
+        "system",
+        f"能力加载被拒：{capability_id}（{reason}）。请改用其它能力或修正参数后重试。",
+    )
+    msgs = [*state.spec.messages, msg]
+    return state.bump(spec=state.spec.model_copy(update={"messages": msgs}))
+
+
+def _store_capability_result(deps: Deps, run_id: str, rev: int, output: str) -> str:
+    """能力结果落对象存储，ref 只存纯 key（ADR-003 / B5：不内联内容进 checkpoint）。"""
+    if deps.object_store is None:
+        # 内核兜底：无对象存储时用纯 key 形态（内容由调用方另取，生产必注入 store）
+        return f"capability-result/{run_id}/{rev}"
+    return deps.object_store.put(f"capability-result/{run_id}/{rev}", output.encode("utf-8"))
+
+
+def _default_capability_guard(
+    capability_id: str, level: int, surface: str, count: int, tokens: int
+) -> tuple[bool, str | None]:
+    """内核默认闸门（ADR-003 / B2）：白名单/surface/level 三项确定性判定。
+
+    生产由 Deps.capability_guard 注入完整五项（含 count/token 上限）；此处为
+    内核兜底，不 import 上层 services，避免分层反转。
+    """
+    from packages.agent_core.tools.registry import REGISTRY
+
+    if capability_id not in REGISTRY:
+        return False, "CAPABILITY_DENIED: unregistered"
+    if surface != "generation":
+        return False, "CAPABILITY_DENIED: surface"
+    if level not in (1, 2):
+        return False, "INPUT_INVALID: level"
+    return True, None
 
 
 def _acquire(deps: Deps, run_id: str) -> Lease | None:
@@ -96,8 +155,10 @@ def _acquire(deps: Deps, run_id: str) -> Lease | None:
 def run(session_id: str, run_id: str, user_input: Input | str, deps: Deps) -> State:
     """§11.3 原文签名（追加 deps 注入参数；user_input 可为 Input 或 str）。"""
     # 入参归一化：结构化 Input 拆出 text/grid，裸字符串按纯文本、无网格处理
+    catalog: tuple[JsonObject, ...] = ()
     if isinstance(user_input, Input):
         text, grid = user_input.text, user_input.grid
+        catalog = user_input.capability_catalog
     else:
         text, grid = user_input, None
 
@@ -105,6 +166,12 @@ def run(session_id: str, run_id: str, user_input: Input | str, deps: Deps) -> St
     state = deps.checkpoint_store.load(run_id)
     if state is None:
         state = State.initial(session_id, run_id, text, grid)
+
+    # ADR-003 / B1：把 L0 能力目录装配进上下文（系统契约后的固定槽位），
+    # 让模型看得见能力并经 LOAD_CAPABILITY 自主选择。用 assemble 保证固定槽位+caching。
+    if catalog:
+        catalog_messages = assemble(state, SlotConfig(capability_catalog=catalog))
+        state = state.bump(spec=state.spec.model_copy(update={"messages": catalog_messages}))
 
     # 2. 抢租约
     lease = _acquire(deps, run_id)
@@ -145,11 +212,55 @@ def run(session_id: str, run_id: str, user_input: Input | str, deps: Deps) -> St
                     out = ModelOutput(content=str(out), usage=Usage())
                 state = apply_model_output(state, out)
                 state = meter.add(state, usage=out.usage, tier=out.tier)
-            elif decision.kind == DecisionKind.CALL_TOOL:
-                # 工具执行由 M03 tools.invoke 提供；本库核心只回灌引用，执行在 tools 层
-                ref = f"tool-result/{run_id}/{state.rev}"
-                state = apply_tool_result(state, ref)
-                state = meter.add(state, tool_calls=1)
+            elif decision.kind == DecisionKind.LOAD_CAPABILITY:
+                # ADR-003：① 过闸门（B2）② 执行/加载（FR-4）③ 失败转自纠正（B3）
+                # ④ L1/L2 均计 token（B4）⑤ 结果落对象存储、ref 不内联（B5）。
+                guard_check = (
+                    deps.capability_guard.check
+                    if deps.capability_guard is not None
+                    else _default_capability_guard
+                )
+                allowed, deny_reason = guard_check(
+                    decision.capability_id or "",
+                    decision.level,
+                    decision.surface,
+                    state.spec.capability_count,
+                    state.spec.capability_tokens,
+                )
+                if not allowed:
+                    state = apply_capability_result(
+                        state,
+                        f"capability-denied/{decision.capability_id}",
+                        denied_reason=deny_reason,
+                    )
+                    # B3：把拒绝事实注入消息，让下一轮模型自纠正（而不是盲目重试）
+                    state = _append_denial_message(state, decision.capability_id or "", deny_reason)
+                    state = meter.add(state, tool_calls=1)
+                    continue
+                try:
+                    result = load_capability(decision)
+                except CoreError as exc:
+                    # 业务失败（未注册/参数/授权）转自纠正；infra 上抛交重试策略
+                    if exc.retryable is False:
+                        state = apply_capability_result(
+                            state, f"capability-denied/{decision.capability_id}", denied_reason=exc.code
+                        )
+                        state = _append_denial_message(state, decision.capability_id or "", exc.code)
+                        state = meter.add(state, tool_calls=1)
+                        continue
+                    raise
+                ref = _store_capability_result(deps, run_id, state.rev, result.output)
+                state = apply_capability_result(
+                    state,
+                    ref,
+                    count=state.spec.capability_count + 1,
+                    tokens=state.spec.capability_tokens + len(result.output),
+                )
+                state = meter.add(
+                    state,
+                    tool_calls=1,
+                    usage=Usage(input_tokens=0, output_tokens=len(result.output)),
+                )
             elif decision.kind == DecisionKind.REPAIR:
                 # 回边，不新增 Run；计数与信号切换由 repair.feedback 统一负责
                 from packages.agent_core.structured.repair import (

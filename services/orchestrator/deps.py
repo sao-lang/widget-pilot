@@ -273,12 +273,24 @@ def build_deps(
     window = int(os.getenv(_ENV_SSE_WINDOW, str(_DEFAULT_SSE_WINDOW)))
     bus = RedisEventBus(redis_url, window, make_event_decoder())
     checkpoint_store = build_checkpoint_store(dsn, redis_url)
+    gateway = _EnvModelGateway(endpoint, api_key, model)
+    # ADR-003 / Q2：composition root 单次注册首批能力并冻结；视觉理解复用同一
+    # ModelGateway（Q9）。已冻结时跳过——同进程重复 build_deps 不重复注册。
+    from packages.agent_core.tools.registry import is_frozen
+    from services.orchestrator.capabilities import register_capabilities
+
+    if not is_frozen():
+        register_capabilities(gateway=gateway)
+    from services.orchestrator.capability_guard_adapter import ProductionCapabilityGuard
+
     return Deps(
-        model=_EnvModelGateway(endpoint, api_key, model),
+        model=gateway,
         checkpoint_store=checkpoint_store,
         idempotency_store=RedisIdempotencyStore(redis_url),
         event_bus=bus,
         clock=RealClock(),
         lease_provider=PgLeaseProvider(dsn),
         owner=owner,
+        capability_guard=ProductionCapabilityGuard(),  # ADR-003 / B2：全五项闸门
+        object_store=RedisObjectStore(redis_url),  # ADR-003 / B5：能力结果落 ref
     )

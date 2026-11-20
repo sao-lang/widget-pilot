@@ -9,12 +9,9 @@ from __future__ import annotations
 import json
 
 from services.guardrails.constants import (
-    MAX_NEED_SKILL_PER_TURN,
-    MAX_NEED_SKILL_TOKENS,
     NEED_SKILL_DEPTH,
 )
 from services.guardrails.types import (
-    HitDecision,
     NeedSkillRequest,
     NeedSkillResult,
     TurnState,
@@ -52,7 +49,10 @@ def check_need_skill(
     allowlist: frozenset[str],
     token_cost: int = 0,
 ) -> NeedSkillResult:
-    """四项校验：白名单 / 深度=1 / 单轮次数 / 累计 token。
+    """need_skill 四项校验——ADR-003 下为通用能力校验的特例包装。
+
+    旧 depth=1 请求技能正文，映射到统一协议的 level=2（L2 正文）；depth≠1
+    映射为非法 level，由统一闸门拒绝。校验逻辑只在 capability_guard 一处。
 
     Args:
         req: 结构化请求。
@@ -63,12 +63,15 @@ def check_need_skill(
     Returns:
         NeedSkillResult；ok=False 时 decision=REJECT 且 reason 非空。
     """
-    if req.recipe_id not in allowlist:
-        return NeedSkillResult(False, HitDecision.REJECT, "recipe_id 不在白名单")
-    if req.depth != NEED_SKILL_DEPTH:
-        return NeedSkillResult(False, HitDecision.REJECT, "depth 必须为 1")
-    if turn.need_skill_count >= MAX_NEED_SKILL_PER_TURN:
-        return NeedSkillResult(False, HitDecision.REJECT, "本轮 need_skill 次数超限")
-    if turn.need_skill_tokens + token_cost > MAX_NEED_SKILL_TOKENS:
-        return NeedSkillResult(False, HitDecision.REJECT, "本轮 need_skill token 超限")
-    return NeedSkillResult(ok=True)
+    from services.guardrails.capability_guard import check_capability_request
+    from services.guardrails.types import CapabilityRequest
+
+    invalid_level = 3  # 超出 Literal[1,2] 的哨兵值，触发统一闸门拒绝
+    level = 2 if req.depth == NEED_SKILL_DEPTH else invalid_level
+    result = check_capability_request(
+        CapabilityRequest(req.recipe_id, level, "generation", req.reason),
+        turn,
+        allowlist,
+        token_cost,
+    )
+    return NeedSkillResult(result.ok, result.decision, result.reason)

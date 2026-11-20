@@ -22,11 +22,18 @@ import redis
 
 from packages.agent_core.injection import Deps
 from packages.agent_core.loop.run import run
-from packages.agent_core.types import Input, State, TerminalKind
+from packages.agent_core.tools.registry import level0
+from packages.agent_core.types import Input, JsonObject, State, TerminalKind
 from packages.contracts.enums import ReasonCode, SessionState
 from packages.contracts.types import TaskFields
 from services.control_plane.sessions.service import SessionService
 from services.guardrails.types import ValidationResult
+
+
+def _l0_catalog() -> tuple[JsonObject, ...]:
+    """从启动期冻结的 registry 取 L0 目录（ADR-003 / B1）。"""
+    return tuple(level0())
+
 
 # A1（v1.8 接线）：校验链可注入入口。签名只取生产可提供的入参，
 # 复杂端口（embedder/store 等）由装配层绑定成闭包，dispatcher 不感知（关注点分离）。
@@ -416,6 +423,7 @@ class Dispatcher:
                     Input(
                         text=_task_str(task.get(_FIELD_DESC)),
                         grid=_task_str(task.get(_FIELD_GRID)) or None,
+                        capability_catalog=_l0_catalog(),  # ADR-003 / B1：L0 目录进上下文
                     ),
                     self._deps,
                 )

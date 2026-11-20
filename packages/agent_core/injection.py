@@ -65,6 +65,17 @@ class ModelGateway(Protocol):
 
 
 @runtime_checkable
+class CapabilityGuard(Protocol):
+    """能力加载闸门（ADR-003）：内核不 import 上层，用鸭子协议解耦。"""
+
+    def check(
+        self, capability_id: str, level: int, surface: str, count: int, tokens: int
+    ) -> tuple[bool, str | None]:
+        """返回 (是否放行, 拒绝原因)；token 为本次请求预计成本。"""
+        ...
+
+
+@runtime_checkable
 class ObjectStore(Protocol):
     """对象存储：按 key 写、按带 hash 的 ref 读。"""
 
@@ -233,3 +244,7 @@ class Deps:
     """租约提供者；None 表示不启用租约。"""
     owner: str = "worker-1"
     """持锁者标识（worker 实例名）。"""
+    capability_guard: CapabilityGuard | None = None
+    """能力加载闸门（ADR-003）；生产必注入，None 时内核用确定性默认闸门。"""
+    object_store: ObjectStore | None = None
+    """对象存储（ADR-003 / B5）；生产必注入，用于能力结果落 ref。"""

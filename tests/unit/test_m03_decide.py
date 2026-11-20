@@ -49,7 +49,7 @@ def test_T1_decide_is_pure(fake_model, sample_state):
     "state,kind",
     [
         (base_state(), "CALL_MODEL"),
-        (base_state(spec=SpecState(intent="x", signal="CALL_TOOL", tool="get_time")), "CALL_TOOL"),
+        (base_state(spec=SpecState(intent="x", signal="LOAD_CAPABILITY", capability_id="get_time")), "LOAD_CAPABILITY"),
         (base_state(spec=SpecState(intent="x", signal="REPAIR", errors=["bad"])), "REPAIR"),
         (base_state(spec=SpecState(intent="x", signal="AWAIT_INPUT", reason="SPEC_MISSING")), "AWAIT_INPUT"),
         (base_state(spec=SpecState(intent="x", signal="ASK_USER")), "ASK_USER"),

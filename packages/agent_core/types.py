@@ -15,11 +15,10 @@ State / Decision / Terminal 逐字对齐 §11.3；其余为让库可调用的最
 """
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import NamedTuple, TypedDict, Unpack, cast
+from typing import Literal, NamedTuple, TypedDict, Unpack, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -90,12 +89,14 @@ class SpecState(BaseModel):
     """伴随信号的 ReasonCode；旧键名 ``spec["__reason"]``。"""
     errors: list[RepairIssue] = Field(default_factory=list)
     """结构化校验错误列表（字符串或 {field,expected,got}）；旧键 ``spec["__errors"]``。"""
-    tool: str | None = None
-    """CALL_TOOL 的工具名；旧键名 ``spec["__tool"]``。"""
+    capability_id: str | None = None
+    """LOAD_CAPABILITY 的能力 id（tool 或 skill，ADR-003）；旧键 ``spec["__tool"]``。"""
+    level: Literal[1, 2] = 2
+    """披露层级：1=详情、2=执行/正文（ADR-003）。"""
     args: JsonObject = Field(default_factory=dict)
-    """工具参数（结构由工具 args_model 决定，属不确定内容）；旧键 ``__args``。"""
+    """能力参数（结构由 args_model 决定，属不确定内容）；旧键 ``__args``。"""
     surface: str = "generation"
-    """工具调用表面（generation / widget-runtime）；旧键 ``__surface``。"""
+    """能力调用表面（generation / widget-runtime）；旧键 ``__surface``。"""
     tier: ModelTier = ModelTier.STANDARD
     """模型档位（cheap / standard / frontier）；旧键 ``__tier``。"""
     messages: list[Message] = Field(default_factory=list)
@@ -108,6 +109,10 @@ class SpecState(BaseModel):
     """ASK_USER 的澄清问题文本；旧键 ``__question``。"""
     tool_result_ref: str | None = None
     """工具结果回灌的对象存储引用；旧键 ``__tool_result_ref``。"""
+    capability_count: int = 0
+    """本轮能力加载次数（ADR-003 / B2：闸门 per-turn 计数）。"""
+    capability_tokens: int = 0
+    """本轮能力加载累计 token（ADR-003 / B2：闸门 per-turn 上限）。"""
 
     # ---- 唯一不确定扩展位 ----
     extras: JsonObject = Field(default_factory=dict)
@@ -268,7 +273,8 @@ class DecisionKind(StrEnum):
     """
 
     CALL_MODEL = "CALL_MODEL"
-    CALL_TOOL = "CALL_TOOL"
+    LOAD_CAPABILITY = "LOAD_CAPABILITY"
+    """ADR-003：统一加载能力（tool 执行 / skill 正文），替代旧 CALL_TOOL。"""
     REPAIR = "REPAIR"
     AWAIT_INPUT = "AWAIT_INPUT"
     DONE = "DONE"
@@ -310,7 +316,7 @@ class CheckpointNode(StrEnum):
     """
 
     CALL_MODEL = "CALL_MODEL"
-    CALL_TOOL = "CALL_TOOL"
+    LOAD_CAPABILITY = "LOAD_CAPABILITY"
     REPAIR = "REPAIR"
     AWAIT_INPUT = "AWAIT_INPUT"
     DONE = "DONE"
@@ -339,12 +345,14 @@ class Decision(NamedTuple):
     """仅在 CALL_MODEL / ASK_USER 分支携带的消息。"""
     tier: ModelTier = ModelTier.STANDARD
     """CALL_MODEL 使用的模型档位。"""
-    tool: str | None = None
-    """CALL_TOOL 的工具名。"""
+    capability_id: str | None = None
+    """LOAD_CAPABILITY 的能力 id（tool 或 skill，ADR-003）。"""
+    level: Literal[1, 2] = 2
+    """披露层级：1=详情（schema/manifest），2=执行/正文（ADR-003）。"""
     args: JsonObject = {}  # noqa: RUF012 - 同上，逐字语义；工具参数结构不确定，用 JsonObject 聚集
-    """CALL_TOOL 的工具参数（不确定结构统一聚集）。"""
+    """LOAD_CAPABILITY 的 L2-tool 参数（结构由能力 args_model 决定）。"""
     surface: str = "generation"
-    """工具调用表面。"""
+    """能力调用表面。"""
     errors: list[RepairIssue] = []  # noqa: RUF012 - 同上，逐字语义
     """REPAIR 分支携带的结构化错误（字符串或 {field,expected,got} 字典）。"""
     reason_code: str | None = None
@@ -568,16 +576,30 @@ class State:
 
 @dataclass
 class Message:
-    """一条对话消息（role + 文本内容）。"""
+    """一条对话消息（role + 文本内容 + 可选图片引用）。
+
+    image_ref 为 ADR-003 / Q9 的多模态扩展：复用 ModelGateway 发视觉理解请求，
+    不另起 VisionPort。缺省 None 时 wire 形态与旧版完全一致。
+    """
 
     role: str
     """角色（system / user / assistant / tool）。"""
     content: str
     """消息正文。"""
+    image_ref: str | None = None
+    """可选图片引用（data URL 或对象存储键）；仅 user 消息携带。"""
 
-    def to_dict(self) -> dict[str, str]:
-        """转成 wire 形态（字符串键、字符串值）。"""
-        return {"role": self.role, "content": self.content}
+    def to_dict(self) -> JsonObject:
+        """转成 wire 形态；有 image_ref 时用 OpenAI 多模态 content parts。"""
+        if self.image_ref is None:
+            return {"role": self.role, "content": self.content}
+        return {
+            "role": self.role,
+            "content": [
+                {"type": "text", "text": self.content},
+                {"type": "image_url", "image_url": {"url": self.image_ref}},
+            ],
+        }
 
 
 @dataclass
@@ -590,6 +612,8 @@ class Input:
     """用户选择的规格；可空。"""
     attachments: list[str] = field(default_factory=list)
     """附件引用列表。"""
+    capability_catalog: tuple[JsonObject, ...] = ()
+    """L0 能力目录（ADR-003）；调度侧从 registry.level0() 注入，常驻进上下文。"""
 
 
 @dataclass
@@ -690,25 +714,8 @@ class PartialObject:
 
 
 # ---------------------------------------------------------------------------
-# 工具（§4.1 L8/L9/L10，§6.2 ToolSpec 逐字）
+# 工具结果（§6.2；ToolSpec 已由 ADR-003 的 Capability 取代，定义见 tools/registry.py）
 # ---------------------------------------------------------------------------
-
-@dataclass
-class ToolSpec:
-    """一个已注册工具的静态描述。"""
-
-    name: str
-    """工具唯一名。"""
-    args_model: type[BaseModel]
-    """参数校验模型（Pydantic）。"""
-    surfaces: set[str]
-    """允许调用的表面集合。"""
-    # 【已登记的框架边界豁免】handler 由外部 args_model 决定，返回类型无法静态收窄。
-    handler: Callable[..., object]
-    """执行函数；参数由 args_model 校验后传入，返回值不确定故用 object。"""
-    max_output_chars: int
-    """输出截断上限。"""
-
 
 @dataclass
 class ToolResult:
@@ -884,6 +891,8 @@ class SlotConfig:
     """是否装配用户记忆槽。"""
     include_retrieval: bool = True
     """是否装配检索片段槽。"""
+    capability_catalog: tuple[JsonObject, ...] = ()
+    """L0 能力目录（ADR-003）；只含 id/kind/brief/cost_hint 摘要。"""
     max_tokens: int = 8000
     """槽位 token 预算。"""
     now: datetime | None = None

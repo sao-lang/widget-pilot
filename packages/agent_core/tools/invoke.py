@@ -1,8 +1,7 @@
-"""M03 工具调用五步（§11.6 invoke() 逐字 / §4.1 L10）。
+"""M03 能力加载五步（ADR-003 / §11.6）。
 
-① REGISTRY[d.tool] 未注册直接拒绝 → ② args_model.model_validate 严格校验 →
-③ policy.check(d.surface, spec) 确定性授权 → ④ handler(args) →
-⑤ truncate(result, max_output_chars)。
+① REGISTRY 未注册拒绝 → ② surface 确定性授权 → ③ level 分派（L1 详情 / L2）→
+④ L2-tool 校验参数并执行 handler、L2-skill 取正文 → ⑤ 输出截断。
 
 错误分类：未注册 / 参数校验 / 授权拒绝 = 业务失败；handler 抛的网络/超时 =
 基础设施故障（由 handler 抛 CoreError.infra 归类）。
@@ -12,8 +11,8 @@ from __future__ import annotations
 from pydantic import ValidationError
 
 from packages.agent_core.errors import CoreError
-from packages.agent_core.tools.registry import REGISTRY
-from packages.agent_core.types import Decision, ToolResult, ToolSpec
+from packages.agent_core.tools.registry import REGISTRY, capability_detail
+from packages.agent_core.types import Decision, ToolResult
 from packages.contracts.enums import ReasonCode
 
 
@@ -24,32 +23,55 @@ def truncate(text: str, max_chars: int) -> tuple[str, bool]:
     return text[:max_chars], True
 
 
-def policy_check(surface: str, spec: ToolSpec) -> None:
+def policy_check(surface: str, surfaces: frozenset[str], capability_id: str) -> None:
     """§11.11：越权调用在策略层被拒（确定性授权，不靠提示）。"""
-    if surface not in spec.surfaces:
+    if surface not in surfaces:
         raise CoreError.business(
             ReasonCode.CAPABILITY_DENIED,
-            f"surface {surface!r} not allowed for tool {spec.name!r}",
+            f"surface {surface!r} not allowed for capability {capability_id!r}",
         )
 
 
-def invoke(d: Decision) -> ToolResult:
-    """§11.6 逐字五步（d 为 CALL_TOOL 决策）。"""
-    # ① 未注册直接拒绝
-    # d.tool 在 CALL_TOOL 分支必有值，但类型上是 str | None；空串兜底即查不到→拒绝
-    spec = REGISTRY.get(d.tool or "")
+def load(d: Decision) -> ToolResult:
+    """§11.6 能力加载五步（d 为 LOAD_CAPABILITY 决策，ADR-003）。"""
+    spec = REGISTRY.get(d.capability_id or "")
     if spec is None:
-        raise CoreError.business(ReasonCode.CAPABILITY_DENIED, f"unregistered tool: {d.tool!r}")
-    # ② Pydantic 严格校验参数
-    try:
-        args = spec.args_model.model_validate(d.args)
-    except ValidationError as e:
-        raise CoreError.business(ReasonCode.INPUT_INVALID, f"invalid args for {d.tool!r}: {e}") from e
-    # ③ 确定性授权
-    policy_check(d.surface, spec)
-    # ④ 执行（handler 抛 CoreError.infra → 基础设施故障，直接上抛）
-    result = spec.handler(args)
-    # ⑤ 截断
+        raise CoreError.business(ReasonCode.CAPABILITY_DENIED, f"unregistered capability: {d.capability_id!r}")
+
+    policy_check(d.surface, spec.surfaces, spec.id)
+
+    # L1 只下发真实 schema/manifest，不执行、不加载正文（渐进披露的核心，S1）。
+    if d.level == 1:
+        import json
+
+        detail = capability_detail(spec.id)
+        text = json.dumps(
+            {
+                "id": detail["id"],
+                "kind": detail["kind"],
+                "args_schema": detail.get("args_schema"),
+                "manifest": detail.get("manifest"),
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+        clipped, was_truncated = truncate(text, spec.max_output_chars)
+        return ToolResult(ok=True, output=clipped, truncated=was_truncated)
+
+    # L2：tool 执行 handler；skill 返回正文引用（当数据，非指令）。
+    if spec.kind == "tool":
+        if spec.args_model is None or spec.handler is None:
+            raise CoreError.business(ReasonCode.CONTRACT_MISMATCH, f"tool capability misconfigured: {spec.id}")
+        try:
+            args = spec.args_model.model_validate(d.args)
+        except ValidationError as e:
+            raise CoreError.business(ReasonCode.INPUT_INVALID, f"invalid args for {spec.id!r}: {e}") from e
+        result = spec.handler(args)
+    elif spec.kind == "skill":
+        result = f"body:{spec.payload_ref}" if spec.body is None else spec.body
+    else:
+        raise CoreError.business(ReasonCode.CONTRACT_MISMATCH, f"unknown capability kind: {spec.kind!r}")
+
     text = result if isinstance(result, str) else str(result)
     clipped, was_truncated = truncate(text, spec.max_output_chars)
     return ToolResult(ok=True, output=clipped, truncated=was_truncated)

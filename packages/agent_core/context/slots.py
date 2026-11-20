@@ -61,7 +61,14 @@ def assemble(state: State, slots: SlotConfig) -> list[Message]:
     messages: list[Message] = [
         Message("system", "系统契约：仅生成符合 WidgetSpec 的 TSX/React 控件，import 仅限白名单。"),
     ]
-    # 规程（固定第二槽）
+    # L0 能力目录（ADR-003 / FR-8）：固定第二槽，只含摘要，模型经 LOAD_CAPABILITY 按需加载详情/正文
+    if slots.capability_catalog:
+        catalog_lines = [
+            f"- {item['id']} [{item['kind']}] {item['brief']} (cost~{item['cost_hint']})"
+            for item in slots.capability_catalog
+        ]
+        messages.append(Message("system", "可用能力：" + "\n".join(catalog_lines) + "\n用 LOAD_CAPABILITY(level=1取详情/2执行或加载) 按需使用。"))
+    # 规程（L1/L2 加载结果槽；此处为固定占位，实际正文由 L2-skill 注入）
     messages.append(Message("system", "规程：按规格约束生成，禁止未声明能力。"))
     # 检索片段（不可信数据标注）
     if slots.include_retrieval:

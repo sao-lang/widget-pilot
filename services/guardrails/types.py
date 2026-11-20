@@ -224,6 +224,32 @@ class NeedSkillRequest:
 
 
 @dataclass(slots=True, frozen=True)
+class CapabilityRequest:
+    """tool/skill 通用的能力加载请求（ADR-003 / FR-6）。
+
+    Attributes:
+        capability_id: 能力句柄（tool.* / recipe.*）。
+        level: 披露层级；1=详情，2=执行/正文。
+        surface: 调用表面（generation / widget-runtime），确定性授权用。
+        reason: 模型给出的加载理由（仅留证，不作判据）。
+    """
+
+    capability_id: str
+    level: int
+    surface: str = "generation"
+    reason: str = ""
+
+
+@dataclass(slots=True, frozen=True)
+class CapabilityCheckResult:
+    """能力请求校验结果（ADR-003 / FR-6）。"""
+
+    ok: bool
+    decision: HitDecision | None = None
+    reason: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
 class NeedSkillResult:
     """need_skill 校验结果（§4.3 NeedSkillResult）。"""
 

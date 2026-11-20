@@ -1,4 +1,4 @@
-"""M03 tools + guardrails：T8 护栏命中留证 / T13 能力白名单 / 工具五步。"""
+"""M03 tools + guardrails：T8 护栏命中留证 / T13 能力白名单 / 能力加载五步（ADR-003）。"""
 from __future__ import annotations
 
 import pytest
@@ -8,8 +8,13 @@ from packages.agent_core.errors import CoreError, classify
 from packages.agent_core.guardrails.capability import capability
 from packages.agent_core.guardrails.input_guard import RuleSet, input_guard
 from packages.agent_core.guardrails.output_guard import output_guard
-from packages.agent_core.tools.invoke import invoke, truncate
-from packages.agent_core.tools.registry import REGISTRY, ToolSpec, register
+from packages.agent_core.tools.invoke import load, truncate
+from packages.agent_core.tools.registry import (
+    REGISTRY,
+    Capability,
+    register,
+    unfreeze_registry,
+)
 from packages.agent_core.types import (
     CapabilityCall,
     Decision,
@@ -29,38 +34,43 @@ def handler(args: Args) -> str:
 
 @pytest.fixture(autouse=True)
 def clean_registry():
+    unfreeze_registry()
     REGISTRY.clear()
-    register("get_weather", ToolSpec("get_weather", Args, {"generation"}, handler, max_output_chars=12))
+    register("get_weather", Capability(
+        id="get_weather", kind="tool", brief="查天气", detail_ref="args", payload_ref="handler",
+        surfaces=frozenset({"generation"}), cost_hint=1, args_model=Args, handler=handler, max_output_chars=12,
+    ))
     yield
+    unfreeze_registry()
     REGISTRY.clear()
 
 
 # ---- 工具五步 ----
 def test_invoke_unregistered_tool_rejected():
-    d = Decision(DecisionKind.CALL_TOOL, tool="eval", args={}, surface="generation")
+    d = Decision(DecisionKind.LOAD_CAPABILITY, capability_id="eval", args={}, surface="generation")
     with pytest.raises(CoreError) as ei:
-        invoke(d)
+        load(d)
     assert ei.value.code == "CAPABILITY_DENIED"
     assert ei.value.retryable is False
 
 
 def test_invoke_validates_args():
-    d = Decision(DecisionKind.CALL_TOOL, tool="get_weather", args={"bad": 1}, surface="generation")
+    d = Decision(DecisionKind.LOAD_CAPABILITY, capability_id="get_weather", args={"bad": 1}, surface="generation")
     with pytest.raises(CoreError) as ei:
-        invoke(d)
+        load(d)
     assert ei.value.code == "INPUT_INVALID"
 
 
 def test_invoke_authorization_denied_on_wrong_surface():
-    d = Decision(DecisionKind.CALL_TOOL, tool="get_weather", args={"city": "SZ"}, surface="widget-runtime")
+    d = Decision(DecisionKind.LOAD_CAPABILITY, capability_id="get_weather", args={"city": "SZ"}, surface="widget-runtime")
     with pytest.raises(CoreError) as ei:
-        invoke(d)
+        load(d)
     assert ei.value.code == "CAPABILITY_DENIED"
 
 
 def test_invoke_success_and_truncate():
-    d = Decision(DecisionKind.CALL_TOOL, tool="get_weather", args={"city": "Shenzhen"}, surface="generation")
-    result = invoke(d)
+    d = Decision(DecisionKind.LOAD_CAPABILITY, capability_id="get_weather", args={"city": "Shenzhen"}, surface="generation")
+    result = load(d)
     assert result.ok is True
     assert result.truncated is True
     assert len(result.output) == 12
@@ -74,10 +84,13 @@ def test_truncate_helper():
 def test_invoke_handler_timeout_classified_infra():
     def boom(args):
         raise CoreError.infra("SANDBOX_UNAVAILABLE", "timeout")
-    register("flaky", ToolSpec("flaky", Args, {"generation"}, boom, 100))
-    d = Decision(DecisionKind.CALL_TOOL, tool="flaky", args={"city": "SZ"}, surface="generation")
+    register("flaky", Capability(
+        id="flaky", kind="tool", brief="故障桩", detail_ref="args", payload_ref="handler",
+        surfaces=frozenset({"generation"}), cost_hint=1, args_model=Args, handler=boom, max_output_chars=100,
+    ))
+    d = Decision(DecisionKind.LOAD_CAPABILITY, capability_id="flaky", args={"city": "SZ"}, surface="generation")
     with pytest.raises(CoreError) as ei:
-        invoke(d)
+        load(d)
     assert classify(ei.value.code) == "infra"
     assert ei.value.retryable is True
 
@@ -87,7 +100,10 @@ def test_registry_runtime_immutable_guard():
     from packages.agent_core.tools.registry import freeze_registry
     freeze_registry()
     with pytest.raises(CoreError):
-        register("late", ToolSpec("late", Args, {"generation"}, handler, 10))
+        register("late", Capability(
+            id="late", kind="tool", brief="迟到", detail_ref="args", payload_ref="handler",
+            surfaces=frozenset({"generation"}), cost_hint=1, args_model=Args, handler=handler, max_output_chars=10,
+        ))
     from packages.agent_core.tools.registry import unfreeze_registry
     unfreeze_registry()
 

@@ -1,5 +1,7 @@
 # M03 · 手写 Harness 内核（原 §11 / `packages/agent_core`）
 
+> **⚠ ADR-003 变更覆盖声明（2026-11-21，待拷问确认）**：§11.6 的 `ToolSpec` + `CALL_TOOL` + `{"tool","args"}` 常驻工具方案已变更为统一 `Capability` + `LOAD_CAPABILITY` + L0/L1/L2 分级披露。下文凡 `ToolSpec`/`CALL_TOOL`/`tools.invoke`/`REGISTRY: dict[str, ToolSpec]` 等表述均为 **旧手段，已被 ADR-003 覆盖**：`kind=tool|skill` 统一抽象、L0 只常驻摘要、模型经 `LOAD_CAPABILITY(id, level, args, surface)` 按需加载，所有 L1/L2 计入 X4 预算。注意当前源码 `loop/run.py:148-152` 的 `CALL_TOOL` 分支回灌假 ref、生产零 `register()`——属已知断链，由 ADR-003 实现阶段修复。历史段落以本声明为准，待节点④拷问后收敛。
+
 > **文档类型**：可独立交付 / 可独立验收的模块设计文档（**库级实现基座**，非服务）
 > **来源**：`设计方案.md` v1.1 §11 全章（§11.1–§11.11）、§10、§0 D-5、§2.6、§3.3、§4.2/4.3/4.5、§5 D1/D4、§7.1/7.2、§8 总表、§9.3/9.6、附录 A/B
 > **版本**：v1.0　|　**拆分日期**：2026-11-15　|　**状态**：设计定稿　|　**最近修订**：2026-11-16（v1.3，ADR-001 同步：`decide()` 新增 `ASK_USER` / `RESUME_FROM_CLARIFICATION` 分支、`State` 增 `clarify_count`/`clarification_answer`、新增 `MAX_CLARIFY=2`）

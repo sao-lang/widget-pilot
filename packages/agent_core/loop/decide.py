@@ -5,7 +5,7 @@
 
 模型这个「唯一不可信变量」被隔离在 run.py 的 CALL_MODEL 分支；decide 只读
 ``State.spec`` 中的可信结论槽位（:class:`SpecState` 的显式字段）——这些字段由
-apply_model_output / apply_tool_result / repair.feedback / 澄清端点写入。
+apply_model_output / apply_capability_result / repair.feedback / 澄清端点写入。
 类型改造后不再有 ``spec["__signal"]`` 这类动态键读取，全部为属性访问。
 """
 from __future__ import annotations
@@ -82,11 +82,12 @@ def decide(state: State) -> Decision:
         # 转人工终态：同样保留上游 ReasonCode，便于前端展示与评测归因
         return Decision(DecisionKind.HANDOFF, reason_code=_reason(spec) or ReasonCode.HUMAN_REQUIRED)
 
-    # 7. 工具调用：确定性授权交给 invoke()
-    if sig == DecisionKind.CALL_TOOL:
+    # 7. 能力加载（ADR-003）：确定性授权交给 tools.load()
+    if sig == DecisionKind.LOAD_CAPABILITY:
         return Decision(
-            DecisionKind.CALL_TOOL,
-            tool=spec.tool,
+            DecisionKind.LOAD_CAPABILITY,
+            capability_id=spec.capability_id,
+            level=spec.level,
             args=spec.args,
             surface=spec.surface,
         )

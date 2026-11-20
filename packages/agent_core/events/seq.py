@@ -36,7 +36,7 @@ def decision_to_kind(decision: Decision, state: State | None = None) -> AgentEve
         return AgentEventKind.INTERRUPTED
     if k == DecisionKind.REPAIR:
         return AgentEventKind.VALIDATION
-    if k == DecisionKind.CALL_TOOL:
+    if k == DecisionKind.LOAD_CAPABILITY:
         return AgentEventKind.NOTICE
     return AgentEventKind.PLAN  # CALL_MODEL
 

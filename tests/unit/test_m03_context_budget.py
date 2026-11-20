@@ -74,6 +74,23 @@ def test_slot_order_fixed():
     assert roles.index("system") < roles.index("user")
 
 
+def test_l0_catalog_slot_after_system_contract():
+    """ADR-003 / FR-8：L0 目录槽位固定在系统契约之后、规程之前。"""
+    s = State.initial("s", "run", "做一个日历", "4x4")
+    catalog = ({"id": "tool.weather", "kind": "tool", "brief": "查天气", "cost_hint": 10},)
+    msgs = assemble(
+        s,
+        SlotConfig(include_memory=False, include_retrieval=False, capability_catalog=catalog),
+    )
+    contents = [m.content for m in msgs]
+    system_idx = next(i for i, c in enumerate(contents) if c.startswith("系统契约"))
+    catalog_idx = next(i for i, c in enumerate(contents) if c.startswith("可用能力"))
+    recipe_idx = next(i for i, c in enumerate(contents) if c.startswith("规程"))
+    assert system_idx < catalog_idx < recipe_idx
+    assert "tool.weather" in contents[catalog_idx]
+    assert "args" not in contents[catalog_idx]  # L0 不泄漏 schema
+
+
 def test_assemble_messages_uses_slots():
     s = State.initial("s", "run", "x")
     msgs = assemble_messages(s)

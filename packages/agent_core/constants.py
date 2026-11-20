@@ -27,7 +27,7 @@ VECTOR_TOP_K = 10          # 向量召回 top-k
 BM25_TOP_K = 10            # BM25 召回 top-k
 RERANK_TOP_K = 5           # rerank 保留 top-k
 
-# 工具输出截断默认上限（ToolSpec.max_output_chars 缺省）
+# 能力输出截断默认上限（Capability.max_output_chars 缺省，ADR-003）
 DEFAULT_MAX_OUTPUT_CHARS = 4000
 
 # 四维预算默认硬上限（【推导·需评审】；M07/M11 可注入覆盖）

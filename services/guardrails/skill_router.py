@@ -8,7 +8,8 @@ from __future__ import annotations
 from packages.contracts.enums import GridSpec, WidgetType
 from services.guardrails.types import PrefetchResult
 
-# (widget_type, grid) → recipe_ids（静态映射，M10 维护规程库，M06 只读映射）
+# (widget_type, grid) → recipe_ids（静态映射，ADR-003：仅作 L0 白名单来源/默认建议；
+# 规程正文由 M06/M07 维护于 packages/prompts/recipes/，M10 只索引，正文加载权交模型）
 _PREFETCH_MAP: dict[tuple[WidgetType, GridSpec], tuple[str, ...]] = {
     (WidgetType.CALENDAR, GridSpec._4X4): (
         "recipe.calendar.month.v3",

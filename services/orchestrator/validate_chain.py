@@ -360,6 +360,8 @@ def validate_chain(
         return _terminal(ReasonCode.INTENT_OUT_OF_SCOPE, trace_id, event_sink, ref)
 
     # step13-14：skill 确定性预取 + 归因日志
+    # ADR-003 / FR-7：此处产出的 recipe_ids 仅为 L0 默认建议/白名单来源，
+    # 不再强制预取正文；正文加载权交模型经 LOAD_CAPABILITY 决定。
     effective_grid = semantic.grid or parsed_grid
     assert effective_grid is not None  # 语义层通过时 grid 必已确定
     widget = _infer_widget(description, effective_grid)
@@ -450,7 +452,7 @@ def validate_chain(
             "fallback_reason": decision.fallback_reason,
         },
     )
-    _emit(event_sink, "plan", {"steps": ["语义校验", "进护栏", "意图级联", "技能预取"]})
+    _emit(event_sink, "plan", {"steps": ["语义校验", "进护栏", "意图级联（门禁）", "能力目录建议"]})
 
     return ValidationResult(
         ok=True,
