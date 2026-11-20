@@ -162,3 +162,48 @@ def test_real_video_keyframes() -> None:
     assert result.insight_quality == 1.0
     assert 1 <= result.extracted["frame_count"] <= MAX_KEYFRAMES
     assert result.extracted["frames"][0].startswith("data:image/jpeg;base64,")
+
+
+def test_real_patch_roles_uses_processor_and_emits_event() -> None:
+    """真实环境纠偏：PG+MinIO 往返、真实处理器、事件 seq 单调、旧版保留。
+
+    落实 N2（patch 走注入 processor）、N3（版本隔离）、A8（事件）、
+    N12（docstring 曾虚假声称但无测试）。
+    """
+    import io
+    from uuid import uuid4
+
+    from PIL import Image
+
+    from services.control_plane.attachments.events import InMemoryEventSink
+
+    uid = "m05-patch-" + uuid4().hex[:8]
+    sid = "m05-patch-s-" + uuid4().hex[:8]
+    sink = InMemoryEventSink()
+    svc = AttachmentService(
+        objects=S3ObjectStore(),
+        attachments=PgAttachmentStore(_DSN),
+        tenant=SessionTenantGuard(PgSessionStore(_DSN)),
+        processor=RealProcessor(),
+        event_sink=sink,
+    )
+    PgSessionStore(_DSN).insert(SessionRow(id=sid, user_id=uid, state="DRAFT"))
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), (255, 0, 0)).save(buf, format="PNG")
+
+    first = svc.upload(uid, sid, buf.getvalue(), "image", "image/png", "把这张图当背景")
+    assert first.role == "visual_reference"
+    first_sequenced = max(e["seq"] for e in sink.events)
+
+    patched = svc.patch_roles(uid, sid, first.attachment_id, "style_reference")
+    assert patched.role == "style_reference"
+    assert patched.insight_ref != first.insight_ref
+    assert patched.handler == "StyleRefProcessor"  # N2：真实注入处理器
+    assert any(e["seq"] > first_sequenced for e in sink.events)  # A8
+
+    # PG 真落行
+    row = svc.attachments.get(first.attachment_id)
+    assert row is not None and row.role == "style_reference"
+    # MinIO 旧版洞察保留（N3：只列该附件版本）
+    versions = svc.objects.versions(first.attachment_id)
+    assert versions and all(f"/{first.attachment_id}/" in v for v in versions)

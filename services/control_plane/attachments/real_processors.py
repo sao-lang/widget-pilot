@@ -11,7 +11,10 @@ import base64
 import io
 from dataclasses import dataclass
 
-from services.control_plane.attachments.constants import MAX_KEYFRAMES
+from services.control_plane.attachments.constants import (
+    MAX_KEYFRAMES,
+    PROCESSOR_TIMEOUT_S,
+)
 
 _PIXEL_CAP = 4096
 """解码像素上限（§2.1 图片只读解码、防压缩炸弹）。"""
@@ -153,19 +156,39 @@ def process_video(data: bytes) -> ProcessorResult:
                 str(out_pattern),
             ],
             capture_output=True,
-            timeout=20,
+            timeout=PROCESSOR_TIMEOUT_S,
             check=False,
         )
         frames: list[str] = []
+        regions: list[dict[str, object]] = []
         if proc.returncode == 0:
-            for frame_file in sorted(Path(tmp).glob("frame_*.jpg")):
+            for idx, frame_file in enumerate(sorted(Path(tmp).glob("frame_*.jpg"))):
+                raw = frame_file.read_bytes()
                 frames.append(
-                    "data:image/jpeg;base64,"
-                    + base64.b64encode(frame_file.read_bytes()).decode("ascii")
+                    "data:image/jpeg;base64," + base64.b64encode(raw).decode("ascii")
                 )
+                # A15：对每帧跑区域化 OCR，提取画面里的日期等文本区域
+                try:
+                    from rapidocr_onnxruntime import RapidOCR
+
+                    ocr_result, _ = RapidOCR()(raw)
+                    for box, text, score in ocr_result or []:
+                        xs = [pt[0] for pt in box]
+                        ys = [pt[1] for pt in box]
+                        regions.append(
+                            {
+                                "frame_index": idx,
+                                "label": "region",
+                                "bbox": [min(xs), min(ys), max(xs), max(ys)],
+                                "text": str(text),
+                                "score": float(score),
+                            }
+                        )
+                except ImportError:
+                    break  # OCR 可选依赖缺失 → regions 为空，降级契约生效
     return ProcessorResult(
         "VideoFrameProcessor",
-        {"frames": frames, "frame_count": len(frames)},
+        {"frames": frames, "frame_count": len(frames), "regions": regions},
         1.0 if frames else 0.0,
     )
 

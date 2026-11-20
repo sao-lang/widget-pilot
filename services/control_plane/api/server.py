@@ -117,24 +117,26 @@ class PatchRolesReq(BaseModel):
     roles: list[PatchRoleItem]
 
 
-def _m05_ok(data: object) -> dict[str, Any]:
-    """M05 成功响应（openapi ApiResponse 完整四字段，S-1）。"""
+def _m05_ok(data: object, evidence_ref: str = "") -> dict[str, Any]:
+    """M05 成功响应（openapi ApiResponse 完整字段，S-1/N5）。"""
     return {
         "code": _CODE_OK,
         "message": "OK",
         "traceId": uuid4().hex,
         "retryable": False,
+        "evidenceRef": evidence_ref,
         "data": data,
     }
 
 
-def _m05_error(code: str, detail: str) -> dict[str, Any]:
-    """M05 失败响应（code 对齐 ReasonCode + data.detail.code，S-1/A4）。"""
+def _m05_error(code: str, detail: str, evidence_ref: str = "") -> dict[str, Any]:
+    """M05 失败响应（code 对齐 ReasonCode + data.detail.code + evidenceRef，S-1/A4/N5）。"""
     return {
         "code": code,
         "message": detail,
         "traceId": uuid4().hex,
         "retryable": False,
+        "evidenceRef": evidence_ref,
         "data": {"detail": {"code": detail}},
     }
 
@@ -444,9 +446,17 @@ def create_app(
                     status_code=403,
                     content=_m05_error(_CODE_FORBIDDEN, "FORBIDDEN"),
                 )
+            if uploaded.processing_state == "FAILED":
+                return JSONResponse(
+                    status_code=500,
+                    content=_m05_error(
+                        "PROCESSOR_FAILED", "PROCESSOR_FAILED", uploaded.evidence_ref
+                    ),
+                )
             return _m05_ok(
                 {
                     "attachment_id": uploaded.attachment_id,
+                    "evidence_ref": uploaded.evidence_ref,
                     "kind": uploaded.kind,
                     "mime": uploaded.mime,
                     "size": uploaded.size,
@@ -488,6 +498,49 @@ def create_app(
                     }
                 )
             return _m05_ok({"updated": updated, "rerun_from": "ROLE_ASSIGNED"})
+
+        @app.get("/api/sessions/{session_id}/attachments")
+        def list_attachments(
+            session_id: str, user: UserRow = CurrentUser
+        ) -> dict[str, Any]:
+            """列出会话附件（§4.1 / A12：越权 403，不泄漏是否存在）。"""
+            try:
+                rows = attachment_service.attachments.list_by_session(
+                    user.id, session_id
+                )
+            except PermissionError:
+                return JSONResponse(
+                    status_code=403,
+                    content=_m05_error(_CODE_FORBIDDEN, "FORBIDDEN"),
+                )
+            # 服务端归属校验：非本用户 session 一律 403（即使 store 返回空列表）
+            from services.control_plane.attachments.tenant_guard import (
+                SessionTenantGuard,
+            )
+
+            guard = SessionTenantGuard(session_store)
+            try:
+                guard.assert_owner(user.id, session_id)
+            except PermissionError:
+                return JSONResponse(
+                    status_code=403,
+                    content=_m05_error(_CODE_FORBIDDEN, "FORBIDDEN"),
+                )
+            return _m05_ok(
+                {
+                    "items": [
+                        {
+                            "attachment_id": r.id,
+                            "role": r.role,
+                            "role_confidence": r.role_confidence,
+                            "insight_ref": r.insight_ref,
+                            "insight_quality": r.insight_quality,
+                            "processing_state": r.processing_state,
+                        }
+                        for r in rows
+                    ]
+                }
+            )
 
     # 测试钩子：把会话置为 AWAITING_INPUT（生产由 M06 语义层触发，此处仅供接线测试）
     @app.post("/api/sessions/{session_id}/_test_awaiting")

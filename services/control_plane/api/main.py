@@ -15,6 +15,7 @@ from services._health import create_health_app
 from services.control_plane.accounts.constants import SSE_WINDOW_N
 from services.control_plane.accounts.pg_stores import PgUserStore
 from services.control_plane.api.server import create_app as create_m04_app
+from services.control_plane.attachments.events import RedisEventSink
 from services.control_plane.attachments.pg_stores import PgAttachmentStore
 from services.control_plane.attachments.processor_adapter import RealProcessor
 from services.control_plane.attachments.s3_store import S3ObjectStore
@@ -68,6 +69,7 @@ def create_prod_app() -> FastAPI:
         attachments=PgAttachmentStore(dsn),
         tenant=SessionTenantGuard(session_store),
         processor=RealProcessor(),
+        event_sink=RedisEventSink(bus, redis_url),  # A8：事件跨 worker 可达 SSE
     )
     app = create_m04_app(
         user_store,

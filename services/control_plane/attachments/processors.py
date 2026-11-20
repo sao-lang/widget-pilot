@@ -24,6 +24,7 @@ def dispatch(
     kind: str,
     source_ref: str,
     simulate_timeout: bool = False,
+    alert_sink: object | None = None,
 ) -> DispatchResult:
     """按 role 查静态表分派处理器。
 
@@ -41,6 +42,14 @@ def dispatch(
         {"visual_reference", "content_extraction", "data_source", "style_reference"}
     )
     if role not in registered:
+        # A18：拒绝且写告警（事件通道），不动态补注册
+        if alert_sink is not None and hasattr(alert_sink, "emit"):
+            alert_sink.emit(
+                {
+                    "kind": "alert",
+                    "payload": {"role": role, "reason": "UNREGISTERED_ROLE"},
+                }
+            )
         raise UnregisteredRoleError(f"unregistered role: {role}")
     if simulate_timeout:
         raise TimeoutError("processor timeout")

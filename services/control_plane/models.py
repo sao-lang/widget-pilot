@@ -253,7 +253,7 @@ class Attachment(Base):
     __table_args__ = (
         Index("ix_attachments_user_id", "user_id"),
         Index("ix_attachments_session_id", "session_id"),
-        Index("ix_attachments_idem_key", "idem_key"),
+        Index("uq_attachments_idem", "user_id", "session_id", "idem_key", unique=True),
     )
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)

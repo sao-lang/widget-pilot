@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import uuid
 from dataclasses import dataclass
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from services.control_plane.attachments.constants import ROLE_CLARIFY_THRESHOLD
+from services.control_plane.attachments.events import (
+    AttachmentEventEmitter,
+    InMemoryEventSink,
+)
 from services.control_plane.attachments.processors import dispatch
 from services.control_plane.attachments.role_resolver import resolve_role
 from services.control_plane.attachments.sniff import sniff_mime
@@ -58,6 +65,7 @@ class AttachmentService:
         attachments: InMemoryAttachmentStore,
         tenant: FakeTenantGuard,
         processor: object | None = None,
+        event_sink: object | None = None,
     ) -> None:
         """注入存储/租户守卫；processor 为可选真实处理器（§8.1 fake 默认）。
 
@@ -71,6 +79,7 @@ class AttachmentService:
         self.processor = processor
         self.state_sink = FakeStateSink()
         self.clarify_signals: list[dict[str, str]] = []
+        self.events = AttachmentEventEmitter(event_sink or InMemoryEventSink())
         self.dispatch_log: dict[str, str] = {}
         self.fail_next_dispatch: bool = False
 
@@ -121,7 +130,7 @@ class AttachmentService:
             row.role_confidence = decision.role_confidence
             row.processing_state = "CLARIFICATION_NEEDED"
             row.clarify_hint = _CLARIFY_HINT
-            self.attachments.insert(row)
+            row = self._insert_or_reuse(row, user_id, session_id)
             self.clarify_signals.append(
                 {
                     "attachment_id": attachment_id,
@@ -129,6 +138,7 @@ class AttachmentService:
                     "clarify_hint": _CLARIFY_HINT,
                 }
             )
+            self.events.emit_notice(session_id, attachment_id, _CLARIFY_HINT)
             return self._to_result(row)
 
         # 5. role 明确：分派处理器 → 封装 AttachmentInsight（v1.7 拆双字段）
@@ -155,13 +165,19 @@ class AttachmentService:
                 handler_name = dispatched.handler
             self.dispatch_log[attachment_id] = handler_name
             row.handler = handler_name
-        except (TimeoutError, ValueError) as exc:
-            # A17：处理器不可恢复失败 → FAILED + evidenceRef，不进 INSIGHT_READY
+        except (TimeoutError, subprocess.TimeoutExpired, ValueError) as exc:
+            # A17：subprocess.TimeoutExpired 不是 TimeoutError 子类，必须显式捕获；
+            # 失败证据真实写入对象存储（N11：evidenceRef 不能悬空）。
             row.processing_state = "FAILED"
-            row.evidence_ref = f"att/{user_id}/{session_id}/{attachment_id}/error.json"
-            self.attachments.insert(row)
-            result = self._to_result(row)
-            return _with_error(result, str(exc))
+            error_obj = self.objects.put_insight(
+                user_id,
+                session_id,
+                attachment_id,
+                _json_bytes({"error": str(exc), "handler": row.handler}),
+            )
+            row.evidence_ref = f"{error_obj.key}#sha256:{error_obj.hash}"
+            row = self._insert_or_reuse(row, user_id, session_id)
+            return self._to_result(row)
         row.processing_state = "INSIGHT_READY"
         insight = {
             "source_ref": source_ref,
@@ -174,7 +190,8 @@ class AttachmentService:
         # 引用带内容 hash（全局不变量）：内容变 → ref 变，A9 纠偏可断言
         row.insight_ref = f"{insight_ref_obj.key}#sha256:{insight_ref_obj.hash}"
         row.insight_quality = insight_quality
-        self.attachments.insert(row)
+        row = self._insert_or_reuse(row, user_id, session_id)
+        self.events.emit_attachment(session_id, attachment_id, decision.role, "UPLOAD")
         return self._to_result(row)
 
     def patch_roles(
@@ -206,10 +223,22 @@ class AttachmentService:
 
         # 重新分派处理器 → 新洞察（只动目标附件）
         source_ref = f"{row.object_key}#sha256:{row.hash}"
-        dispatched = dispatch(new_role, kind_for_dispatch(row.kind), source_ref)
-        extracted = dispatched.extracted
-        self.dispatch_log[attachment_id] = dispatched.handler
-        row.handler = dispatched.handler
+        # N2：纠偏重跑必须走注入的真实处理器（生产），与 upload 同路径
+        if self.processor is not None:
+            processed = self.processor.process(
+                self.objects.get_raw(row.object_key) or b"",
+                new_role,
+                kind_for_dispatch(row.kind),
+                source_ref,
+            )
+            extracted = processed.extracted
+            handler_name = processed.handler
+        else:
+            dispatched = dispatch(new_role, kind_for_dispatch(row.kind), source_ref)
+            extracted = dispatched.extracted
+            handler_name = dispatched.handler
+        self.dispatch_log[attachment_id] = handler_name
+        row.handler = handler_name
         insight = {
             "source_ref": source_ref,
             "extracted": extracted,
@@ -225,6 +254,7 @@ class AttachmentService:
         row.processing_state = "INSIGHT_READY"
         row.clarify_hint = ""
         self.attachments.update(row)
+        self.events.emit_attachment(session_id, attachment_id, new_role, "PATCH")
         return self._to_result(row)
 
     def get_attachment(
@@ -275,6 +305,51 @@ class AttachmentService:
             data = self.objects.get_with_hash_verify(ref, tagged)
         return AttachmentInsight(**json.loads(data.decode("utf-8")))
 
+    def _insert_or_reuse(
+        self, row: AttachmentRow, user_id: str, session_id: str
+    ) -> AttachmentRow:
+        """N4：并发同幂等键时 INSERT 撞唯一索引 → 折叠为复用既有行。
+
+        返回实际落库的行（自己插入的 row，或并发胜出者的既有行）。
+        调用方若拿到既有行，应丢弃本次新写的 S3 原文（孤儿对象清理待 M11）。
+        """
+        try:
+            self.attachments.insert(row)
+            return row
+        except Exception as exc:
+            # 只折叠唯一键冲突；其他异常照常抛出
+            if "UNIQUE" not in str(exc).upper() and "DUPLICATE" not in str(exc).upper():
+                raise
+            # R-1：FAILED/REJECTED 行被 `_find_by_idem` 跳过，但唯一索引仍在。
+            # 此时不是"重试复用旧结果"，而是"重试应重新跑"——把本次新状态写回
+            # 既有行（保留 id，更新 object_key/hash/状态），避免永久 500。
+            existing = self._find_by_idem(user_id, session_id, row.idem_key)
+            if existing is None:
+                existing = next(
+                    (
+                        r
+                        for r in self.attachments.list_by_session(user_id, session_id)
+                        if r.idem_key == row.idem_key
+                    ),
+                    None,
+                )
+            if existing is None:
+                raise
+            if existing.processing_state in ("FAILED", "REJECTED"):
+                from dataclasses import fields, replace
+
+                refreshed = replace(
+                    existing,
+                    **{
+                        f.name: getattr(row, f.name)
+                        for f in fields(row)
+                        if f.name not in ("id", "idem_key", "user_id", "session_id")
+                    },
+                )
+                self.attachments.update(refreshed)
+                return refreshed
+            return existing
+
     def _find_by_idem(
         self, user_id: str, session_id: str, idem_key: str
     ) -> AttachmentRow | None:
@@ -309,13 +384,17 @@ class AttachmentService:
         )
 
 
-@dataclass(slots=True, frozen=True)
-class AttachmentInsight:
-    """统一洞察结构（§6.2，v1.7 S1：insight_quality 不参与 role 判定）。"""
+class AttachmentInsight(BaseModel):
+    """统一洞察结构（§6.2；A14：Pydantic 严格校验）。
 
+    source_ref 必带 hash；insight_quality 限定 [0,1]；extracted 为结构化数据。
+    v1.7 S1：insight_quality 不参与 role 判定。
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
     source_ref: str
     extracted: object
-    insight_quality: float
+    insight_quality: float = Field(ge=0.0, le=1.0)
 
 
 def _content_hash(data: bytes) -> str:

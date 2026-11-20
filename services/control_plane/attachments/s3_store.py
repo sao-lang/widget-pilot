@@ -72,7 +72,9 @@ class S3ObjectStore:
         self, user_id: str, session_id: str, attachment_id: str, data: bytes
     ) -> ObjectRef:
         """写洞察到 att/*/insight.json，返回引用。"""
-        return self._put(f"att/{user_id}/{session_id}/{attachment_id}/insight.json", data)
+        return self._put(
+            f"att/{user_id}/{session_id}/{attachment_id}/insight.json", data
+        )
 
     def get_with_hash_verify(self, key: str, expected_hash: str) -> bytes:
         """按 key 读取并校验 sha256，篡改即抛（§6.4 读时校验）。"""
@@ -108,8 +110,12 @@ class S3ObjectStore:
         self._put(old_key.replace("insight.json", f"insight.v{version}.json"), data)
 
     def versions(self, attachment_id: str) -> list[str]:
-        """列出该附件历史洞察版本 key（验收断言用）。"""
-        return [k for k in self._list("att/") if "insight.v" in k]
+        """列出该附件历史洞察版本 key（N3：按 attachment_id 过滤，不跨附件）。"""
+        return [
+            k
+            for k in self._list("att/")
+            if "insight.v" in k and f"/{attachment_id}/" in k
+        ]
 
     def _put(self, key: str, data: bytes) -> ObjectRef:
         """PUT 对象 + 返回 hash 引用（SigV4 签名的真实 HTTP 写）。"""
@@ -150,7 +156,9 @@ class S3ObjectStore:
         date_stamp = now.strftime("%Y%m%d")
         payload_hash = hashlib.sha256(body).hexdigest()
         # path-style S3：URI 必须以 /{bucket} 开头（MinIO 本地端点必需）
-        canonical_uri = "/" + self._bucket + ("/" + quote(key, safe="/-_.~") if key else "")
+        canonical_uri = (
+            "/" + self._bucket + ("/" + quote(key, safe="/-_.~") if key else "")
+        )
         host = self._endpoint.removeprefix("http://").removeprefix("https://")
         headers = {
             "host": host,
