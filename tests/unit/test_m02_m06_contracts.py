@@ -3,7 +3,7 @@
 锁定 M06 payload 固化的三件事（此前未接）：
 - 义务2：error payload 的 { code, evidenceRef } 缺 evidenceRef 时被 schema 拒；
 - 义务3：notice payload 的 spec_missing/spec_conflict 结构合法形状可过、畸形被拒；
-- 义务1：/api/guardrails/hits 与 /api/skills 已入 openapi.yaml。
+- 义务1：/api/guardrails/hits 已入 openapi.yaml（/api/skills 随技能预取删除已移除）。
 
 用 jsonschema 校验 events.schema.json：既校验 $defs 结构层，也校验事件级
 discriminator（M3：kind=error/notice 的 string payload 兜底已移除，必填约束生效）。
@@ -144,6 +144,7 @@ class TestOpenapiEndpoints:
         """/api/guardrails/hits 已在 openapi.yaml。"""
         assert "/api/guardrails/hits:" in _OPENAPI
 
-    def test_skills_in_openapi(self) -> None:
-        """/api/skills 已在 openapi.yaml。"""
-        assert "/api/skills:" in _OPENAPI
+    def test_skills_removed_from_openapi(self) -> None:
+        """ADR-003：技能预取已删除，/api/skills 不再入 openapi 契约。"""
+        assert "/api/skills:" not in _OPENAPI
+        assert "SkillManifest:" not in _OPENAPI

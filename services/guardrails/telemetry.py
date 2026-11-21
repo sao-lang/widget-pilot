@@ -27,22 +27,6 @@ class IntentRouteLogRow:
 
 
 @dataclass(slots=True, frozen=True)
-class SkillPrefetchLogRow:
-    """一次技能预取留证（§6.1 SkillPrefetchLog，漏加载可归因）。"""
-
-    session_id: str
-    run_id: str
-    widget_type: str
-    grid: str
-    recipe_ids: tuple[str, ...]
-    hit: bool
-    reason: str | None
-    trace_id: str = ""
-    capability_kind: str | None = None
-    """能力族标记（ADR-003）；旧记录为 None，新技能预取记 'skill'。"""
-
-
-@dataclass(slots=True, frozen=True)
 class NeedSkillLogRow:
     """一次 need_skill 决策留证（§6.1 NeedSkillLog）。"""
 

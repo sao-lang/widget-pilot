@@ -13,13 +13,12 @@ from typing import cast
 import pytest
 
 from packages.agent_core.types import JsonObject
-from packages.contracts.enums import GridSpec, ReasonCode, WidgetType
+from packages.contracts.enums import GridSpec, ReasonCode
 from services.guardrails.grid_resolver import resolve_grid
 from services.guardrails.input_guard import check_input
 from services.guardrails.intent_cascade import classify_intent
 from services.guardrails.need_skill import check_need_skill
 from services.guardrails.semantic import validate_semantic
-from services.guardrails.skill_router import prefetch
 from services.guardrails.types import (
     AttachmentView,
     BudgetView,
@@ -39,7 +38,6 @@ from tests.support import (
     InMemoryGuardHitStore,
     IntentRouteLogStore,
     NeedSkillLogStore,
-    SkillPrefetchLogStore,
 )
 
 
@@ -57,7 +55,6 @@ def validate_chain(
     stores: dict[str, GuardrailStore] = {
         "hit_store": InMemoryGuardHitStore(),
         "route_log": IntentRouteLogStore(),
-        "prefetch_log": SkillPrefetchLogStore(),
         "need_skill_log": NeedSkillLogStore(),
         "audit_store": InMemoryAuditStore(),
     }
@@ -261,34 +258,6 @@ def test_a9_role_null() -> None:
     assert result.ok is False
 
 
-# ── A10/A11/A12 预取 ────────────────────────────────────────────────────────
-def test_a10_a11_prefetch() -> None:
-    """A10/A11：确定性预取，同输入同输出。"""
-    r1 = prefetch(WidgetType.CALENDAR, GridSpec._4X4)
-    r2 = prefetch(WidgetType.CALENDAR, GridSpec._4X4)
-    assert r1.hit and r1.recipe_ids == r2.recipe_ids
-
-
-def test_a12_prefetch_miss() -> None:
-    """A12：缺映射 → hit=False + reason + 写 SkillPrefetchLog（漏加载可归因）。"""
-    result = prefetch(WidgetType.CLOCK, GridSpec._2X1)
-    assert result.hit is False and result.reason
-    # 装配层预取未命中必写日志（判据：misses() 有 reason）
-    store = SkillPrefetchLogStore()
-    validate_chain(
-        "s",
-        "r",
-        "做一个能显示时间的时钟",
-        "2x1",
-        [],
-        "WIDGET_GENERATION",
-        100.0,
-        prefetch_log=store,
-    )
-    misses = store.misses()
-    assert len(misses) == 1 and misses[0].reason
-
-
 # ── A13 need_skill ──────────────────────────────────────────────────────────
 def test_a13_need_skill_limits() -> None:
     """A13：四项上限越界必拒。"""
@@ -355,7 +324,6 @@ def test_a16_regression_gate_fires_on_change() -> None:
         rule_count=base.rule_count,
         threshold=base.threshold + 0.1,  # 模拟阈值变更
         conflict_count=base.conflict_count,
-        prefetch_count=base.prefetch_count,
         need_skill_max=base.need_skill_max,
     )
     gate = RegressionGate()

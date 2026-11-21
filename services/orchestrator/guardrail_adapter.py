@@ -137,14 +137,9 @@ def build_validator(
     # A3（v1.8）：五处生产留证统一由 PG 注入，源码不再保留内存兜底。
     from services.guardrails.audit_pg import PgGuardrailAuditStore
     from services.guardrails.guard_hit_pg import PgGuardHitStore
-    from services.guardrails.pg_stores import (
-        PgIntentRouteLogStore,
-        PgNeedSkillLogStore,
-        PgSkillPrefetchLogStore,
-    )
+    from services.guardrails.pg_stores import PgIntentRouteLogStore, PgNeedSkillLogStore
 
     route_log = PgIntentRouteLogStore(dsn)
-    prefetch_log = PgSkillPrefetchLogStore(dsn)
     need_skill_log = PgNeedSkillLogStore(dsn)
     hit_store = PgGuardHitStore(dsn)
     audit_store = PgGuardrailAuditStore(dsn)
@@ -215,7 +210,6 @@ def build_validator(
                 classifier=classifier,
                 gateway=gateway,
                 route_log=route_log,
-                prefetch_log=prefetch_log,
                 need_skill_log=need_skill_log,
             )
         except (psycopg.Error, SQLAlchemyError):

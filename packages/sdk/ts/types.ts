@@ -209,23 +209,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/skills": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** 技能 manifest 只读查询（§4.1；只读静态预取映射，不触发生成） */
-        get: operations["listSkills"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/sessions/{session_id}/events": {
         parameters: {
             query?: never;
@@ -506,7 +489,7 @@ export interface components {
         /** @enum {string} */
         AttachmentRole: "visual_reference" | "content_extraction" | "data_source" | "style_reference";
         /**
-         * @description 控件类型（与 enums.WidgetType 同源，M06 /api/skills 过滤参数与 manifest 使用）
+         * @description 控件类型（与 enums.WidgetType 同源，M06 护栏留证使用）
          * @enum {string}
          */
         WidgetType: "calendar" | "clock" | "alarm" | "task" | "custom";
@@ -524,12 +507,6 @@ export interface components {
             /** @description 已脱敏的命中片段 */
             excerpt: string;
             trace_id: string;
-        };
-        /** @description 技能预取 manifest 条目（§4.1；只读静态映射，不触发生成） */
-        SkillManifest: {
-            widget_type: components["schemas"]["WidgetType"];
-            grid: components["schemas"]["GridSpec"];
-            recipe_ids: string[];
         };
         /** @description 完整结构见 packages/contracts/events.schema.json（单一事实来源） */
         AgentEvent: {
@@ -962,36 +939,6 @@ export interface operations {
                             false_positive_rate: number;
                             /** @description 下一页游标；无更多数据时为 null */
                             next_cursor: number | null;
-                        };
-                    };
-                };
-            };
-            422: components["responses"]["Unprocessable"];
-        };
-    };
-    listSkills: {
-        parameters: {
-            query?: {
-                /** @description 控件类型过滤（非法枚举由服务端返回 422） */
-                widget_type?: components["schemas"]["WidgetType"];
-                /** @description 规格过滤（非法枚举由服务端返回 422） */
-                grid?: components["schemas"]["GridSpec"];
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description OK——技能 manifest 条目（widget_type + grid + recipe_ids） */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ApiResponse"] & {
-                        data?: {
-                            items: components["schemas"]["SkillManifest"][];
                         };
                     };
                 };

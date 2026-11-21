@@ -1,6 +1,6 @@
 """M06 只追加日志 PG 持久化集成测试（M04 §9.0 接线义务 3）。
 
-三张 telemetry 表落 PG 后，新 Store 实例能从库里读回并复算统计——
+两张 telemetry 表（intent_route / need_skill）落 PG 后，新 Store 实例能从库里读回并复算统计——
 证明是落库而非内存。guard_hit 的 PG 留证单独在 test_m06_guard_hit_pg.py 覆盖（hash 链语义独立）。
 
 前置：docker compose --profile core up -d（PG:5432）；
@@ -16,22 +16,13 @@ import psycopg
 import pytest
 from psycopg.rows import DictRow, dict_row
 
-from services.guardrails.pg_stores import (
-    PgIntentRouteLogStore,
-    PgNeedSkillLogStore,
-    PgSkillPrefetchLogStore,
-)
-from services.guardrails.telemetry import (
-    IntentRouteLogRow,
-    NeedSkillLogRow,
-    SkillPrefetchLogRow,
-)
+from services.guardrails.pg_stores import PgIntentRouteLogStore, PgNeedSkillLogStore
+from services.guardrails.telemetry import IntentRouteLogRow, NeedSkillLogRow
 from services.guardrails.types import HitDecision, RouteLayer
 
 PG_DSN: Final[str] = "postgresql://widgetpilot:widgetpilot_dev@127.0.0.1:5432/widgetpilot"
 
 _TABLE_INTENT_ROUTE: Final[str] = "intent_route_log"
-_TABLE_SKILL_PREFETCH: Final[str] = "skill_prefetch_log"
 _TABLE_NEED_SKILL: Final[str] = "need_skill_log"
 
 # 建表 DDL 与迁移 0005_m06_telemetry 对齐；IF NOT EXISTS 保证幂等兜底（不跑 alembic）。
@@ -53,22 +44,6 @@ _SCHEMA: Final[tuple[str, ...]] = (
     """,
     f"CREATE INDEX IF NOT EXISTS ix_intent_route_log_session_id ON {_TABLE_INTENT_ROUTE} (session_id)",
     f"CREATE INDEX IF NOT EXISTS ix_intent_route_log_created_at ON {_TABLE_INTENT_ROUTE} (created_at)",
-    f"""
-    CREATE TABLE IF NOT EXISTS {_TABLE_SKILL_PREFETCH} (
-        id BIGSERIAL PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        run_id TEXT NOT NULL,
-        widget_type TEXT NOT NULL,
-        grid TEXT NOT NULL,
-        recipe_ids TEXT NOT NULL,
-        hit BOOLEAN NOT NULL,
-        reason TEXT,
-        trace_id TEXT NOT NULL DEFAULT '',
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    )
-    """,
-    f"CREATE INDEX IF NOT EXISTS ix_skill_prefetch_log_session_id ON {_TABLE_SKILL_PREFETCH} (session_id)",
-    f"CREATE INDEX IF NOT EXISTS ix_skill_prefetch_log_created_at ON {_TABLE_SKILL_PREFETCH} (created_at)",
     f"""
     CREATE TABLE IF NOT EXISTS {_TABLE_NEED_SKILL} (
         id BIGSERIAL PRIMARY KEY,
@@ -121,7 +96,7 @@ def clean_tables() -> None:
     with psycopg.connect(PG_DSN) as conn:
         with conn.cursor() as cur:
             cur.execute(
-                f"TRUNCATE TABLE {_TABLE_INTENT_ROUTE}, {_TABLE_SKILL_PREFETCH}, {_TABLE_NEED_SKILL}"
+                f"TRUNCATE TABLE {_TABLE_INTENT_ROUTE}, {_TABLE_NEED_SKILL}"
             )
         conn.commit()
 
@@ -171,31 +146,6 @@ class TestPgIntentRouteLogStore:
         """空表 statistics 全零，与内存实现契约一致。"""
         stats = PgIntentRouteLogStore(PG_DSN).stats()
         assert stats == {"L1": 0.0, "L2": 0.0, "L3": 0.0, "L4": 0.0, "escalation_rate": 0.0}
-
-
-class TestPgSkillPrefetchLogStore:
-    """SkillPrefetchLog 落 PG：misses 归因 + tuple 往返 + 跨实例。"""
-
-    def test_misses_and_cross_instance_readback(self) -> None:
-        """两条未命中带 reason、一条命中：misses 只回两条且 recipe_ids 元组无损。"""
-        store = PgSkillPrefetchLogStore(PG_DSN)
-        samples: tuple[SkillPrefetchLogRow, ...] = (
-            SkillPrefetchLogRow("s1", "r1", "CALENDAR", "4x4", ("r_a", "r_b"), False, "无匹配", "t1"),
-            SkillPrefetchLogRow("s1", "r2", "CLOCK", "3x3", (), False, "空集", "t2"),
-            SkillPrefetchLogRow("s1", "r3", "TASK", "4x4", ("r_c",), True, None, "t3"),
-        )
-        for row in samples:
-            store.append(row)
-
-        misses = store.misses()
-        assert len(misses) == 2
-        assert {m.reason for m in misses} == {"无匹配", "空集"}
-        assert misses[0].recipe_ids == ("r_a", "r_b")
-        assert misses[1].recipe_ids == ()
-
-        rebuilt = PgSkillPrefetchLogStore(PG_DSN)
-        assert rebuilt.misses() == misses
-        assert _db_count(_TABLE_SKILL_PREFETCH) == len(samples)
 
 
 class TestPgNeedSkillLogStore:

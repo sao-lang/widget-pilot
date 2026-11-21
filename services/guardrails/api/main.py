@@ -2,7 +2,6 @@
 
 M06 落地 REST 端点（§4.1）：
 - GET /api/guardrails/hits   —— guard_hit 命中列表 + FPR（【推导·需评审】）
-- GET /api/skills            —— 技能 manifest 只读查询（【推导·需评审】/可选）
 
 健康探针 /healthz /readyz 沿用 M01。存储只有生产 PgGuardHitStore（读 DATABASE_URL）；
 测试内存替身位于 tests/support/guardrails.py，源码不保留默认桩。
@@ -15,13 +14,11 @@ from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query
 
-from packages.contracts.enums import GridSpec, WidgetType
 from packages.contracts.types import ApiEnvelope, JsonValue
 from services._health import create_health_app
 from services.guardrails.guard_hit import GuardHitRow, GuardHitStore
 from services.guardrails.guard_hit_pg import PgGuardHitStore
 from services.guardrails.rule_registry import _mask
-from services.guardrails.skill_router import _PREFETCH_MAP
 from services.guardrails.types import GuardHitType
 
 
@@ -97,31 +94,6 @@ def create_app(
                 "next_cursor": next_cursor,
             }
         )
-
-    @app.get("/api/skills")
-    async def list_skills(
-        widget_type: str | None = Query(default=None),
-        grid: str | None = Query(default=None),
-    ) -> dict:
-        """技能 manifest 只读查询（§4.1）；只读静态预取映射，不触发生成。"""
-        if widget_type is not None and widget_type not in {w.value for w in WidgetType}:
-            raise HTTPException(status_code=422, detail="illegal widget_type")
-        if grid is not None and grid not in {g.value for g in GridSpec}:
-            raise HTTPException(status_code=422, detail="illegal grid")
-        items = []
-        for (wt, gs), recipe_ids in _PREFETCH_MAP.items():
-            if widget_type is not None and wt.value != widget_type:
-                continue
-            if grid is not None and gs.value != grid:
-                continue
-            items.append(
-                {
-                    "widget_type": wt.value,
-                    "grid": gs.value,
-                    "recipe_ids": list(recipe_ids),
-                }
-            )
-        return _ok({"items": items})
 
     return app
 

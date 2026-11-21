@@ -179,7 +179,7 @@ def test_pg_stores_injected_and_written() -> None:
 
     # 清空三表（测试隔离）
     with psycopg.connect(PG_DSN) as conn:
-        conn.execute("TRUNCATE TABLE intent_route_log, skill_prefetch_log, need_skill_log")
+        conn.execute("TRUNCATE TABLE intent_route_log, need_skill_log")
         conn.commit()
 
     validator = build_validator(

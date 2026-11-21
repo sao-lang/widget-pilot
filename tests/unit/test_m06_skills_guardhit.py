@@ -1,12 +1,10 @@
-"""M06 A10/A11/A12/A13/A14/A15：技能预取、need_skill 上限、留证与 FPR。"""
+"""M06 A13/A14/A15：need_skill 上限、留证与 FPR（A10-A12 技能预取已删除）。"""
 
 from __future__ import annotations
 
 import pytest
 
-from packages.contracts.enums import GridSpec, WidgetType
 from services.guardrails.need_skill import check_need_skill, parse_need_skill
-from services.guardrails.skill_router import prefetch
 from services.guardrails.types import (
     GuardHitType,
     InputGuardHit,
@@ -19,27 +17,6 @@ from tests.support import (
     log_hit,
     verify_chain,
 )
-
-
-def test_a10_prefetch_known_mapping() -> None:
-    """A10：calendar+4x4 确定性预取 recipe_ids。"""
-    res = prefetch(WidgetType.CALENDAR, GridSpec._4X4)
-    assert res.hit is True
-    assert res.recipe_ids == ("recipe.calendar.month.v3", "recipe.grid.4x4.v2")
-
-
-def test_a11_prefetch_is_pure() -> None:
-    """A11：预取是纯函数，同输入同输出。"""
-    assert prefetch(WidgetType.CALENDAR, GridSpec._4X4) == prefetch(
-        WidgetType.CALENDAR, GridSpec._4X4
-    )
-
-
-def test_a12_prefetch_miss_attributable() -> None:
-    """A12：映射缺失 → hit=False 且 reason 非空（漏加载可归因）。"""
-    res = prefetch(WidgetType.CLOCK, GridSpec._2X1)
-    assert res.hit is False
-    assert res.reason
 
 
 def test_parse_need_skill() -> None:

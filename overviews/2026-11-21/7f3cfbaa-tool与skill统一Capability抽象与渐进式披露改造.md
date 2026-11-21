@@ -2,9 +2,9 @@
 
 ## L0 索引卡（续接时先读这一段，≤12 行）
 - 场景 / 路径：链【12 提交 → 11/3 写方案+同步文档 → 9 拷问设计 → 5/6 写代码】/ 混合（提交·文档·只读·改码）
-- 当前闸门：①-⑤ 全完成 + 补做两项未完成项完成；S4 全绿（pytest 393+ passed / pyright 0 / ruff 全绿 / contracts drift=[]；Docker 未起时 50 skipped 属环境守卫）；补做独立复审 Blocker 1（handler 异常击穿）已修+Should 2 已修
-- 交付产物：ADR-003、代码阅读指南、同步后的设计+M03/M06/M07/M10/00 文档、Capability 实现、迁移 0008、15 组测试
-- 未完成项：① Docker 执行无沙箱隔离（Q5 明示暂缺，登记债）② 视觉模型真实端点待环境（Q6，mock 测试）；原第 3/4 项（日志写入、S3 reader）已补齐
+- 当前闸门：①-⑤ 全完成 + 补做两项 + 技能预取整套删除完成；S4 全绿（pytest 387 passed / pyright 0 / ruff 全绿 / contracts drift=[]；Docker 未起 49 skipped 属环境守卫）；删除独立复审 Blocker 清零、Should 1 已修
+- 交付产物：ADR-003、代码阅读指南、同步后的设计+M02/M03/M04/M06/M07/M10/00 文档、Capability 实现、迁移 0008/0009、15 组测试
+- 未完成项：① Docker 执行无沙箱隔离（Q5 明示暂缺，登记债）② 视觉模型真实端点待环境（Q6，mock 测试）；原第 3/4 项已补齐，技能预取已整套删除（不留兼容层）
 - 下一步：最终门禁确认 → 提交并 push → 更新工作记忆
 - 用户执行顺序硬约束：先提交 → 再写方案文档 → 改其他文档 → 拷问设计 → 最后写代码（已遵守）
 
@@ -103,3 +103,13 @@
   - [Blocker] `capabilities.py:76` + `invoke.py:69` — S3 reader 的 ValueError/KeyError/OSError 非 CoreError，穿透 load() 与 run() 的 catch。已修：`invoke.py` handler 调用外包 try/except 转 CoreError（业务/infra 分类），补 `test_load_handler_valueerror_becomes_coreerror` / `test_load_handler_oserror_becomes_infra` / `test_handler_valueerror_self_corrects_without_crash`。
   - [Should] `run.py:_record_capability_audit` 无异常隔离 — 已修 try/except（丢证据不打挂业务）。
   - [Should] `capability_audit_adapter.py` CONTRACT_MISMATCH 记 None（低报通过）— 已修 `is_reject = decision != "LOADED"`。
+
+### 1715 续：技能预取整套删除（用户决策：不留兼容层、不打补丁）
+
+- 用户问"现在还有技能预取吗"→ 核实发现 prefetch() 产物 `ValidationResult.recipe_ids` 全仓零消费者，L0 目录实际来自 registry.level0()，预取是每次请求的空转死代码；用户拍板 A 方案彻底删除 + 纯按需（不需要推荐能力）。
+- 删除清单：`skill_router.py`（_PREFETCH_MAP/prefetch/PrefetchResult）、`SkillPrefetchLogRow`/`PgSkillPrefetchLogStore`/port/内存替身、`validate_chain` 的 prefetch 调用+参数+日志+事件字段+recipe_ids 赋值、`/api/skills` 端点、`SkillManifest` openapi schema、`ConfigSnapshot.prefetch_count`；迁移 0009 drop `skill_prefetch_log`（downgrade 补回 0008 的 capability_kind 列 + 0005 索引）。
+- 保留：`effective_grid`/`widget`（routing 事件与 ValidationResult 仍用）、skill 事件（只留 need_skill 归因）、need_skill 完整校验链。
+- 契约：openapi.yaml 删路径/schema → `pnpm gen:all` 重生成 SDK → contracts:check drift=[]。
+- 文档：ADR-003 §13.1 记录决策、FR-7/§8.2/X6/§11.5 更新；M06 代码地图校准（删 skill_router 行、prefetch 主线、行数 2178/460/19 文件）；M06/M07/M04/M02 模块文档加 ADR-003 覆盖声明；M10 的 ConfigSnapshot 四字段口径；设计方案.md 用户旅程。
+- 独立复审（全新上下文）：Blocker 清零可合入；Should（0009 downgrade 缺 capability_kind/索引）已修；Nit（M10/M02 文档残留）已修。
+- 终验：pytest 387 passed / 49 skipped（Docker 未起）/ pyright 0 / ruff 全绿 / contracts drift=[]。

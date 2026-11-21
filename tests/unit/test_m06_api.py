@@ -1,4 +1,4 @@
-"""M06 REST 端点测试（§4.1）：guardrails API 的 hits / skills 只读查询。"""
+"""M06 REST 端点测试（§4.1）：guardrails API 的 hits 只读查询（skills 已删除，纯按需加载）。"""
 
 from __future__ import annotations
 
@@ -56,35 +56,27 @@ def test_guardrails_hits_filter_and_pagination() -> None:
     assert resp2.json()["data"]["items"] == []
 
 
-def test_skills_endpoint() -> None:
-    """§4.1：GET /api/skills 返回静态 manifest，可按 widget_type/grid 过滤。"""
+def test_skills_endpoint_removed() -> None:
+    """ADR-003：技能预取已删除，/api/skills 不再存在（404），不留兼容端点。"""
     client = TestClient(create_app(hit_store=InMemoryGuardHitStore()))
-    resp = client.get("/api/skills")
-    assert resp.status_code == 200
-    items = resp.json()["data"]["items"]
-    assert items  # 非空映射
-    filtered = client.get("/api/skills?widget_type=calendar").json()["data"]["items"]
-    assert all(item["widget_type"] == "calendar" for item in filtered)
+    assert client.get("/api/skills").status_code == 404
 
 
-def test_endpoints_return_unified_api_response_envelope() -> None:
-    """M4（v1.8）：两只读端点响应含 ApiResponse 统一信封五字段。"""
+def test_endpoint_returns_unified_api_response_envelope() -> None:
+    """M4（v1.8）：hits 端点响应含 ApiResponse 统一信封五字段。"""
     client = TestClient(create_app(hit_store=_store_with_hits(1)))
-    for path in ("/api/guardrails/hits", "/api/skills"):
-        body = client.get(path).json()
-        assert body["code"] == "OK"
-        assert body["message"] == "OK"
-        assert body["traceId"]  # 非空 traceId
-        assert body["retryable"] is False
-        assert "data" in body
+    body = client.get("/api/guardrails/hits").json()
+    assert body["code"] == "OK"
+    assert body["message"] == "OK"
+    assert body["traceId"]  # 非空 traceId
+    assert body["retryable"] is False
+    assert "data" in body
     # m1（v1.8）：GuardHit.id 契约是 string，运行时 int 须转 str
-    hits = client.get("/api/guardrails/hits").json()["data"]["items"]
+    hits = body["data"]["items"]
     assert hits and all(isinstance(h["id"], str) for h in hits)
 
 
-def test_illegal_enum_filters_return_422() -> None:
+def test_illegal_enum_filter_returns_422() -> None:
     """N3：非法枚举过滤参数返回 422，不静默空列表。"""
     client = TestClient(create_app(hit_store=InMemoryGuardHitStore()))
     assert client.get("/api/guardrails/hits?hit_type=bogus").status_code == 422
-    assert client.get("/api/skills?widget_type=bogus").status_code == 422
-    assert client.get("/api/skills?grid=bogus").status_code == 422

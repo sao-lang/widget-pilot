@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from services.guardrails import pg_stores
-from services.guardrails.telemetry import NeedSkillLogRow, SkillPrefetchLogRow
+from services.guardrails.telemetry import NeedSkillLogRow
 from services.guardrails.types import HitDecision
 
 
@@ -50,21 +50,3 @@ def test_need_skill_insert_includes_new_columns(monkeypatch):
     assert sql.count("%s") == len(params) == 11
     assert params[-2] == "recipe.calendar.month.v3"
     assert params[-1] == 2
-
-
-def test_skill_prefetch_insert_includes_new_column(monkeypatch):
-    """skill_prefetch_log INSERT 含 capability_kind 且参数对齐（9 列/9 值）。"""
-    calls: list[tuple[str, tuple[object, ...]]] = []
-    _capture(monkeypatch, calls)
-    store = pg_stores.PgSkillPrefetchLogStore("postgresql://x")
-    store.append(
-        SkillPrefetchLogRow(
-            "s", "r", "CALENDAR", "4x4", ("recipe.calendar.month.v3",), True, None, "t1",
-            capability_kind="skill",
-        )
-    )
-    assert len(calls) == 1
-    sql, params = calls[0]
-    assert "capability_kind" in sql
-    assert sql.count("%s") == len(params) == 9
-    assert params[-1] == "skill"

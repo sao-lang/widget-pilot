@@ -28,16 +28,10 @@ from services.guardrails.ports import (
     IntentGateway,
     IntentRouteLogStorePort,
     NeedSkillLogStorePort,
-    SkillPrefetchLogStorePort,
 )
 from services.guardrails.semantic import validate_semantic
 from services.guardrails.semantic_router import INTENT_SAMPLES_VERSION
-from services.guardrails.skill_router import prefetch
-from services.guardrails.telemetry import (
-    IntentRouteLogRow,
-    NeedSkillLogRow,
-    SkillPrefetchLogRow,
-)
+from services.guardrails.telemetry import IntentRouteLogRow, NeedSkillLogRow
 from services.guardrails.types import (
     AttachmentView,
     BudgetView,
@@ -134,7 +128,6 @@ def validate_chain(
     budget_left: float,
     hit_store: GuardHitStore,
     route_log: IntentRouteLogStorePort,
-    prefetch_log: SkillPrefetchLogStorePort,
     need_skill_log: NeedSkillLogStorePort,
     audit_store: AuditStorePort,
     preferred_grids: list[str] | None = None,
@@ -164,7 +157,7 @@ def validate_chain(
         extracted_texts: 附件/检索提取文本（不可信数据扫描）。
         event_sink: 事件 payload 接收回调。
         hit_store: 命中留证存储（生产为 PgGuardHitStore）。
-        route_log / prefetch_log / need_skill_log: 三张日志表存储（生产为 PG）。
+        route_log / need_skill_log: 日志表存储（生产为 PG）。
         audit_store: 输入快照审计存储（生产为 PG 适配器）。
         embedder / classifier: L2/L3 可注入端口（测试计数 / 真实模型）。
         gateway: L4 主 LLM 端口（M07 注入；默认结构化兜底）。
@@ -173,7 +166,6 @@ def validate_chain(
         need_skill_raw: 模型侧 need_skill 结构化请求（可选）。
         allowlist: need_skill recipe 白名单。
         turn_state: 单轮 need_skill 计数状态。
-        route_log / prefetch_log / need_skill_log: 只追加日志存储。
         audit_store: 输入快照审计存储（生产为 PG 适配器，无内存默认）。
         token_cost: 本次 need_skill 预计 token。
 
@@ -183,7 +175,6 @@ def validate_chain(
     trace_id = f"{session_id}:{run_id}"
     store = hit_store
     rlog = route_log
-    plog = prefetch_log
     nlog = need_skill_log
     audit = audit_store
 
@@ -359,26 +350,11 @@ def validate_chain(
     if decision.intent is IntentCategory.OUT_OF_SCOPE:
         return _terminal(ReasonCode.INTENT_OUT_OF_SCOPE, trace_id, event_sink, ref)
 
-    # step13-14：skill 确定性预取 + 归因日志
-    # ADR-003 / FR-7：此处产出的 recipe_ids 仅为 L0 默认建议/白名单来源，
-    # 不再强制预取正文；正文加载权交模型经 LOAD_CAPABILITY 决定。
+    # ADR-003：技能预取已删除（纯按需加载）。规程 id 由 registry.level0() 全量列给模型，
+    # 经 LOAD_CAPABILITY 自主选择，不再随 ValidationResult 下发 recipe_ids。
     effective_grid = semantic.grid or parsed_grid
     assert effective_grid is not None  # 语义层通过时 grid 必已确定
     widget = _infer_widget(description, effective_grid)
-    pref = prefetch(widget, effective_grid)
-    plog.append(
-        SkillPrefetchLogRow(
-            session_id,
-            run_id,
-            widget.value,
-            effective_grid.value,
-            pref.recipe_ids,
-            pref.hit,
-            pref.reason,
-            trace_id,
-            capability_kind="skill",  # ADR-003：技能预取统一记能力族
-        )
-    )
     # step15 前置解析：need_skill 结构化请求若存在，先解析以便 skill 事件带归因（§4.2）。
     # need_skill_raw 来自模型侧、属不可信输入：畸形 JSON 必须返回 INPUT_INVALID 拒绝结论，
     # 不能让异常击穿「同步门禁永远返回 ValidationResult」的契约（review S1）。
@@ -392,9 +368,6 @@ def validate_chain(
         event_sink,
         "skill",
         {
-            "recipe_ids": list(pref.recipe_ids),
-            "prefetch_hit": pref.hit,
-            "reason": pref.reason,
             "need_skill": (
                 {"recipe_id": req.recipe_id, "depth": req.depth}
                 if req is not None
@@ -462,7 +435,6 @@ def validate_chain(
         widget_type=widget,
         grid=effective_grid,
         grid_source=semantic.grid_source,
-        recipe_ids=pref.recipe_ids,
         model_tier=effective_tier,
         intent_normalized=decision.intent,
         attachment_refs=tuple(a.attachment_id for a in attachments),

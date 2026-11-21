@@ -14,7 +14,6 @@ from tests.support import (
     InMemoryGuardHitStore,
     IntentRouteLogStore,
     NeedSkillLogStore,
-    SkillPrefetchLogStore,
 )
 
 
@@ -32,7 +31,6 @@ def validate_chain(
     stores: dict[str, GuardrailStore] = {
         "hit_store": InMemoryGuardHitStore(),
         "route_log": IntentRouteLogStore(),
-        "prefetch_log": SkillPrefetchLogStore(),
         "need_skill_log": NeedSkillLogStore(),
         "audit_store": InMemoryAuditStore(),
     }

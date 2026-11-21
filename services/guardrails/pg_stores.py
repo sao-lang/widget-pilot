@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from collections import Counter
 from typing import Any, Final, cast
@@ -19,16 +18,11 @@ from psycopg.rows import DictRow, dict_row
 
 logger = logging.getLogger(__name__)
 
-from services.guardrails.telemetry import (
-    IntentRouteLogRow,
-    NeedSkillLogRow,
-    SkillPrefetchLogRow,
-)
+from services.guardrails.telemetry import IntentRouteLogRow, NeedSkillLogRow
 from services.guardrails.types import HitDecision, RouteLayer
 
 # 表名集中一处（禁魔法字符串）：与迁移 0005_m06_telemetry 的表名逐字对齐。
 _TABLE_INTENT_ROUTE: Final[str] = "intent_route_log"
-_TABLE_SKILL_PREFETCH: Final[str] = "skill_prefetch_log"
 _TABLE_NEED_SKILL: Final[str] = "need_skill_log"
 
 # 统计口径键名（结构性字面量，与内存实现的返回契约一致）。
@@ -125,76 +119,6 @@ class PgIntentRouteLogStore:
             counts[RouteLayer.L3] + counts[RouteLayer.L4]
         ) / total
         return result
-
-
-class PgSkillPrefetchLogStore:
-    """SkillPrefetchLog 的 PG 只追加存储：misses() 从库内记录复算漏加载归因。"""
-
-    def __init__(self, dsn: str) -> None:
-        """注入 PG DSN。
-
-        Args:
-            dsn: PostgreSQL 连接串。
-        """
-        self._dsn: str = _sync_dsn(dsn)
-
-    def append(self, row: SkillPrefetchLogRow) -> None:
-        """追加一条预取记录到 skill_prefetch_log（recipe_ids 以 JSON 文本往返）。
-
-        Args:
-            row: 预取留证 Row。
-        """
-        sql = (
-            f"INSERT INTO {_TABLE_SKILL_PREFETCH} "
-            "(session_id, run_id, widget_type, grid, recipe_ids, hit, reason, trace_id, capability_kind) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
-        )
-        # M2（v1.8）：留证失败隔离（同 intent_route_log，PG 抖动不击穿校验链）。
-        try:
-            with psycopg.connect(self._dsn) as conn:
-                conn.execute(
-                    sql,
-                    (
-                        row.session_id,
-                        row.run_id,
-                        row.widget_type,
-                        row.grid,
-                        json.dumps(list(row.recipe_ids)),
-                        row.hit,
-                        row.reason,
-                        row.trace_id,
-                        row.capability_kind,
-                    ),
-                )
-        except psycopg.Error as exc:
-            logger.warning("skill_prefetch_log append failed (evidence dropped): %s", exc)
-
-    def misses(self) -> tuple[SkillPrefetchLogRow, ...]:
-        """返回库内所有未命中记录（每条 reason 非空，供漏加载归因）。"""
-        with _connect_dict(self._dsn) as conn:
-            rows = conn.execute(
-                f"SELECT session_id, run_id, widget_type, grid, recipe_ids, "
-                f"reason, trace_id, capability_kind FROM {_TABLE_SKILL_PREFETCH} "
-                "WHERE hit = FALSE ORDER BY id"
-            ).fetchall()
-        return tuple(
-            SkillPrefetchLogRow(
-                session_id=str(row["session_id"]),
-                run_id=str(row["run_id"]),
-                widget_type=str(row["widget_type"]),
-                grid=str(row["grid"]),
-                recipe_ids=tuple(json.loads(str(row["recipe_ids"]))),
-                hit=False,
-                reason=(str(row["reason"]) if row["reason"] is not None else None),
-                trace_id=str(row["trace_id"]),
-                capability_kind=(
-                    str(row["capability_kind"])
-                    if row.get("capability_kind") is not None
-                    else None
-                ),
-            )
-            for row in rows
-        )
 
 
 class PgNeedSkillLogStore:

@@ -10,11 +10,7 @@ import psycopg
 import pytest
 
 from services.guardrails import pg_stores
-from services.guardrails.telemetry import (
-    IntentRouteLogRow,
-    NeedSkillLogRow,
-    SkillPrefetchLogRow,
-)
+from services.guardrails.telemetry import IntentRouteLogRow, NeedSkillLogRow
 from services.guardrails.types import HitDecision, RouteLayer
 
 
@@ -44,13 +40,6 @@ class TestAppendFailureIsolated:
                 "s", "r", RouteLayer.L1, "intent", 0.9, 1, "v1", "t", None
             )
         )  # 不抛即通过
-
-    def test_skill_prefetch_append_isolated(self, broken_pg: None) -> None:
-        """SkillPrefetchLogStore.append 吞 psycopg.Error。"""
-        store = pg_stores.PgSkillPrefetchLogStore("postgresql://x")
-        store.append(
-            SkillPrefetchLogRow("s", "r", "calendar", "4x4", ("r1",), True, None, "t")
-        )
 
     def test_need_skill_append_isolated(self, broken_pg: None) -> None:
         """NeedSkillLogStore.append 吞 psycopg.Error。"""

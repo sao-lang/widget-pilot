@@ -17,11 +17,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Protocol, runtime_checkable
 
-from services.guardrails.telemetry import (
-    IntentRouteLogRow,
-    NeedSkillLogRow,
-    SkillPrefetchLogRow,
-)
+from services.guardrails.telemetry import IntentRouteLogRow, NeedSkillLogRow
 from services.guardrails.types import Embedding, LowTierResult
 
 
@@ -76,15 +72,6 @@ class IntentRouteLogStorePort(Protocol):
     def append(self, row: IntentRouteLogRow) -> None: ...
 
     def stats(self) -> dict[str, float]: ...
-
-
-@runtime_checkable
-class SkillPrefetchLogStorePort(Protocol):
-    """技能预取日志写入口：内存实现与 PG 实现共同满足（A3 接线）。"""
-
-    def append(self, row: SkillPrefetchLogRow) -> None: ...
-
-    def misses(self) -> tuple[SkillPrefetchLogRow, ...]: ...
 
 
 @runtime_checkable

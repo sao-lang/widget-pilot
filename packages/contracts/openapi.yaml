@@ -253,7 +253,7 @@ paths:
                           insight_quality: { type: number, minimum: 0, maximum: 1, description: 处理结果质量，不参与 role 明确性判定（v1.7 S1） }
         "400": { $ref: "#/components/responses/BadRequest" }
 
-  # ---------- guardrails / skills（M06 只读查询，契约固化 M02 §9.0 义务1）----------
+  # ---------- guardrails（M06 只读查询，契约固化 M02 §9.0 义务1）----------
   /api/guardrails/hits:
     get:
       tags: [guardrails]
@@ -303,39 +303,6 @@ paths:
                             nullable: true
                             description: 下一页游标；无更多数据时为 null
         "422": { $ref: "#/components/responses/Unprocessable" }
-  /api/skills:
-    get:
-      tags: [guardrails]
-      summary: 技能 manifest 只读查询（§4.1；只读静态预取映射，不触发生成）
-      operationId: listSkills
-      parameters:
-        - name: widget_type
-          in: query
-          description: 控件类型过滤（非法枚举由服务端返回 422）
-          schema: { $ref: "#/components/schemas/WidgetType" }
-        - name: grid
-          in: query
-          description: 规格过滤（非法枚举由服务端返回 422）
-          schema: { $ref: "#/components/schemas/GridSpec" }
-      responses:
-        "200":
-          description: OK——技能 manifest 条目（widget_type + grid + recipe_ids）
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: "#/components/schemas/ApiResponse"
-                  - type: object
-                    properties:
-                      data:
-                        type: object
-                        required: [items]
-                        properties:
-                          items:
-                            type: array
-                            items: { $ref: "#/components/schemas/SkillManifest" }
-        "422": { $ref: "#/components/responses/Unprocessable" }
-
   # ---------- events（M04 / M15，SSE 长连接）----------
   /api/sessions/{session_id}/events:
     get:
@@ -722,7 +689,7 @@ components:
       enum: [visual_reference, content_extraction, data_source, style_reference]
     WidgetType:
       type: string
-      description: 控件类型（与 enums.WidgetType 同源，M06 /api/skills 过滤参数与 manifest 使用）
+      description: 控件类型（与 enums.WidgetType 同源，M06 护栏留证使用）
       enum: [calendar, clock, alarm, task, custom]
     GuardHitType:
       type: string
@@ -739,16 +706,6 @@ components:
         judgement: { type: string }
         excerpt: { type: string, description: 已脱敏的命中片段 }
         trace_id: { type: string }
-    SkillManifest:
-      type: object
-      description: 技能预取 manifest 条目（§4.1；只读静态映射，不触发生成）
-      required: [widget_type, grid, recipe_ids]
-      properties:
-        widget_type: { $ref: "#/components/schemas/WidgetType" }
-        grid: { $ref: "#/components/schemas/GridSpec" }
-        recipe_ids:
-          type: array
-          items: { type: string }
     AgentEvent:
       type: object
       description: 完整结构见 packages/contracts/events.schema.json（单一事实来源）

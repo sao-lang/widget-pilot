@@ -206,15 +206,6 @@ class IntentDecision:
 
 
 @dataclass(slots=True, frozen=True)
-class PrefetchResult:
-    """技能预取结果（§4.3 PrefetchResult）。"""
-
-    recipe_ids: tuple[str, ...]
-    hit: bool
-    reason: str | None = None
-
-
-@dataclass(slots=True, frozen=True)
 class NeedSkillRequest:
     """need_skill 结构化请求（§6.2，depth 恒 1）。"""
 
@@ -275,7 +266,6 @@ class ValidationResult:
     widget_type: WidgetType | None = None
     grid: GridSpec | None = None
     grid_source: GridSource | None = None
-    recipe_ids: tuple[str, ...] = ()
     model_tier: ModelTier | None = None
     intent_normalized: IntentCategory | None = None
     attachment_refs: tuple[str, ...] = ()

@@ -17,11 +17,7 @@ from packages.contracts.types import TaskFields
 from services.guardrails.audit import AuditEvent
 from services.guardrails.change_gate import ConfigSnapshot, diff_config
 from services.guardrails.guard_hit import GuardHitRow
-from services.guardrails.telemetry import (
-    IntentRouteLogRow,
-    NeedSkillLogRow,
-    SkillPrefetchLogRow,
-)
+from services.guardrails.telemetry import IntentRouteLogRow, NeedSkillLogRow
 from services.guardrails.types import (
     GuardHitType,
     HitDecision,
@@ -45,8 +41,6 @@ __all__ = [
     "NeedSkillLogStore",
     "RegressionGate",
     "RouteLayer",
-    "SkillPrefetchLogRow",
-    "SkillPrefetchLogStore",
     "false_positive_rate",
     "log_hit",
     "pass_through_validator",
@@ -58,7 +52,6 @@ type GuardrailStore = (
     InMemoryAuditStore
     | InMemoryGuardHitStore
     | IntentRouteLogStore
-    | SkillPrefetchLogStore
     | NeedSkillLogStore
 )
 
@@ -223,25 +216,6 @@ class IntentRouteLogStore:
             counts[RouteLayer.L3] + counts[RouteLayer.L4]
         ) / total
         return result
-
-
-@dataclass(slots=True)
-class SkillPrefetchLogStore:
-    """SkillPrefetchLog 只追加存储。
-
-    Attributes:
-        rows: 预取记录，按追加顺序排列。
-    """
-
-    rows: list[SkillPrefetchLogRow] = field(default_factory=list)
-
-    def append(self, row: SkillPrefetchLogRow) -> None:
-        """追加一条预取记录。"""
-        self.rows.append(row)
-
-    def misses(self) -> tuple[SkillPrefetchLogRow, ...]:
-        """返回所有未命中记录（每条 reason 非空，供漏加载归因）。"""
-        return tuple(row for row in self.rows if not row.hit)
 
 
 @dataclass(slots=True)
