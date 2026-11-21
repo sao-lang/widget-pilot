@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from services.guardrails.constants import EXCERPT_MAX_CHARS
 from services.guardrails.patterns import injection, intent, pii
 from services.guardrails.types import GuardHitType, InputGuardHit, PatternRule
+from services.guardrails.validators import has_truth_validator, is_valid_pii
 
 
 @dataclass(slots=True)
@@ -64,8 +65,13 @@ def scan(text: str, registry: RuleRegistry) -> tuple[InputGuardHit, ...]:
     for rule in registry.rules:
         if not rule.enabled:
             continue
-        match = re.search(rule.regex, text, flags=re.IGNORECASE)
-        if match:
+        # 同一规则可能多次命中：首个形状匹配真值校验失败，不代表后续匹配也失败。
+        # 全部匹配都无效才跳过该规则，避免"无效号在前、有效号在后"漏报。
+        for match in re.finditer(rule.regex, text, flags=re.IGNORECASE):
+            if has_truth_validator(rule.rule_id) and not is_valid_pii(
+                rule.rule_id, match.group(0)
+            ):
+                continue
             return (
                 InputGuardHit(
                     hit_type=rule.hit_type,

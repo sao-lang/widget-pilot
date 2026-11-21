@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from services.guardrails.constants import INTENT_GUARD_PATTERNS
 from services.guardrails.types import GuardHitType, PatternRule
 
 RULES: tuple[PatternRule, ...] = (
     PatternRule(
         rule_id="INTENT_GENERIC_CHAT",
         hit_type=GuardHitType.INTENT,
-        regex=r"今天(天气|新闻).*怎么样|讲个笑话|写一首诗|翻译这段|讲讲历史",
+        # ADR-004：与 L1 负向语义族同源的 check_input 子集
+        # （N1/N4 加宿主+动作联合排除，因进护栏没有正向优先）
+        regex="(?:" + "|".join(INTENT_GUARD_PATTERNS) + ")",
         judgement="开放域聊天 / 非控件生成请求：INTENT_OUT_OF_SCOPE",
     ),
 )

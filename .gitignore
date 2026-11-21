@@ -35,3 +35,7 @@ Thumbs.db
 .VSCodeCounter/
 .coverage
 .migration-ledger.json
+
+# conductor 本地状态（运行痕迹，不进版本库）
+.commitment-ledger.json
+.purity-baseline.json

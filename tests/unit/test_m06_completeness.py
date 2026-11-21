@@ -43,6 +43,7 @@ def validate_chain(
         **{**stores, **kwargs},
     )
 
+
 # ── R1 描述充分性槽位检查 ───────────────────────────────────────────────────
 
 
@@ -187,6 +188,7 @@ def test_suggest_grid_filters_wide_table_conflict() -> None:
 
 # ── review 修复回归 ─────────────────────────────────────────────────────────
 
+
 def test_s2_pii_adjacent_to_chinese_detected() -> None:
     """S2：手机号/身份证紧邻中文时不被 \\b 漏检。"""
     from services.guardrails.input_guard import check_input
@@ -194,7 +196,8 @@ def test_s2_pii_adjacent_to_chinese_detected() -> None:
 
     for text in (
         "我的手机号是13800138000帮我做控件",
-        "身份证11010119900307771X帮我做控件",
+        # 成熟库真值校验：身份证必须是校验位合法的号码（旧夹具校验位错误）
+        "身份证11010519491231002X帮我做控件",
     ):
         result = check_input(text, [], "WIDGET_GENERATION", BudgetView(left=100.0))
         assert result.passed is False, text

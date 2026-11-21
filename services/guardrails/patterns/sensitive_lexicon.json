@@ -1,0 +1,7 @@
+{
+  "$comment": "分类敏感词库 v1。PORN/VIOLENCE 为通用分类词；POLITICAL 刻意留空，由合规方通过 WIDGETPILOT_SENSITIVE_LEXICON_PATH 提供外部 JSON（同结构 category -> 词数组）按类别覆盖。代码与测试不得内置具体涉政词。",
+  "version": "v1",
+  "PORN": ["色情", "淫秽", "裸照"],
+  "VIOLENCE": ["暴力", "打人", "杀人", "持刀伤人", "制作炸弹"],
+  "POLITICAL": []
+}

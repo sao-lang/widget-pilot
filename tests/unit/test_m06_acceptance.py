@@ -93,7 +93,9 @@ class CountingClassifier:
         return self.result
 
 
-def _pass(description: str = "做一个能翻月的日历", grid: str = "4x4") -> ValidationResult:
+def _pass(
+    description: str = "做一个能翻月的日历", grid: str = "4x4"
+) -> ValidationResult:
     """放行路径工厂。"""
     return validate_chain("s", "r", description, grid, [], "WIDGET_GENERATION", 100.0)
 
@@ -159,6 +161,7 @@ def test_a3_legitimate_widget_not_rejected() -> None:
         "帮我做一个聊天界面控件",
         "做一个天气预报的日历 widget",
         "生成一个翻译任务清单卡片",
+        "能帮我在桌面加个天气吗？",
     ):
         result = validate_chain("s", "r", text, "4x4", [], "WIDGET_GENERATION", 100.0)
         assert result.reason_code is not ReasonCode.INTENT_OUT_OF_SCOPE, text

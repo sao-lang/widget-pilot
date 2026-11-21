@@ -17,6 +17,7 @@ from collections.abc import Callable
 from typing import cast
 
 from services.guardrails.constants import (
+    DEV_CONTEXT_PATTERN,
     MAX_CLARIFY_TOKENS,
     OUT_OF_SCOPE_PATTERNS,
     WIDGET_GENERATION_PATTERNS,
@@ -57,7 +58,11 @@ def _l1_rule_intent(text: str) -> IntentCategory | None:
     若拒绝类无条件优先，这些请求会被一刀切拒绝，违背「只放行控件生成」的产品定位。
     真正的攻击面（注入 / PII）由 input_guard 独立扫描，不受此处优先级影响。
     """
-    # 正向：明确的控件生成意图（做/生成 + 控件/日历/时钟…）优先放行
+    # 开发语境是整句拒绝类（N6），须先于正向：ADR-004 复审 S2
+    # 「用 Swift 做个小组件项目」含生成动词，但不生成手机 widget，而是写代码。
+    if re.search(DEV_CONTEXT_PATTERN, text, flags=re.IGNORECASE):
+        return IntentCategory.OUT_OF_SCOPE
+    # 正向：明确的控件生成意图（动作 × 宿主/控件）优先放行
     for pattern in WIDGET_GENERATION_PATTERNS:
         if re.search(pattern, text, flags=re.IGNORECASE):
             return IntentCategory.WIDGET_GENERATION

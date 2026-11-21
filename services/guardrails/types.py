@@ -19,6 +19,7 @@ class GuardHitType(StrEnum):
 
     INJECTION = "INJECTION"
     PII = "PII"
+    SENSITIVE = "SENSITIVE"
     INTENT = "INTENT"
     BUDGET = "BUDGET"
 

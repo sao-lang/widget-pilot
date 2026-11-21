@@ -20,6 +20,7 @@ class ConfigSnapshot:
     threshold: float
     conflict_count: int
     capability_max: int
+    intent_vocab_version: str = ""
 
 
 def capture_snapshot() -> ConfigSnapshot:
@@ -30,6 +31,7 @@ def capture_snapshot() -> ConfigSnapshot:
         threshold=constants.SEMANTIC_ROUTE_THRESHOLD,
         conflict_count=len(constants.CONFLICT_RULES),
         capability_max=constants.MAX_CAPABILITY_PER_TURN,
+        intent_vocab_version=f"{constants.INTENT_VOCAB_VERSION}:{constants.INTENT_SAMPLES_VERSION}",
     )
 
 

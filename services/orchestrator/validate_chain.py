@@ -46,6 +46,7 @@ from services.guardrails.types import (
 )
 
 # ReasonCode 与命中类型的映射（§5.3）
+# SENSITIVE 命中沿用 GUARD_INPUT_HIT：ReasonCode 集合是契约，不因新增命中类型扩充。
 _RC_BY_HIT = {
     "INJECTION": ReasonCode.GUARD_INPUT_HIT,
     "PII": ReasonCode.GUARD_INPUT_HIT,
@@ -340,7 +341,9 @@ def validate_chain(
     # 经 LOAD_CAPABILITY 自主选择，不再随 ValidationResult 下发 recipe_ids。
     effective_grid = semantic.grid or parsed_grid
     assert effective_grid is not None  # 语义层通过时 grid 必已确定
-    widget = _infer_widget(description, effective_grid)
+    # 契约字段保留但值恒 custom（ADR-004 去类型化收尾）：
+    # 任何从描述推断具体 widget 类型的逻辑都已移除，类型不参与放行/升级。
+    widget = WidgetType.CUSTOM
     # ADR-003：need_skill 请求链已删除——模型经 LOAD_CAPABILITY 按需加载，
     # 五项闸门在 loop 内执行（capability_guard_adapter），审计写 capability_audit_log。
     effective_tier = decision.model_tier or ModelTier.STANDARD
@@ -359,7 +362,11 @@ def validate_chain(
             "fallback_reason": decision.fallback_reason,
         },
     )
-    _emit(event_sink, "plan", {"steps": ["语义校验", "进护栏", "意图级联（门禁）", "能力目录建议"]})
+    _emit(
+        event_sink,
+        "plan",
+        {"steps": ["语义校验", "进护栏", "意图级联（门禁）", "能力目录建议"]},
+    )
 
     return ValidationResult(
         ok=True,
@@ -375,17 +382,3 @@ def validate_chain(
         trace_id=trace_id,
         evidence_ref=ref,
     )
-
-
-def _infer_widget(description: str, grid: GridSpec | None) -> WidgetType:
-    """从描述推断 widget_type（真实装配由意图归一化槽位覆盖）。"""
-    hints = (
-        ("日历", WidgetType.CALENDAR),
-        ("时钟", WidgetType.CLOCK),
-        ("闹钟", WidgetType.ALARM),
-        ("任务", WidgetType.TASK),
-    )
-    for word, widget in hints:
-        if word in description:
-            return widget
-    return WidgetType.CUSTOM

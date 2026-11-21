@@ -1,12 +1,12 @@
 # 会话摘要：tool 与 skill 统一 Capability 抽象与渐进式披露改造
 
 ## L0 索引卡（续接时先读这一段，≤12 行）
-- 场景 / 路径：链【12 提交 → 11/3 写方案+同步文档 → 9 拷问设计 → 5/6 写代码】/ 混合（提交·文档·只读·改码）
-- 当前闸门：①-⑤ 全完成 + 补做两项 + 技能预取整套删除完成；S4 全绿（pytest 387 passed / pyright 0 / ruff 全绿 / contracts drift=[]；Docker 未起 49 skipped 属环境守卫）；删除独立复审 Blocker 清零、Should 1 已修
-- 交付产物：ADR-003、代码阅读指南、同步后的设计+M02/M03/M04/M06/M07/M10/00 文档、Capability 实现、迁移 0008/0009、15 组测试
-- 未完成项：① Docker 执行无沙箱隔离（Q5 明示暂缺，登记债）② 视觉模型真实端点待环境（Q6，mock 测试）；原第 3/4 项已补齐，技能预取已整套删除（不留兼容层）
-- 下一步：最终门禁确认 → 提交并 push → 更新工作记忆
-- 用户执行顺序硬约束：先提交 → 再写方案文档 → 改其他文档 → 拷问设计 → 最后写代码（已遵守）
+- 场景 / 路径：本轮【6 依新设计改码】/ full（ADR-004 全级联去类型化，已交付）；历史链【12 提交 → 11/3 写方案+同步文档 → 9 拷问设计 → 5/6 写代码】已完成
+- 当前闸门：S4 全绿（pytest 409 passed / 49 skipped / exit 0；ruff/pyright/contracts/contract_check/ledger/removal/source_purity/review_gate 全退出 0）；独立复审 Round 2 Blocker=0；verify.py 因 src/ 布局与缺 mypy/pydocstyle exit 1（环境阻断，已用项目原生命令替代）
+- 交付产物：`docs/adr/ADR-004`（全级联去类型化，已实现；`intent_hints.py` 已在 ADR-005 删除）、`docs/adr/ADR-005`（进护栏强化）、`change-contract.md`、`constants.py` 语义族、`sensitive.py`/`validators.py`（新增）、`test_m06_*_hardened/decoupled.py`（新增）、M06/设计方案/00 文档同步
+- 未完成项：① 设备 API/续航/沙箱校验未实现（M08 隔离缺失）② verify.py 通用脚本不适配本项目 src 布局（已登记环境阻断）③ 无
+- 下一步：用户确认后提交；设备/沙箱阶段另立 ADR，不在本次范围
+- 用户硬约束：级联路由整体去类型化、widget 只作 hint；不改 IntentCategory/ReasonCode/事件 schema/SDK 契约
 
 ## 环境
 - 日期时间：2026-11-21 06:52 GMT+8
@@ -124,3 +124,82 @@
 - 终验：pytest 382 passed / 49 skipped / pyright 0 / ruff 全绿 / contracts drift=[]。
 - 文档：ADR-003 §13.2、M06 代码地图（行数 2076/391、测试 23/14/13/4/1/6、8 步主线）、M02/M04/M06/M07 覆盖声明追加。
 - **保留**：kind="skill" 的 Capability 族是 ADR-003 新设计，不在删除范围。
+
+### 2005 续：ADR-004 方案文档（只文档未改码）
+
+- 用户诉求：补充场景（天气多接口、设备 API 对接、刷新续航、代码安全）先落方案；`_l1_rule_intent` 去类型化，两张词表扩到覆盖大部分手机 widget 生成意图；明确"暂时不落地"。
+- S1 声明：场景 3 / 文档路径 / full / 置信 0.85；子代理=派（3 路独立调研：场景全景 / 代码与测试约束 / 文档落点）；省掉=env_probe、TDD/verify/source_purity（无改码）、git commit、impact_analysis（不改公共契约）。假设 A1–A5 写入 ADR §10 供否决。
+- 三路调研关键结论：① 11 类 widget 场景（信息/时间日程/效率/健康/设备控制/媒体/生活/金融/系统/AI生成/通讯）与 8 个正向语义族，数据词只能加权不能设门槛；② 三条硬样本 + 长尾 `"给我整一个能显示日期的小玩意"` 走 L2/L3 是回归地雷，`patterns/intent.py:11` 是第二份负向 regex，`change_gate` 无词表指纹；③ 按 ADR-003 风格新增 ADR-004 并同步四处文档。
+- 决策：正向 =（生成/放置/展示动作 AND 宿主/控件对象）或（数据词 × 宿主共现）；负向 = 查询/告知/创作/设备直操/教程/开发语境/裸数据/状态描述 8 族联合条件；保留双循环、正向优先、I14 与 step0 留证链。P1 词表改造 / P2 hints 去类型化 / P3 设备与沙箱（待 M08 隔离）分阶段。
+- 产物与行号证据：`docs/adr/ADR-004-意图识别去类型化与补充场景.md:1`（§1–§14、§9 样例之外覆盖、§10 A1–A5、§13 变更记录）；`change-contract.md:1`（六段，contract_check.py 退出 0 / Acceptance=5）；`设计方案.md:6`（v1.9）、`:15`（v1.9 变更说明）、`:210`（X6 口径）；`docs/modules/M06-输入校验护栏与路由域.md:5`（ADR-004 覆盖声明）；`docs/M06-代码阅读指南.md:6/:78/:134`；`docs/modules/00-总览与模块地图.md:5/:52`（ADR 索引）。
+- 边界证据：`git status --short` 仅 4 份既有文档改动 + 2 个新增文档，无 `.py`/契约/测试改动。
+- 已知未处理：`docs/modules/00-总览与模块地图.md:79` 仍有"按 widget_type+grid 确定性预取"旧口径（ADR-003 遗留不一致，非本轮引入，留给后续文档清理场景）。
+- 下一步闸门：用户确认/否决 A1–A5 → 确认后进 P1 改码；未确认前禁止改 `constants.py`。
+- S5 收尾（文档轮）：`review_gate.py --overview <本文件> --waived --waiver-reason "场景3纯文档方案"` 退出 0（纯文档，不改码）；`learn_capture.py --dry-run` 退出 0，仅抽到历史条目，本轮无新增可复用经验回写；项目约定与阶段闸门已手工写入 `.workbuddy/memory/MEMORY.md` 与当日日志。
+
+### 2040 续：ADR-004 全级联去类型化改码（场景 6 / 改码 / full）
+
+- 用户诉求：先"级联路由整个都要调整，里面 widget 都要去类型化"，随后确认"意图识别已经做好了，这个任务要改码"。S1 声明场景 6 / 改码 / full / 0.85；S2 先把 ADR-004 升级为全级联口径并固化 change-contract confirmed；子代理=不派（级联强耦合需跨层联想）。
+- RED 证据：新增 `tests/unit/test_m06_intent_decoupled.py` 后 `pytest -q` → 16 failed / 7 passed，失败原因均为缺失新行为（宿主锚点未命中、L2 样本含类型词、DENSITY_HINTS 不存在、负向 regex 未同源、指纹缺字段）。
+- GREEN 实现：① `constants.py` 正向 P1–P4 语义族、负向 N1–N8 联合条件，新增 `WIDGET_ANCHOR_PATTERNS`/`DENSITY_HINTS`/`DEFAULT_DENSITY_HINTS`/`INTENT_VOCAB_VERSION=v2`；② `semantic_router` 样本 v2 扩至 11 类无类型说法，`_VOCAB` 不再注入类型词；③ `semantic.py` R1 槽位改宿主锚点 OR 开放特征词；④ `grid_resolver` 改 `_density_hints`，旧 `_detect_widget`/`WIDGET_TYPICAL_GRIDS` 删除；⑤ `patterns/intent.py` 负向 regex 从 constants 派生；⑥ `change_gate` 增 `intent_vocab_version`；⑦ 新增 `intent_hints.py` 仅作遥测 hint，`validate_chain._infer_widget` 删除。
+- 回归修复：首次全量跑发现 `生成一个翻译任务清单卡片` 被派生负向 regex 的裸 `翻译` 命中；把 N3 收紧为 `翻译(?:这段|一下)` 后全绿（未改测试断言）。
+- 门禁证据：`pytest -q` → **405 passed / 49 skipped / exit 0**；`ruff check .` exit 0；改动 9 文件 `ruff format --check` 通过；`npx pyright` 0 errors；`pnpm contracts:check` drift=[]；`removal_check.py --symbols WIDGET_HINTS,WIDGET_TYPICAL_GRIDS,_detect_widget,_infer_widget` PASS；`source_purity.py --baseline <HEAD基线> --scope <9文件> --strict` exit 0；`commitment_ledger.py check --strict` 8/8 收口 exit 0；`contract_check.py` PASS（Acceptance=6）。
+- 环境阻断（非回归）：`verify.py --lang python` exit 1——通用脚本假设 `src/` 布局且需要未安装的 mypy/pydocstyle，`ruff format --check .` 会重排 235 个历史文件；已用项目原生命令替代，未改断言造假绿。
+- 文档同步：`设计方案.md` v1.9 改为已实现；ADR-004 状态已实现；M06 权威文档/代码阅读指南/模型缺口表/M4-M6 速查表/00 总览（顺手修正"按 widget_type+grid 预取"旧口径）已更新。
+- 下一步：S5 独立复审（全新上下文子代理七维）→ 清 Blocker → `review_gate.py` 退出 0 → 收尾。
+
+### 2050 续：独立复审 Round 1 与 fix loop
+
+- 复审（全新上下文子代理）结论：不可合入，Blocker 1 / Should 6 / Nit 3。
+- Blocker B1：`check_input()` 没有正向优先，`patterns/intent.py` 拼入全量负向表后，N1「数据词 + 疑问」把 `能帮我在桌面加个天气吗？` 二次误拒（L1 已放行但 step7 仍判 OUT_OF_SCOPE）。修复：constants 拆出 `INTENT_GUARD_PATTERNS`（同源子集，N1/N4 自带「宿主 + 生成动词」联合排除），`patterns/intent.py` 改从该子集派生；`test_m06_acceptance.py::test_a3_legitimate_widget_not_rejected` 补疑问句端到端断言。
+- Should 处理：N6 开发语境提到 `_l1_rule_intent` 正向循环之前（S2）；`test_change_gate_tracks_intent_vocabulary` 补 `diff_config` 断言（S4）；ADR FR-2/FR-9 口径修正（S1/S3）；M06 模块文档正文旧类型化口径与设计方案/00 总览"未改码"声明同步（S5/S6）；代码阅读指南与速查表字段/行数同步（N1–N3）。
+- 修复后证据：`pytest -q` **406 passed / 49 skipped / exit 0**；`ruff check .` exit 0；9+2 改动文件 `ruff format --check` 通过；`pyright` / `contracts:check` / `removal_check` / ledger / contract_check 复跑见下节。
+- 下一步：派**新的**全新上下文子代理复审 Round 2（禁止复用 Round 1 报告）→ Blocker 清零后跑 `review_gate.py` 收尾。
+
+### 2100 续：最终门禁与独立复审收口
+
+- Round 2（全新上下文子代理）总判定：可合入，**Blocker = 0**；Should 2（词序边界误拒 + 文档数字漂移）、Nit 2（模块正文旧口径 + ADR 关联行号）。
+- Round 2 修复：`_NEG_WIDGET_GUARD` 从正向先行断言改为**整句锚定 `^` + 负向先行断言**（疑问句中宿主/动作无论前后都不会误拒），新增 3 条词序变体测试；文档数字统一为 `constants.py=161`、`validate_chain.py=382`、`change_gate.py=44`、全量 `409 passed / 49 skipped`，M06 模块正文旧口径与 ADR 关联行号同步。
+- 最终证据：`.venv/Scripts/python.exe -m pytest -q` → **409 passed / 49 skipped / exit 0**；`ruff check .` exit 0；改动文件 `ruff format --check` 通过；`npx pyright` 0 errors；`pnpm contracts:check` drift=[]；`contract_check.py` PASS；`commitment_ledger.py check --strict` 8/8；`removal_check.py` PASS（4 个旧符号零残留）；`source_purity.py --baseline HEAD --scope 改动文件 --strict` exit 0。`verify.py --lang python` 仍因 src/ 布局与 mypy/pydocstyle 缺失 exit 1（环境阻断，已用项目原生命令替代）。
+- 工作区：`git status --short` 含 11 个改动文件 + `tests/unit/test_m06_intent_decoupled.py`、`services/guardrails/intent_hints.py` 两个新增文件 + ADR-004 / change-contract（本会话文档轮已建）。无契约源、SDK、生产数据改动。
+
+## 独立 review 结果
+
+- ADR-004 Round 1（全新上下文子代理）：发现 1 项确定性误拒（疑问句 `能帮我在桌面加个天气吗？` 在 check_input 二次拒绝）+ 6 Should + 3 Nit；已按 fix loop 修复。
+- ADR-004 Round 2（再次全新上下文子代理）：总判定可合入，**Blocker = 0**；留 2 Should / 2 Nit，均已处理。
+- ADR-005 Round 1（全新上下文子代理）：发现 1 项 PII 真值校验漏报 Blocker（首个匹配无效即跳过整规则）+ 5 Should + 6 Nit；已改为 `re.finditer` 并补回归。
+- ADR-005 Round 2（再次全新上下文子代理）：总判定可合入，**Blocker = 0**；3 Should / 2 Nit 已处理（Blocker 回归样本改为无效邮箱在前、有效邮箱在后；文档五类/枚举/数量统一；外置词库措辞与 overview 更正）。
+- 最终状态：Blocker = 0；机器门禁全绿（见上节）；13/13 承诺收口。
+
+## 独立 review 报告
+
+### Round 1 摘要（全新上下文）
+- Blocker：`check_input()` 无正向优先，`patterns/intent.py` 拼接全量负向表导致疑问句合法 widget 请求被二次误拒（`validate_chain` 端到端复现）。修复：`INTENT_GUARD_PATTERNS` 同源子集 + N1/N4 联合排除 + 端到端断言。
+- Should：FR-2 数据词开放口径、N6 开发语境被正向吞掉、L2 阈值未重校准、`diff_config` 未测、模块正文旧口径、"未改码"残留。Nit：指纹字段数、槽位描述、行数漂移。
+- 删除推导：4 个待删符号代码零残留（PASS）。
+
+### Round 2 摘要（全新上下文）
+- 结论：可合入，Blocker = 0。独立实测 FR-1～FR-13 除 FR-4 词序边界外全通过；契约形状（IntentCategory/RouteLayer/ReasonCode/事件键/fallback 串/ValidationResult.widget_type）未变；4 个待删符号生产代码零残留；无改断言造假绿。
+- Should 1：`_NEG_WIDGET_GUARD` 用正向断言、位置敏感，疑问词在宿主前仍误拒（如 `天气怎么样啊，我想在桌面加一个`）。已改为 `^` 锚定 + 负向断言并补 3 用例，pytest 409 passed。
+- Should 2：代码阅读指南与速查表行数/测试数字漂移。已统一为实际行数与 409 passed。
+- Nit：M06 模块正文第 31 行旧预取口径、ADR 关联行号。均已同步。
+
+### ADR-005 Round 1 摘要（全新上下文）
+- Blocker：`rule_registry.scan` 用 `re.search` 只取首匹配，首匹配真值校验失败即 `continue` 跳过整条规则，导致「无效号在前、有效号在后」漏报真实 PII（且快照已写原文）。修复：`re.finditer` 遍历全部匹配，任一有效即命中；补混合邮箱回归用例。
+- Should：注入实 8 条非 9（全链数字更正）；M06 规则表补齐 5 条新规则；间接注入/凭据外泄补测；外置词库加载与 fail-fast 补测；无效邮箱样本改为真值校验拒绝而非正则不匹配。
+- Nit：SENSITIVE 沿用 GUARD_INPUT_HIT 注释、外置词库按类别覆盖措辞、首个命中语义、recipes frontmatter 去 widget_type、overview 更正、合法 token 控件不误伤。
+
+### ADR-005 Round 2 摘要（全新上下文）
+- 结论：可合入，Blocker = 0；独立实测确认 `re.finditer` 修复有效（无效邮箱在前、有效邮箱在后仍能命中）；代码无具体涉政词，POLITICAL 词库为空且外置；去类型化生产代码零残留。
+- Should：Blocker 回归样本原用 `12345678901`（正则第二位不匹配）无法守住修复，已改为 `user@example..com` + `user@example.com`；M06 权威文档 GuardHitType 三处补 `SENSITIVE`；四类/五类口径统一；外置词库措辞与 overview L0 更正。均已处理。
+
+### 2110 续：ADR-005 进护栏强化 + 去类型化收尾（场景 5 / full）
+
+- 用户诉求：进护栏注入/PII 两表力度不够，评估成熟库；新增涉黄/涉暴/涉政敏感词；全仓残余 widget 类型化（点名 `_HINT_PATTERNS`）清除并同步 ADR-004。
+- 库选型：LLM Guard 已归档、Guardrails AI hosted 下线、NeMo 太重、Presidio 中文需 NLP 模型；采用 phonenumbers / id-validator / email-validator 做 PII 真值校验，pyahocorasick 做敏感词 DFA。依赖写入 `pyproject.toml` + `uv.lock`，stub 放 `typings/`。
+- RED：新增 `test_m06_input_guard_hardened.py` 收集期即失败（缺 `services.guardrails.sensitive`），其余用例均为缺失新行为；GREEN 后 429 passed / 49 skipped。
+- 实现：注入 3→8 条；PII 形状命中后真值校验（修正 `test_m06_completeness.py` 校验位错误的旧身份证夹具）；新增 `sensitive.py`/`sensitive_lexicon.json`（PORN/VIOLENCE 内置、POLITICAL 外置且代码不内置具体词）；`GuardHitType.SENSITIVE` 只留 `<sensitive:CATEGORY>`；删除 `intent_hints.py`，`widget_type` 恒 `custom`。
+- 门禁：pytest 429 passed / 49 skipped exit 0；ruff check 绿；pyright 0 errors；contracts drift=[]；contract_check PASS；removal_check 5 符号 PASS；source_purity HEAD 基线 + scope --strict exit 0；commitment_ledger 13/13。依赖变更需重建镜像（Docker 未起，环境阻断）。
+- 文档：新增 ADR-005；同步 ADR-004（hint 段与状态）、设计方案 v2.0、M06 权威文档/指南/缺口表、M4-M6 速查表、00 总览 ADR 索引、change-contract 合并契约。
+- 下一步：派全新上下文子代理独立复审 → fix loop → review_gate → 收尾。
+- 更正（复审 N5）：本会话 L0 中「intent_hints.py（新增）」是 ADR-004 阶段历史；ADR-005 已删除该模块与 `_HINT_PATTERNS`，`widget_type` 恒 `custom`。注入规则实际 **8 条**（3 原有 + 5 新增），此前「9 条」为笔误，已全文更正。

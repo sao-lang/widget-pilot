@@ -8,12 +8,12 @@ from __future__ import annotations
 
 import re
 
-from packages.contracts.enums import GridSpec, WidgetType
+from packages.contracts.enums import GridSpec
 from services.guardrails.constants import (
     CONFLICT_RULES,
+    DEFAULT_DENSITY_HINTS,
+    DENSITY_HINTS,
     GRID_HINT_PATTERNS,
-    WIDGET_HINTS,
-    WIDGET_TYPICAL_GRIDS,
 )
 from services.guardrails.spec_conflicts import check_conflict
 from services.guardrails.types import GridResolution, GridSource, GridStatus
@@ -21,12 +21,15 @@ from services.guardrails.types import GridResolution, GridSource, GridStatus
 _SUGGEST_LIMIT = 3
 
 
-def _detect_widget(description: str) -> WidgetType | None:
-    """从描述抽取控件类型（首个命中），用于密度建议。"""
-    for pattern, widget in WIDGET_HINTS:
+def _density_hints(description: str) -> tuple[GridSpec, ...]:
+    """按内容特征给密度建议（ADR-004 去类型化），未命中用默认顺序。
+
+    只影响用户尚未选 grid 时的 suggest_grid，不参与任何放行判定。
+    """
+    for pattern, hints in DENSITY_HINTS:
         if re.search(pattern, description, flags=re.IGNORECASE):
-            return widget
-    return None
+            return hints
+    return DEFAULT_DENSITY_HINTS
 
 
 def _detect_conflict_features(description: str) -> tuple[str, ...]:
@@ -97,7 +100,6 @@ def resolve_grid(
             )
 
     # 三级：缺省 → 询问用户，构造建议（偏好置顶 → 冲突过滤 → 密度补齐）
-    widget = _detect_widget(description)
     candidates: list[GridSpec] = []
     for raw in preferred_grids or []:
         try:
@@ -112,7 +114,7 @@ def resolve_grid(
     ]
     typical = [
         t
-        for t in WIDGET_TYPICAL_GRIDS.get(widget or WidgetType.CUSTOM, ())
+        for t in _density_hints(description)
         if not any(check_conflict(t, f) for f in features)
     ]
     candidates.extend(typical)

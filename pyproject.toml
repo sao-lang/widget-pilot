@@ -17,6 +17,11 @@ dependencies = [
     "tiktoken>=0.8",        # M03/M07/M10：纯 token 计数
     "Pillow>=11.0",         # M05：图片只读解码
     "jsonschema>=4.23",     # M06/M02：JSON Schema 校验器
+    # M06 进护栏：成熟专用库（PII 真值校验 + 敏感词 DFA 多模式匹配）
+    "phonenumbers>=9.0",    # 手机号/区号格式与归属校验
+    "id-validator>=1.0",    # 大陆身份证校验位/地区码校验
+    "email-validator>=2.2",  # 邮箱语法与可投递性形状校验
+    "pyahocorasick>=2.0",   # 敏感词 Aho-Corasick 自动机
     # M04 §2 技术栈：认证与租户基座的运行期依赖
     "PyJWT>=2.8",           # M04：JWT 签发/校验（access + refresh）
     "argon2-cffi>=23.1",    # M04：密码哈希（只存 hash）

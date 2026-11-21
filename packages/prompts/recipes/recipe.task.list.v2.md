@@ -1,7 +1,6 @@
 ---
 recipe_id: recipe.task.list.v2
 version: v2
-widget_type: task
 grid: 4x2
 token_cost: 180
 ---

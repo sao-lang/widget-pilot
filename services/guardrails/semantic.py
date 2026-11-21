@@ -12,7 +12,7 @@ from services.guardrails.constants import (
     FEATURE_HINTS,
     MIN_DESCRIPTION_LEN,
     ROLE_CLARIFY_THRESHOLD,
-    WIDGET_HINTS,
+    WIDGET_ANCHOR_PATTERNS,
 )
 from services.guardrails.grid_resolver import resolve_grid
 from services.guardrails.spec_conflicts import suggest_for
@@ -25,30 +25,25 @@ from services.guardrails.types import (
 )
 
 _ROLE_HINT = "请说明这张图是当背景、提取内容、作为数据源还是风格参考"
-_DESC_HINT = "请说明要日历还是时钟，以及是否需要翻月等关键特征"
+_DESC_HINT = "请说明想在桌面/锁屏展示什么内容，以及需要哪些关键特征"
 
 
 def _has_required_slots(description: str) -> bool:
-    """R1：描述须含「控件类型 或 关键特征」至少一类槽位（§3.2 step2，零模型调用）。
+    """R1：描述须含「宿主/产物锚点 或 开放特征词」至少一类槽位（ADR-004 去类型化）。
 
-    设计原文写「控件类型 + 关键特征」，但对长尾描述（如「给我整一个能显示日期的
-    小玩意」）没有显式控件词却有明确特征——这类正是 L2/L3 级联要接管的，不能在
-    语义层被「描述不足」挡掉。故判定口径为「两类槽位至少命中一类即可生成」：
-    控件类型仅认 **明确控件词**（WIDGET_HINTS：日历/时钟/闹钟/待办），
-    关键特征来自 FEATURE_HINTS（翻月/计时/提醒/清单/显示等，纯外观词不算）。
-    泛指词（玩意/小工具/东西）不能单独满足控件槽——否则「有样式的玩意」
-    这类无信息描述同样放行，R1 形同虚设（review S3）。
-    两类皆无（如「随便做一个东西」）才不足，给具体补充建议。
+    锚点回答「放在哪里/以什么形态承载」（桌面/锁屏/小组件/卡片/日历等），
+    特征词回答「展示什么数据」（天气/快递/股票/步数等开放词族）。两者都不
+    再映射到 WidgetType；泛指词（玩意/小工具/东西）仍不能单独满足槽位。
     """
-    has_widget = any(
+    has_anchor = any(
         re.search(pattern, description, flags=re.IGNORECASE)
-        for pattern, _widget in WIDGET_HINTS
+        for pattern in WIDGET_ANCHOR_PATTERNS
     )
     has_feature = any(
         re.search(pattern, description, flags=re.IGNORECASE)
         for pattern in FEATURE_HINTS
     )
-    return has_widget or has_feature
+    return has_anchor or has_feature
 
 
 def _detect_feature(description: str) -> str:

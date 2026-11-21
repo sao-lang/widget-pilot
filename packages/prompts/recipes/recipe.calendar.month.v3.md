@@ -1,7 +1,6 @@
 ---
 recipe_id: recipe.calendar.month.v3
 version: v3
-widget_type: calendar
 grid: 4x4
 token_cost: 220
 ---
