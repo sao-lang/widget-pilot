@@ -27,19 +27,15 @@ class IntentRouteLogRow:
 
 
 @dataclass(slots=True, frozen=True)
-class NeedSkillLogRow:
-    """一次 need_skill 决策留证（§6.1 NeedSkillLog）。"""
+class CapabilityAuditLogRow:
+    """一次 L1/L2 能力请求留证（ADR-003，替代旧 NeedSkillLog）。"""
 
     session_id: str
     run_id: str
-    recipe_id: str
-    depth: int
+    capability_id: str
+    level: int
     turn_count: int
     tokens: int
     decision: HitDecision | None
     reason: str | None
     trace_id: str = ""
-    capability_id: str | None = None
-    """统一能力句柄（ADR-003）；旧 need_skill 记录为 None，新记录填 id。"""
-    level: int | None = None
-    """披露层级 1=详情 / 2=执行或正文（ADR-003）；旧记录为 None。"""

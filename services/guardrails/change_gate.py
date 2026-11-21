@@ -1,6 +1,6 @@
 """规程变更配置指纹与差异（A16 / §5 D3 验收 / §9.3）。
 
-规则 / 阈值 / 冲突矩阵 / need_skill 上限任一变更 → 触发 M10 回归门禁。
+规则 / 阈值 / 冲突矩阵 / 能力加载上限任一变更 → 触发 M10 回归门禁。
 测试用记录型门禁位于 tests/support/guardrails.py；生产触发回调由部署装配注入。
 """
 
@@ -19,7 +19,7 @@ class ConfigSnapshot:
     rule_count: int
     threshold: float
     conflict_count: int
-    need_skill_max: int
+    capability_max: int
 
 
 def capture_snapshot() -> ConfigSnapshot:
@@ -29,7 +29,7 @@ def capture_snapshot() -> ConfigSnapshot:
         rule_count=rule_count,
         threshold=constants.SEMANTIC_ROUTE_THRESHOLD,
         conflict_count=len(constants.CONFLICT_RULES),
-        need_skill_max=constants.MAX_NEED_SKILL_PER_TURN,
+        capability_max=constants.MAX_CAPABILITY_PER_TURN,
     )
 
 

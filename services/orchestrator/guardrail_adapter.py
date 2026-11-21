@@ -67,7 +67,7 @@ def _make_event_sink(
     session_id 由装配闭包按当前校验任务的会话绑定——M06 的 EventPayload 本身
     不含 session_id（判定逻辑与归属解耦），若从 payload 取会落到空 key 丢事件。
     seq 用 Redis 原子自增（per-session），与会话事件同域，避免多 worker 序号冲突；
-    kind 直接透传（guard/routing/skill/plan/notice/error 均属 AgentEventKind）。
+    kind 直接透传（guard/routing/plan/notice/error 均属 AgentEventKind；skill 事件已删除）。
 
     Args:
         client: 复用的 Redis 客户端（m3：build_validator 外层建一次，避免每任务新建连接池）。
@@ -134,13 +134,13 @@ def build_validator(
     # m3（v1.8）：Redis 客户端建一次，所有校验任务复用（长驻 worker 避免每任务
     # 新建连接池导致 FD 堆积）。
     redis_client = redis.from_url(redis_url)
-    # A3（v1.8）：五处生产留证统一由 PG 注入，源码不再保留内存兜底。
+    # A3（v1.8）：生产留证统一由 PG 注入，源码不再保留内存兜底。
+    # 能力请求审计走 capability_audit_adapter（loop 内），不在此链。
     from services.guardrails.audit_pg import PgGuardrailAuditStore
     from services.guardrails.guard_hit_pg import PgGuardHitStore
-    from services.guardrails.pg_stores import PgIntentRouteLogStore, PgNeedSkillLogStore
+    from services.guardrails.pg_stores import PgIntentRouteLogStore
 
     route_log = PgIntentRouteLogStore(dsn)
-    need_skill_log = PgNeedSkillLogStore(dsn)
     hit_store = PgGuardHitStore(dsn)
     audit_store = PgGuardrailAuditStore(dsn)
 
@@ -210,7 +210,6 @@ def build_validator(
                 classifier=classifier,
                 gateway=gateway,
                 route_log=route_log,
-                need_skill_log=need_skill_log,
             )
         except (psycopg.Error, SQLAlchemyError):
             # M06 §2.3 + runbook §2：任一留证表写入失败 → 保守拒绝放行，

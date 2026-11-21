@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Protocol, runtime_checkable
 
-from services.guardrails.telemetry import IntentRouteLogRow, NeedSkillLogRow
+from services.guardrails.telemetry import CapabilityAuditLogRow, IntentRouteLogRow
 from services.guardrails.types import Embedding, LowTierResult
 
 
@@ -75,9 +75,9 @@ class IntentRouteLogStorePort(Protocol):
 
 
 @runtime_checkable
-class NeedSkillLogStorePort(Protocol):
-    """技能决策日志写入口：内存实现与 PG 实现共同满足（A3 接线）。"""
+class CapabilityAuditLogStorePort(Protocol):
+    """能力请求审计日志写入口：内存实现与 PG 实现共同满足（A3 接线）。"""
 
-    def append(self, row: NeedSkillLogRow) -> None: ...
+    def append(self, row: CapabilityAuditLogRow) -> None: ...
 
     def decisions(self) -> Counter: ...

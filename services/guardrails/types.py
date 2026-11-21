@@ -206,15 +206,6 @@ class IntentDecision:
 
 
 @dataclass(slots=True, frozen=True)
-class NeedSkillRequest:
-    """need_skill 结构化请求（§6.2，depth 恒 1）。"""
-
-    recipe_id: str
-    depth: int
-    reason: str = ""
-
-
-@dataclass(slots=True, frozen=True)
 class CapabilityRequest:
     """tool/skill 通用的能力加载请求（ADR-003 / FR-6）。
 
@@ -240,21 +231,12 @@ class CapabilityCheckResult:
     reason: str | None = None
 
 
-@dataclass(slots=True, frozen=True)
-class NeedSkillResult:
-    """need_skill 校验结果（§4.3 NeedSkillResult）。"""
-
-    ok: bool
-    decision: HitDecision | None = None
-    reason: str | None = None
-
-
 @dataclass(slots=True)
 class TurnState:
-    """单轮 need_skill 计数状态（§6.3 上限），可变计数由装配层持有。"""
+    """单轮能力加载计数状态（ADR-003 上限），可变计数由装配层持有。"""
 
-    need_skill_count: int = 0
-    need_skill_tokens: int = 0
+    capability_count: int = 0
+    capability_tokens: int = 0
 
 
 @dataclass(slots=True, frozen=True)

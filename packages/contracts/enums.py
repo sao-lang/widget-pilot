@@ -63,7 +63,6 @@ class AgentEventKind(StrEnum):
     PLAN = "plan"
     SPEC = "spec"
     ATTACHMENT = "attachment"
-    SKILL = "skill"
     ROUTING = "routing"
     CODE = "code"
     GUARD = "guard"

@@ -8,8 +8,8 @@ from __future__ import annotations
 import json
 
 from services.guardrails.constants import (
-    MAX_NEED_SKILL_PER_TURN,
-    MAX_NEED_SKILL_TOKENS,
+    MAX_CAPABILITY_PER_TURN,
+    MAX_CAPABILITY_TOKENS,
 )
 from services.guardrails.types import (
     CapabilityCheckResult,
@@ -72,8 +72,8 @@ def check_capability_request(
         return CapabilityCheckResult(False, HitDecision.REJECT, "surface 未授权")
     if req.level not in _VALID_LEVELS:
         return CapabilityCheckResult(False, HitDecision.REJECT, "level 必须为 1 或 2")
-    if turn.need_skill_count >= MAX_NEED_SKILL_PER_TURN:
+    if turn.capability_count >= MAX_CAPABILITY_PER_TURN:
         return CapabilityCheckResult(False, HitDecision.REJECT, "本轮能力请求次数超限")
-    if turn.need_skill_tokens + token_cost > MAX_NEED_SKILL_TOKENS:
+    if turn.capability_tokens + token_cost > MAX_CAPABILITY_TOKENS:
         return CapabilityCheckResult(False, HitDecision.REJECT, "本轮能力请求 token 超限")
     return CapabilityCheckResult(ok=True)

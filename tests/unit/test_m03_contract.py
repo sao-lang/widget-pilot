@@ -18,7 +18,7 @@ SCHEMA = "packages/contracts/events.schema.json"
 
 # ---- T14：18 种 AgentEventKind 事件全部通过 schema 校验 ----
 def test_T14_all_event_kinds_validate():
-    assert len(AgentEventKind) == 18
+    assert len(AgentEventKind) == 17  # skill 事件已随技能预取删除（ADR-003）
     with open(SCHEMA, encoding="utf-8") as f:
         schema = json.load(f)
     validator = validators.validator_for(schema)(schema)

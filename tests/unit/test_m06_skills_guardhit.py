@@ -1,58 +1,16 @@
-"""M06 A13/A14/A15：need_skill 上限、留证与 FPR（A10-A12 技能预取已删除）。"""
+"""M06 A14/A15：命中留证与 FPR（A10-A12 预取、A13 need_skill 已删除）。"""
 
 from __future__ import annotations
 
 import pytest
 
-from services.guardrails.need_skill import check_need_skill, parse_need_skill
-from services.guardrails.types import (
-    GuardHitType,
-    InputGuardHit,
-    NeedSkillRequest,
-    TurnState,
-)
+from services.guardrails.types import GuardHitType, InputGuardHit
 from tests.support import (
     InMemoryGuardHitStore,
     false_positive_rate,
     log_hit,
     verify_chain,
 )
-
-
-def test_parse_need_skill() -> None:
-    """need_skill 结构化解析（M06 自实现）。"""
-    req = parse_need_skill(
-        '{"recipe_id": "recipe.calendar.month.v3", "depth": 1, "reason": "需要月视图"}'
-    )
-    assert req.recipe_id == "recipe.calendar.month.v3"
-    assert req.depth == 1
-    with pytest.raises(ValueError):
-        parse_need_skill("not json")
-
-
-def test_a13_need_skill_four_limits() -> None:
-    """A13：白名单 / 深度=1 / 次数 / token 四重上限，越界必拒。"""
-    allowlist = frozenset({"recipe.calendar.month.v3"})
-    # 深度 > 1
-    r1 = check_need_skill(
-        NeedSkillRequest("recipe.calendar.month.v3", 2), TurnState(), allowlist
-    )
-    assert r1.ok is False
-    # 不在白名单
-    r2 = check_need_skill(NeedSkillRequest("recipe.evil", 1), TurnState(), allowlist)
-    assert r2.ok is False
-    # 超次数
-    r3 = check_need_skill(
-        NeedSkillRequest("recipe.calendar.month.v3", 1),
-        TurnState(need_skill_count=2),
-        allowlist,
-    )
-    assert r3.ok is False
-    # 合法通过
-    r4 = check_need_skill(
-        NeedSkillRequest("recipe.calendar.month.v3", 1), TurnState(), allowlist
-    )
-    assert r4.ok is True
 
 
 def test_a15_log_hit_fields() -> None:

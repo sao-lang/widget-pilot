@@ -51,7 +51,7 @@ def test_capability_guard_rejects_bad_level_surface_and_not_registered():
 def test_capability_guard_counts_turn_limits():
     """次数与 token 超限拒绝；通过则计数累加（预算不可绕过）。"""
     allowlist = frozenset({"tool.weather"})
-    turn = TurnState(need_skill_count=2, need_skill_tokens=0)
+    turn = TurnState(capability_count=2, capability_tokens=0)
     r = check_capability_request(
         CapabilityRequest("tool.weather", 2, "generation"), turn, allowlist, token_cost=10
     )

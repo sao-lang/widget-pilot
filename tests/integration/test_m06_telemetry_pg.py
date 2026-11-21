@@ -1,6 +1,6 @@
 """M06 只追加日志 PG 持久化集成测试（M04 §9.0 接线义务 3）。
 
-两张 telemetry 表（intent_route / need_skill）落 PG 后，新 Store 实例能从库里读回并复算统计——
+两张 telemetry 表（intent_route / capability_audit）落 PG 后，新 Store 实例能从库里读回并复算统计——
 证明是落库而非内存。guard_hit 的 PG 留证单独在 test_m06_guard_hit_pg.py 覆盖（hash 链语义独立）。
 
 前置：docker compose --profile core up -d（PG:5432）；
@@ -16,14 +16,17 @@ import psycopg
 import pytest
 from psycopg.rows import DictRow, dict_row
 
-from services.guardrails.pg_stores import PgIntentRouteLogStore, PgNeedSkillLogStore
-from services.guardrails.telemetry import IntentRouteLogRow, NeedSkillLogRow
+from services.guardrails.pg_stores import (
+    PgCapabilityAuditLogStore,
+    PgIntentRouteLogStore,
+)
+from services.guardrails.telemetry import CapabilityAuditLogRow, IntentRouteLogRow
 from services.guardrails.types import HitDecision, RouteLayer
 
 PG_DSN: Final[str] = "postgresql://widgetpilot:widgetpilot_dev@127.0.0.1:5432/widgetpilot"
 
 _TABLE_INTENT_ROUTE: Final[str] = "intent_route_log"
-_TABLE_NEED_SKILL: Final[str] = "need_skill_log"
+_TABLE_CAPABILITY_AUDIT: Final[str] = "capability_audit_log"
 
 # 建表 DDL 与迁移 0005_m06_telemetry 对齐；IF NOT EXISTS 保证幂等兜底（不跑 alembic）。
 _SCHEMA: Final[tuple[str, ...]] = (
@@ -45,12 +48,12 @@ _SCHEMA: Final[tuple[str, ...]] = (
     f"CREATE INDEX IF NOT EXISTS ix_intent_route_log_session_id ON {_TABLE_INTENT_ROUTE} (session_id)",
     f"CREATE INDEX IF NOT EXISTS ix_intent_route_log_created_at ON {_TABLE_INTENT_ROUTE} (created_at)",
     f"""
-    CREATE TABLE IF NOT EXISTS {_TABLE_NEED_SKILL} (
+    CREATE TABLE IF NOT EXISTS {_TABLE_CAPABILITY_AUDIT} (
         id BIGSERIAL PRIMARY KEY,
         session_id TEXT NOT NULL,
         run_id TEXT NOT NULL,
-        recipe_id TEXT NOT NULL,
-        depth INTEGER NOT NULL,
+        capability_id TEXT NOT NULL,
+        level INTEGER NOT NULL,
         turn_count INTEGER NOT NULL,
         tokens INTEGER NOT NULL,
         decision TEXT,
@@ -59,8 +62,8 @@ _SCHEMA: Final[tuple[str, ...]] = (
         created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
     """,
-    f"CREATE INDEX IF NOT EXISTS ix_need_skill_log_session_id ON {_TABLE_NEED_SKILL} (session_id)",
-    f"CREATE INDEX IF NOT EXISTS ix_need_skill_log_created_at ON {_TABLE_NEED_SKILL} (created_at)",
+    f"CREATE INDEX IF NOT EXISTS ix_capability_audit_log_session_id ON {_TABLE_CAPABILITY_AUDIT} (session_id)",
+    f"CREATE INDEX IF NOT EXISTS ix_capability_audit_log_created_at ON {_TABLE_CAPABILITY_AUDIT} (created_at)",
 )
 
 
@@ -96,7 +99,7 @@ def clean_tables() -> None:
     with psycopg.connect(PG_DSN) as conn:
         with conn.cursor() as cur:
             cur.execute(
-                f"TRUNCATE TABLE {_TABLE_INTENT_ROUTE}, {_TABLE_NEED_SKILL}"
+                f"TRUNCATE TABLE {_TABLE_INTENT_ROUTE}, {_TABLE_CAPABILITY_AUDIT}"
             )
         conn.commit()
 
@@ -148,18 +151,18 @@ class TestPgIntentRouteLogStore:
         assert stats == {"L1": 0.0, "L2": 0.0, "L3": 0.0, "L4": 0.0, "escalation_rate": 0.0}
 
 
-class TestPgNeedSkillLogStore:
-    """NeedSkillLog 落 PG：decisions 聚合 + None 决策 + 跨实例。"""
+class TestPgCapabilityAuditLogStore:
+    """能力审计日志落 PG：decisions 聚合 + None 决策 + 跨实例。"""
 
     def test_decisions_and_cross_instance_readback(self) -> None:
         """三种决策 + 一次放行(None)：Counter 计数含 None，新实例读回一致。"""
-        store = PgNeedSkillLogStore(PG_DSN)
-        samples: tuple[NeedSkillLogRow, ...] = (
-            NeedSkillLogRow("s1", "r1", "r_a", 1, 1, 10, HitDecision.REJECT, "越界", "t1"),
-            NeedSkillLogRow("s1", "r2", "r_a", 1, 1, 10, HitDecision.MASK, "脱敏", "t2"),
-            NeedSkillLogRow("s1", "r3", "r_b", 1, 2, 20, HitDecision.AWAIT, "待确认", "t3"),
-            NeedSkillLogRow("s1", "r4", "r_c", 1, 3, 30, HitDecision.REJECT, "白名单", "t4"),
-            NeedSkillLogRow("s1", "r5", "r_c", 1, 3, 30, None, None, "t5"),
+        store = PgCapabilityAuditLogStore(PG_DSN)
+        samples: tuple[CapabilityAuditLogRow, ...] = (
+            CapabilityAuditLogRow("s1", "r1", "r_a", 1, 1, 10, HitDecision.REJECT, "越界", "t1"),
+            CapabilityAuditLogRow("s1", "r2", "r_a", 1, 1, 10, HitDecision.MASK, "脱敏", "t2"),
+            CapabilityAuditLogRow("s1", "r3", "r_b", 1, 2, 20, HitDecision.AWAIT, "待确认", "t3"),
+            CapabilityAuditLogRow("s1", "r4", "r_c", 1, 3, 30, HitDecision.REJECT, "白名单", "t4"),
+            CapabilityAuditLogRow("s1", "r5", "r_c", 1, 3, 30, None, None, "t5"),
         )
         for row in samples:
             store.append(row)
@@ -174,6 +177,6 @@ class TestPgNeedSkillLogStore:
         )
         assert store.decisions() == expected
 
-        rebuilt = PgNeedSkillLogStore(PG_DSN)
+        rebuilt = PgCapabilityAuditLogStore(PG_DSN)
         assert rebuilt.decisions() == expected
-        assert _db_count(_TABLE_NEED_SKILL) == len(samples)
+        assert _db_count(_TABLE_CAPABILITY_AUDIT) == len(samples)

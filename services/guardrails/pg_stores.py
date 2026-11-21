@@ -18,12 +18,12 @@ from psycopg.rows import DictRow, dict_row
 
 logger = logging.getLogger(__name__)
 
-from services.guardrails.telemetry import IntentRouteLogRow, NeedSkillLogRow
+from services.guardrails.telemetry import CapabilityAuditLogRow, IntentRouteLogRow
 from services.guardrails.types import HitDecision, RouteLayer
 
 # 表名集中一处（禁魔法字符串）：与迁移 0005_m06_telemetry 的表名逐字对齐。
 _TABLE_INTENT_ROUTE: Final[str] = "intent_route_log"
-_TABLE_NEED_SKILL: Final[str] = "need_skill_log"
+_TABLE_CAPABILITY_AUDIT: Final[str] = "capability_audit_log"
 
 # 统计口径键名（结构性字面量，与内存实现的返回契约一致）。
 _KEY_ESCALATION_RATE: Final[str] = "escalation_rate"
@@ -121,8 +121,8 @@ class PgIntentRouteLogStore:
         return result
 
 
-class PgNeedSkillLogStore:
-    """NeedSkillLog 的 PG 只追加存储：decisions() 从库内记录复算决策计数。"""
+class PgCapabilityAuditLogStore:
+    """能力请求审计的 PG 只追加存储：decisions() 从库内记录复算决策计数。"""
 
     def __init__(self, dsn: str) -> None:
         """注入 PG DSN。
@@ -132,17 +132,17 @@ class PgNeedSkillLogStore:
         """
         self._dsn: str = _sync_dsn(dsn)
 
-    def append(self, row: NeedSkillLogRow) -> None:
-        """追加一条 need_skill 决策记录到 need_skill_log。
+    def append(self, row: CapabilityAuditLogRow) -> None:
+        """追加一条 L1/L2 能力请求记录到 capability_audit_log。
 
         Args:
-            row: 决策留证 Row；decision 为 None 时落 NULL。
+            row: 留证 Row；decision 为 None 时落 NULL。
         """
         sql = (
-            f"INSERT INTO {_TABLE_NEED_SKILL} "
-            "(session_id, run_id, recipe_id, depth, turn_count, tokens, "
-            "decision, reason, trace_id, capability_id, level) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            f"INSERT INTO {_TABLE_CAPABILITY_AUDIT} "
+            "(session_id, run_id, capability_id, level, turn_count, tokens, "
+            "decision, reason, trace_id) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
         )
         # M2（v1.8）：留证失败隔离（同上，PG 抖动不击穿校验链）。
         try:
@@ -152,25 +152,23 @@ class PgNeedSkillLogStore:
                     (
                         row.session_id,
                         row.run_id,
-                        row.recipe_id,
-                        row.depth,
+                        row.capability_id,
+                        row.level,
                         row.turn_count,
                         row.tokens,
                         row.decision.value if row.decision is not None else None,
                         row.reason,
                         row.trace_id,
-                        row.capability_id,
-                        row.level,
                     ),
                 )
         except psycopg.Error as exc:
-            logger.warning("need_skill_log append failed (evidence dropped): %s", exc)
+            logger.warning("capability_audit_log append failed (evidence dropped): %s", exc)
 
     def decisions(self) -> Counter[HitDecision | None]:
         """按 decision 计数（含 None），口径同内存实现。"""
         with _connect_dict(self._dsn) as conn:
             rows = conn.execute(
-                f"SELECT decision FROM {_TABLE_NEED_SKILL}"
+                f"SELECT decision FROM {_TABLE_CAPABILITY_AUDIT}"
             ).fetchall()
         return Counter(
             HitDecision(str(row["decision"])) if row["decision"] is not None else None

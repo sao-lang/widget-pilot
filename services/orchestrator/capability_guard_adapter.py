@@ -31,7 +31,7 @@ class ProductionCapabilityGuard:
 
         result = check_capability_request(
             CapabilityRequest(capability_id, level, surface),
-            TurnState(need_skill_count=count, need_skill_tokens=tokens),
+            TurnState(capability_count=count, capability_tokens=tokens),
             frozenset(REGISTRY.keys()),
             token_cost=0,
         )

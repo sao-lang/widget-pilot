@@ -13,7 +13,6 @@ from tests.support import (
     InMemoryAuditStore,
     InMemoryGuardHitStore,
     IntentRouteLogStore,
-    NeedSkillLogStore,
 )
 
 
@@ -31,7 +30,6 @@ def validate_chain(
     stores: dict[str, GuardrailStore] = {
         "hit_store": InMemoryGuardHitStore(),
         "route_log": IntentRouteLogStore(),
-        "need_skill_log": NeedSkillLogStore(),
         "audit_store": InMemoryAuditStore(),
     }
     return _raw_validate_chain(
@@ -104,7 +102,7 @@ def test_spec_missing_awaiting() -> None:
 
 
 def test_events_emitted_on_pass() -> None:
-    """放行产 guard/routing/skill/plan 四类事件，payload 字段完整（§4.2）。"""
+    """放行产 guard/routing/plan 三类事件，payload 字段完整（§4.2）。"""
     events: list[EventPayload] = []
     result = _call(
         "做一个能翻月的日历",
@@ -114,7 +112,8 @@ def test_events_emitted_on_pass() -> None:
     )
     assert result.ok is True
     by_kind = {e.kind: e.payload for e in events}
-    assert {"guard", "routing", "skill", "plan"}.issubset(by_kind)
+    assert {"guard", "routing", "plan"}.issubset(by_kind)
+    assert "skill" not in by_kind  # 技能预取/need_skill 事件已删除（ADR-003）
     # guard payload 有 stage / passed / hits / code
     assert by_kind["guard"]["stage"] == "INPUT"
     assert by_kind["guard"]["passed"] is True
@@ -140,16 +139,12 @@ def test_notice_payload_carries_clarify_hint() -> None:
     assert spec_missing["suggest_grid"]
 
 
-def test_prefetch_fields_are_gone() -> None:
-    """ADR-003：技能预取彻底删除——ValidationResult 无 recipe_ids，skill 事件无预取字段。"""
+def test_prefetch_and_need_skill_events_are_gone() -> None:
+    """ADR-003：预取与 need_skill 彻底删除——无 recipe_ids 字段、无 skill 事件。"""
     events: list[EventPayload] = []
     result = _call(
         "做一个能翻月的日历", grid="4x4", intent="WIDGET_GENERATION", event_sink=events.append
     )
     assert result.ok is True
     assert not hasattr(result, "recipe_ids")
-    skill_events = [e for e in events if e.kind == "skill"]
-    for e in skill_events:
-        payload = cast(JsonObject, e.payload)
-        assert "recipe_ids" not in payload
-        assert "prefetch_hit" not in payload
+    assert not any(e.kind == "skill" for e in events)

@@ -17,7 +17,6 @@ from packages.contracts.enums import GridSpec, ReasonCode
 from services.guardrails.grid_resolver import resolve_grid
 from services.guardrails.input_guard import check_input
 from services.guardrails.intent_cascade import classify_intent
-from services.guardrails.need_skill import check_need_skill
 from services.guardrails.semantic import validate_semantic
 from services.guardrails.types import (
     AttachmentView,
@@ -27,8 +26,6 @@ from services.guardrails.types import (
     GridSource,
     IntentCategory,
     LowTierResult,
-    NeedSkillRequest,
-    TurnState,
     ValidationResult,
 )
 from services.orchestrator.validate_chain import validate_chain as _raw_validate_chain
@@ -37,7 +34,6 @@ from tests.support import (
     InMemoryAuditStore,
     InMemoryGuardHitStore,
     IntentRouteLogStore,
-    NeedSkillLogStore,
 )
 
 
@@ -55,7 +51,6 @@ def validate_chain(
     stores: dict[str, GuardrailStore] = {
         "hit_store": InMemoryGuardHitStore(),
         "route_log": IntentRouteLogStore(),
-        "need_skill_log": NeedSkillLogStore(),
         "audit_store": InMemoryAuditStore(),
     }
     return _raw_validate_chain(
@@ -258,42 +253,6 @@ def test_a9_role_null() -> None:
     assert result.ok is False
 
 
-# ── A13 need_skill ──────────────────────────────────────────────────────────
-def test_a13_need_skill_limits() -> None:
-    """A13：四项上限越界必拒。"""
-    allow = frozenset({"r1"})
-    assert check_need_skill(NeedSkillRequest("r1", 2), TurnState(), allow).ok is False
-    assert check_need_skill(NeedSkillRequest("evil", 1), TurnState(), allow).ok is False
-    assert (
-        check_need_skill(
-            NeedSkillRequest("r1", 1), TurnState(need_skill_count=2), allow
-        ).ok
-        is False
-    )
-    assert (
-        check_need_skill(
-            NeedSkillRequest("r1", 1), TurnState(need_skill_tokens=2000), allow, 1
-        ).ok
-        is False
-    )
-    # 装配层：need_skill 越界必写 NeedSkillLog 且拒绝放行（非仅纯函数）
-    nlog = NeedSkillLogStore()
-    result = validate_chain(
-        "s",
-        "r",
-        "做一个能翻月的日历",
-        "4x4",
-        [],
-        "WIDGET_GENERATION",
-        100.0,
-        need_skill_raw='{"recipe_id":"evil","depth":1}',
-        allowlist=frozenset({"r1"}),
-        need_skill_log=nlog,
-    )
-    assert result.ok is False
-    assert len(nlog.rows) == 1
-
-
 # ── A14 误拦截率 ────────────────────────────────────────────────────────────
 def test_a14_fpr_formula() -> None:
     """A14：FPR 公式口径 = 被拦应放行 / 标注应放行总数。"""
@@ -324,7 +283,7 @@ def test_a16_regression_gate_fires_on_change() -> None:
         rule_count=base.rule_count,
         threshold=base.threshold + 0.1,  # 模拟阈值变更
         conflict_count=base.conflict_count,
-        need_skill_max=base.need_skill_max,
+        capability_max=base.capability_max,
     )
     gate = RegressionGate()
     assert gate.check(base, base) is False  # 无变更 → 不触发

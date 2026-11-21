@@ -13,7 +13,7 @@
     "ts": { "type": "string", "format": "date-time", "description": "UTC 带时区" },
     "kind": {
       "description": "AgentEventKind；未知值容忍（向前兼容）",
-      "enum": ["run", "plan", "spec", "attachment", "skill", "routing", "code", "guard", "validation", "sandbox", "artifact", "cost", "checkpoint", "interrupted", "notice", "error", "done", "ask_user"]
+      "enum": ["run", "plan", "spec", "attachment", "routing", "code", "guard", "validation", "sandbox", "artifact", "cost", "checkpoint", "interrupted", "notice", "error", "done", "ask_user"]
     },
     "phase": {
       "description": "SessionState 权威状态",
@@ -26,7 +26,6 @@
         { "type": "string", "description": "plan：结论式短句（不是思维链）；未收窄 payload 的宽松兜底" },
         { "type": "object", "description": "spec：逐步逼近完整的 WidgetSpec JSON（partial；不携带 reason code）", "properties": { "kind": { "const": "spec" } }, "not": { "required": ["code"] } },
         { "type": "object", "description": "attachment：附件 role 判定", "properties": { "kind": { "const": "attachment" }, "role": { "enum": ["visual_reference", "content_extraction", "data_source", "style_reference"] }, "insight_ref": { "type": "string" } }, "required": ["role"] },
-        { "type": "object", "description": "skill：技能预取归因", "properties": { "kind": { "const": "skill" }, "skill_id": { "type": "string" }, "model_tier": { "enum": ["cheap", "standard", "frontier"] }, "threshold_hit": { "type": "boolean" } }, "required": ["skill_id"] },
         { "type": "object", "description": "routing：代码补丁路由", "properties": { "kind": { "const": "routing" }, "patches": { "type": "array", "items": { "type": "object", "properties": { "from_line": { "type": "integer", "minimum": 0 }, "to_line": { "type": "integer", "minimum": 0 }, "text": { "type": "string" } }, "required": ["from_line", "to_line", "text"] } } }, "required": ["patches"] },
         { "type": "object", "description": "validation：结果校验", "properties": { "kind": { "const": "validation" }, "passed_items": { "type": "array", "items": { "type": "string" } }, "hit_items": { "type": "array", "items": { "type": "string" } }, "reason_code": { "$ref": "#/$defs/reasonCode" } }, "required": ["passed_items"] },
         { "type": "object", "description": "artifact：产物引用", "properties": { "kind": { "const": "artifact" }, "bundle_id": { "type": "string", "minLength": 1 }, "preview_ref": { "type": "string" } }, "required": ["bundle_id"] },

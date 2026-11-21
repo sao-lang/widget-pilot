@@ -1,7 +1,8 @@
-"""校验链装配入口（§4.3 validate_chain）：语义 → 护栏 → 级联 → 预取。
+"""校验链装配入口（§4.3 validate_chain）：语义 → 护栏 → 级联 → 放行。
 
 同步短事务纯判定：命中 / 挂起 / 拒绝即返回，不放行进模型（拒绝类）；
-放行产 ValidationResult 交 M07，并产 guard/routing/skill/plan 事件 payload。
+放行产 ValidationResult 交 M07，并产 guard/routing/plan 事件 payload。
+能力加载（原 need_skill / 预取）已交给 loop 的 LOAD_CAPABILITY，不在本链。
 """
 
 from __future__ import annotations
@@ -21,17 +22,15 @@ from services.guardrails.audit import (
 from services.guardrails.guard_hit import GuardHitStore
 from services.guardrails.input_guard import check_input
 from services.guardrails.intent_cascade import classify_intent, is_out_of_scope
-from services.guardrails.need_skill import check_need_skill, parse_need_skill
 from services.guardrails.ports import (
     Embedder,
     IntentClassifier,
     IntentGateway,
     IntentRouteLogStorePort,
-    NeedSkillLogStorePort,
 )
 from services.guardrails.semantic import validate_semantic
 from services.guardrails.semantic_router import INTENT_SAMPLES_VERSION
-from services.guardrails.telemetry import IntentRouteLogRow, NeedSkillLogRow
+from services.guardrails.telemetry import IntentRouteLogRow
 from services.guardrails.types import (
     AttachmentView,
     BudgetView,
@@ -40,11 +39,9 @@ from services.guardrails.types import (
     GuardHitType,
     InputGuardHit,
     IntentCategory,
-    NeedSkillResult,
     RouteLayer,
     SpecConflict,
     SpecMissing,
-    TurnState,
     ValidationResult,
 )
 
@@ -128,7 +125,6 @@ def validate_chain(
     budget_left: float,
     hit_store: GuardHitStore,
     route_log: IntentRouteLogStorePort,
-    need_skill_log: NeedSkillLogStorePort,
     audit_store: AuditStorePort,
     preferred_grids: list[str] | None = None,
     extracted_texts: list[str] | None = None,
@@ -139,10 +135,6 @@ def validate_chain(
     on_fallback: Callable[[str], None] | None = None,  # 降级告警回调（接 M11）
     clarified_grid: GridSpec | None = None,
     clarification_reply: bool = False,  # R2（v1.8 复审）：澄清重入标记，跳过描述充分性
-    need_skill_raw: str | None = None,
-    allowlist: frozenset[str] = frozenset(),
-    turn_state: TurnState | None = None,
-    token_cost: int = 0,
 ) -> ValidationResult:
     """执行完整校验链，返回放行 / 挂起 / 拒绝结论。
 
@@ -157,17 +149,12 @@ def validate_chain(
         extracted_texts: 附件/检索提取文本（不可信数据扫描）。
         event_sink: 事件 payload 接收回调。
         hit_store: 命中留证存储（生产为 PgGuardHitStore）。
-        route_log / need_skill_log: 日志表存储（生产为 PG）。
-        audit_store: 输入快照审计存储（生产为 PG 适配器）。
+        route_log: 意图路由日志存储（生产为 PG）。
+        audit_store: 输入快照审计存储（生产为 PG 适配器，无内存默认）。
         embedder / classifier: L2/L3 可注入端口（测试计数 / 真实模型）。
         gateway: L4 主 LLM 端口（M07 注入；默认结构化兜底）。
         on_fallback: 降级告警回调（接 M11；默认仅日志）。
         clarified_grid: 用户经 /clarifications 回答后的规格（v1.3 D-6，溯源 clarified）。
-        need_skill_raw: 模型侧 need_skill 结构化请求（可选）。
-        allowlist: need_skill recipe 白名单。
-        turn_state: 单轮 need_skill 计数状态。
-        audit_store: 输入快照审计存储（生产为 PG 适配器，无内存默认）。
-        token_cost: 本次 need_skill 预计 token。
 
     Returns:
         ValidationResult；ok=True 表示放行。
@@ -175,7 +162,6 @@ def validate_chain(
     trace_id = f"{session_id}:{run_id}"
     store = hit_store
     rlog = route_log
-    nlog = need_skill_log
     audit = audit_store
 
     # 输入快照 + 证据引用（§6.1 / §6.5）：只含描述/附件引用/grid，不含原文
@@ -355,63 +341,8 @@ def validate_chain(
     effective_grid = semantic.grid or parsed_grid
     assert effective_grid is not None  # 语义层通过时 grid 必已确定
     widget = _infer_widget(description, effective_grid)
-    # step15 前置解析：need_skill 结构化请求若存在，先解析以便 skill 事件带归因（§4.2）。
-    # need_skill_raw 来自模型侧、属不可信输入：畸形 JSON 必须返回 INPUT_INVALID 拒绝结论，
-    # 不能让异常击穿「同步门禁永远返回 ValidationResult」的契约（review S1）。
-    req = None
-    if need_skill_raw is not None:
-        try:
-            req = parse_need_skill(need_skill_raw)
-        except ValueError:  # JSONDecodeError 是 ValueError 子类
-            return _terminal(ReasonCode.INPUT_INVALID, trace_id, event_sink, ref)
-    _emit(
-        event_sink,
-        "skill",
-        {
-            "need_skill": (
-                {"recipe_id": req.recipe_id, "depth": req.depth}
-                if req is not None
-                else None
-            ),
-        },
-    )
-
-    # step15：need_skill 四项校验（若模型侧发来结构化请求）+ 决策日志
-    turn = turn_state or TurnState()
-    if req is not None:
-        ns: NeedSkillResult = check_need_skill(req, turn, allowlist, token_cost)
-        # 统一记「决策后状态」：通过则 count+1 / tokens+cost，拒绝则维持原值（不消耗配额）
-        logged_count = turn.need_skill_count + 1 if ns.ok else turn.need_skill_count
-        logged_tokens = (
-            turn.need_skill_tokens + token_cost if ns.ok else turn.need_skill_tokens
-        )
-        nlog.append(
-            NeedSkillLogRow(
-                session_id,
-                run_id,
-                req.recipe_id,
-                req.depth,
-                logged_count,
-                logged_tokens,
-                ns.decision,
-                ns.reason,
-                trace_id,
-                capability_id=req.recipe_id,  # ADR-003：统一能力句柄
-                level=2,  # need_skill 请求即 L2 正文加载
-            )
-        )
-        if not ns.ok:
-            # need_skill 越权/超限是模型侧契约违规，用户不可补救——同 M1 用拒绝码
-            # CONTRACT_MISMATCH，避免 dispatcher 误挂起成 AWAITING_INPUT 死等。
-            return ValidationResult(
-                ok=False,
-                reason_code=ReasonCode.CONTRACT_MISMATCH,
-                trace_id=trace_id,
-                evidence_ref=ref,
-            )
-        turn.need_skill_count += 1
-        turn.need_skill_tokens += token_cost
-
+    # ADR-003：need_skill 请求链已删除——模型经 LOAD_CAPABILITY 按需加载，
+    # 五项闸门在 loop 内执行（capability_guard_adapter），审计写 capability_audit_log。
     effective_tier = decision.model_tier or ModelTier.STANDARD
     _emit(
         event_sink,

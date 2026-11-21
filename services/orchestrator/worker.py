@@ -104,7 +104,7 @@ async def main() -> None:
     # A1（v1.8）：把 M06 校验链接进生产编排入口（run() 前过护栏）。
     # L2/L3/L4 真实模型端口不注入（M20/M07 提供，属排除项），走默认结构化兜底。
     attachment_store = PgAttachmentStore(dsn)
-    # A3（v1.8）：传 dsn 注入三表 PG 留证（guard_hit + IntentRouteLog/NeedSkillLog）；
+    # A3（v1.8）：传 dsn 注入 PG 留证（guard_hit + IntentRouteLog；能力审计走 loop 内适配器）；
     # guard_hit PG 不可用时保守拒绝放行。表由迁移 0005/0007 建立（0009 删技能预取表）。
     validator = build_validator(attachment_store.get, redis_url, dsn=dsn)
     dispatcher = Dispatcher(

@@ -113,3 +113,14 @@
 - 文档：ADR-003 §13.1 记录决策、FR-7/§8.2/X6/§11.5 更新；M06 代码地图校准（删 skill_router 行、prefetch 主线、行数 2178/460/19 文件）；M06/M07/M04/M02 模块文档加 ADR-003 覆盖声明；M10 的 ConfigSnapshot 四字段口径；设计方案.md 用户旅程。
 - 独立复审（全新上下文）：Blocker 清零可合入；Should（0009 downgrade 缺 capability_kind/索引）已修；Nit（M10/M02 文档残留）已修。
 - 终验：pytest 387 passed / 49 skipped（Docker 未起）/ pyright 0 / ruff 全绿 / contracts drift=[]。
+
+### 1821 续：need_skill 旧设计整套删除与能力审计归一
+
+- 用户问"怎么还有 need_skill"→ 核实：need_skill_raw 生产唯一调用点（guardrail_adapter）从未传过，模型输出零 need_skill 字段，整条链生产永不执行（单测续命）；但审计表/计数器还顶旧名。用户拍板 A 全删+改名归一 + 同步改写历史迁移。
+- 删除：need_skill.py、NeedSkillRequest/Result、validate_chain 的 need_skill_raw/allowlist/turn_state/token_cost 入参与 step15、skill 事件（events.schema kind enum+oneOf、AgentEventKind.SKILL、契约重生成）、相关测试（A13 上限/畸形 JSON/skill 事件断言）。
+- 归一：need_skill_log→capability_audit_log（0005 同步改写，recipe_id/depth→capability_id/level 一步到位）、0008 no-op 占位、NeedSkillLogRow→CapabilityAuditLogRow、Store/Port 同步、need_skill_count/tokens→capability_count/tokens、MAX_NEED_SKILL_*→MAX_CAPABILITY_*、need_skill_max→capability_max。
+- 前提：用户选"同步改写历史迁移"，已应用旧版本环境需重建库（本阶段无生产数据，Q3 决策）。
+- 独立复审：Blocker 清零可合入；Nit（guardrail_adapter 注释仍提 skill 事件）已修。
+- 终验：pytest 382 passed / 49 skipped / pyright 0 / ruff 全绿 / contracts drift=[]。
+- 文档：ADR-003 §13.2、M06 代码地图（行数 2076/391、测试 23/14/13/4/1/6、8 步主线）、M02/M04/M06/M07 覆盖声明追加。
+- **保留**：kind="skill" 的 Capability 族是 ADR-003 新设计，不在删除范围。

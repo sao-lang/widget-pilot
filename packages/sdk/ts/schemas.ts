@@ -6,7 +6,7 @@ const AgentEvent = z.object({
   "sessionId": z.string().min(1),
   "runId": z.string().min(1),
   "ts": z.string().datetime({ offset: true }),
-  "kind": z.enum(["run","plan","spec","attachment","skill","routing","code","guard","validation","sandbox","artifact","cost","checkpoint","interrupted","notice","error","done","ask_user"]),
+  "kind": z.enum(["run","plan","spec","attachment","routing","code","guard","validation","sandbox","artifact","cost","checkpoint","interrupted","notice","error","done","ask_user"]),
   "phase": z.enum(["DRAFT","RUNNING","PAUSED","AWAITING_INPUT","VALIDATING","COMPLETED","FAILED","CANCELLED"]),
   "payload": z.unknown(),
   "traceId": z.string().min(1),

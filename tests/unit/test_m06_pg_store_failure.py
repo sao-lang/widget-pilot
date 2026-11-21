@@ -10,7 +10,7 @@ import psycopg
 import pytest
 
 from services.guardrails import pg_stores
-from services.guardrails.telemetry import IntentRouteLogRow, NeedSkillLogRow
+from services.guardrails.telemetry import CapabilityAuditLogRow, IntentRouteLogRow
 from services.guardrails.types import HitDecision, RouteLayer
 
 
@@ -41,11 +41,11 @@ class TestAppendFailureIsolated:
             )
         )  # 不抛即通过
 
-    def test_need_skill_append_isolated(self, broken_pg: None) -> None:
-        """NeedSkillLogStore.append 吞 psycopg.Error。"""
-        store = pg_stores.PgNeedSkillLogStore("postgresql://x")
+    def test_capability_audit_append_isolated(self, broken_pg: None) -> None:
+        """能力审计 Store.append 吞 psycopg.Error。"""
+        store = pg_stores.PgCapabilityAuditLogStore("postgresql://x")
         store.append(
-            NeedSkillLogRow(
+            CapabilityAuditLogRow(
                 "s", "r", "recipe", 1, 1, 10, HitDecision.REJECT, "limit", "t"
             )
         )

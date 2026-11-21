@@ -7,7 +7,7 @@ Create Date: 2026-11-21
 技能预取（(widget_type,grid) 静态映射 → recipe_ids）在 ADR-003 后已无消费者：
 规程正文由模型经 LOAD_CAPABILITY 从 L0 目录按需加载，预取结果不再下发。
 本迁移 drop 迁移 0005 建立、0008 扩列过的 skill_prefetch_log 表，幂等。
-need_skill_log 保留（能力请求的审计写入方仍在用）。
+capability_audit_log（原 need_skill_log，0005 已一步到位改名）保留：能力请求审计写入方仍在用。
 """
 from __future__ import annotations
 
@@ -44,7 +44,6 @@ def downgrade() -> None:
         sa.Column("reason", sa.Text(), nullable=True),
         sa.Column("trace_id", sa.Text(), nullable=False, server_default=""),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-        sa.Column("capability_kind", sa.Text(), nullable=True),  # 0008 加的列，回滚时一并恢复
     )
     op.create_index(f"ix_{_TABLE_SKILL_PREFETCH}_session_id", _TABLE_SKILL_PREFETCH, ["session_id"])
     op.create_index(f"ix_{_TABLE_SKILL_PREFETCH}_created_at", _TABLE_SKILL_PREFETCH, ["created_at"])

@@ -13,7 +13,6 @@ from tests.support import (
     InMemoryAuditStore,
     InMemoryGuardHitStore,
     IntentRouteLogStore,
-    NeedSkillLogStore,
 )
 
 
@@ -31,7 +30,6 @@ def validate_chain(
     stores: dict[str, GuardrailStore] = {
         "hit_store": InMemoryGuardHitStore(),
         "route_log": IntentRouteLogStore(),
-        "need_skill_log": NeedSkillLogStore(),
         "audit_store": InMemoryAuditStore(),
     }
     return _raw_validate_chain(
@@ -125,26 +123,6 @@ def test_guard_code_distinguishes_hit_type() -> None:
     assert guard.payload["code"] == "INTENT_OUT_OF_SCOPE"
 
 
-def test_skill_event_carries_need_skill() -> None:
-    """§4.2：skill 事件带 need_skill { recipe_id, depth }。"""
-    events: list[EventPayload] = []
-    result = validate_chain(
-        "s",
-        "r",
-        "做一个能翻月的日历",
-        "4x4",
-        [],
-        "WIDGET_GENERATION",
-        100.0,
-        need_skill_raw='{"recipe_id":"r1","depth":1}',
-        allowlist=frozenset({"r1"}),
-        event_sink=events.append,
-    )
-    assert result.ok is True
-    skill = next(e for e in events if e.kind == "skill")
-    assert skill.payload["need_skill"] == {"recipe_id": "r1", "depth": 1}
-
-
 # ── §6.1 审计快照 + evidenceRef ─────────────────────────────────────────────
 
 
@@ -208,23 +186,6 @@ def test_suggest_grid_filters_wide_table_conflict() -> None:
 
 
 # ── review 修复回归 ─────────────────────────────────────────────────────────
-
-
-def test_malformed_need_skill_returns_input_invalid() -> None:
-    """S1：畸形 need_skill JSON 不得击穿门禁，返回 INPUT_INVALID 拒绝结论。"""
-    result = validate_chain(
-        "s",
-        "r",
-        "做一个能翻月的日历",
-        "4x4",
-        [],
-        "WIDGET_GENERATION",
-        100.0,
-        need_skill_raw="{bad json",
-    )
-    assert result.ok is False
-    assert result.reason_code is ReasonCode.INPUT_INVALID
-
 
 def test_s2_pii_adjacent_to_chinese_detected() -> None:
     """S2：手机号/身份证紧邻中文时不被 \\b 漏检。"""

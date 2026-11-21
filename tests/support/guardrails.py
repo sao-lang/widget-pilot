@@ -17,7 +17,7 @@ from packages.contracts.types import TaskFields
 from services.guardrails.audit import AuditEvent
 from services.guardrails.change_gate import ConfigSnapshot, diff_config
 from services.guardrails.guard_hit import GuardHitRow
-from services.guardrails.telemetry import IntentRouteLogRow, NeedSkillLogRow
+from services.guardrails.telemetry import CapabilityAuditLogRow, IntentRouteLogRow
 from services.guardrails.types import (
     GuardHitType,
     HitDecision,
@@ -28,6 +28,8 @@ from services.guardrails.types import (
 
 __all__ = [
     "AuditEvent",
+    "CapabilityAuditLogRow",
+    "CapabilityAuditLogStore",
     "GuardHitRow",
     "GuardHitType",
     "GuardrailStore",
@@ -37,8 +39,6 @@ __all__ = [
     "InputGuardHit",
     "IntentRouteLogRow",
     "IntentRouteLogStore",
-    "NeedSkillLogRow",
-    "NeedSkillLogStore",
     "RegressionGate",
     "RouteLayer",
     "false_positive_rate",
@@ -52,7 +52,7 @@ type GuardrailStore = (
     InMemoryAuditStore
     | InMemoryGuardHitStore
     | IntentRouteLogStore
-    | NeedSkillLogStore
+    | CapabilityAuditLogStore
 )
 
 
@@ -219,16 +219,16 @@ class IntentRouteLogStore:
 
 
 @dataclass(slots=True)
-class NeedSkillLogStore:
-    """NeedSkillLog 只追加存储。
+class CapabilityAuditLogStore:
+    """能力请求审计只追加存储。
 
     Attributes:
         rows: 决策记录，按追加顺序排列。
     """
 
-    rows: list[NeedSkillLogRow] = field(default_factory=list)
+    rows: list[CapabilityAuditLogRow] = field(default_factory=list)
 
-    def append(self, row: NeedSkillLogRow) -> None:
+    def append(self, row: CapabilityAuditLogRow) -> None:
         """追加一条决策记录。"""
         self.rows.append(row)
 

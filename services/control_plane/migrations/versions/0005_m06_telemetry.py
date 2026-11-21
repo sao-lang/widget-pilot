@@ -1,4 +1,4 @@
-"""M06 只追加日志三表：intent_route_log / skill_prefetch_log / need_skill_log。
+"""M06 只追加日志表：intent_route_log / capability_audit_log（+ 历史 skill_prefetch_log）。
 
 Revision ID: 0005_m06_telemetry
 Revises: 0004_m05_idem_unique
@@ -7,6 +7,11 @@ Create Date: 2026-11-21
 迁移只加表，不改动/删除既有表。字段逐项对齐 M06 telemetry.py 的 Row dataclass，
 session_id 为归属键（与 M04/M05 一致建索引），created_at 供时序检索。
 upgrade 以 has_table 守卫，重复执行安全（幂等）。
+
+历史：本迁移原建 need_skill_log（旧 need_skill 口径）；ADR-003 后按用户决策
+"同步改写历史迁移"改为 capability_audit_log，列一步到位用 capability_id/level。
+skill_prefetch_log 由本迁移建、0009 drop（保留建表使迁移链完整可回放）。
+已应用过旧版本的环境需重建库——本阶段无生产数据（ADR-003 Q3 决策）。
 """
 
 from __future__ import annotations
@@ -23,7 +28,7 @@ depends_on = None
 
 _TABLE_INTENT_ROUTE: Final[str] = "intent_route_log"
 _TABLE_SKILL_PREFETCH: Final[str] = "skill_prefetch_log"
-_TABLE_NEED_SKILL: Final[str] = "need_skill_log"
+_TABLE_CAPABILITY_AUDIT: Final[str] = "capability_audit_log"
 
 
 def upgrade() -> None:
@@ -87,14 +92,14 @@ def upgrade() -> None:
             ["created_at"],
         )
 
-    if not inspector.has_table(_TABLE_NEED_SKILL):
+    if not inspector.has_table(_TABLE_CAPABILITY_AUDIT):
         op.create_table(
-            _TABLE_NEED_SKILL,
+            _TABLE_CAPABILITY_AUDIT,
             sa.Column("id", sa.BigInteger(), primary_key=True, autoincrement=True),
             sa.Column("session_id", sa.Text(), nullable=False),
             sa.Column("run_id", sa.Text(), nullable=False),
-            sa.Column("recipe_id", sa.Text(), nullable=False),
-            sa.Column("depth", sa.Integer(), nullable=False),
+            sa.Column("capability_id", sa.Text(), nullable=False),
+            sa.Column("level", sa.Integer(), nullable=False),
             sa.Column("turn_count", sa.Integer(), nullable=False),
             sa.Column("tokens", sa.Integer(), nullable=False),
             sa.Column("decision", sa.Text(), nullable=True),
@@ -108,16 +113,16 @@ def upgrade() -> None:
             ),
         )
         op.create_index(
-            f"ix_{_TABLE_NEED_SKILL}_session_id", _TABLE_NEED_SKILL, ["session_id"]
+            f"ix_{_TABLE_CAPABILITY_AUDIT}_session_id", _TABLE_CAPABILITY_AUDIT, ["session_id"]
         )
         op.create_index(
-            f"ix_{_TABLE_NEED_SKILL}_created_at", _TABLE_NEED_SKILL, ["created_at"]
+            f"ix_{_TABLE_CAPABILITY_AUDIT}_created_at", _TABLE_CAPABILITY_AUDIT, ["created_at"]
         )
 
 
 def downgrade() -> None:
     """回滚：删三张日志表（仅本迁移新增的表，不触碰既有表）。"""
     inspector = sa.inspect(op.get_bind())
-    for table in (_TABLE_INTENT_ROUTE, _TABLE_SKILL_PREFETCH, _TABLE_NEED_SKILL):
+    for table in (_TABLE_INTENT_ROUTE, _TABLE_SKILL_PREFETCH, _TABLE_CAPABILITY_AUDIT):
         if inspector.has_table(table):
             op.drop_table(table)
