@@ -203,3 +203,4 @@
 - 文档：新增 ADR-005；同步 ADR-004（hint 段与状态）、设计方案 v2.0、M06 权威文档/指南/缺口表、M4-M6 速查表、00 总览 ADR 索引、change-contract 合并契约。
 - 下一步：派全新上下文子代理独立复审 → fix loop → review_gate → 收尾。
 - 更正（复审 N5）：本会话 L0 中「intent_hints.py（新增）」是 ADR-004 阶段历史；ADR-005 已删除该模块与 `_HINT_PATTERNS`，`widget_type` 恒 `custom`。注入规则实际 **8 条**（3 原有 + 5 新增），此前「9 条」为笔误，已全文更正。
+- 版本动作：2026-11-22 提交 `3cb96a9 feat(m06): 意图级联去类型化并强化进护栏检测`（37 files，+1314/-127），Hooks 通过；待 push。
