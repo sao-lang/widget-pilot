@@ -57,7 +57,7 @@ def test_T15_reason_code_count():
 
 
 def test_T15_partition_exhaustive_and_disjoint():
-    assert assert_partition(None) is True
+    assert assert_partition() is True
     all_codes = {c.value for c in ReasonCode}
     assert (BUSINESS_FAILURE | INFRA_FAILURE) == all_codes
     assert (BUSINESS_FAILURE & INFRA_FAILURE) == set()

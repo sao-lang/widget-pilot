@@ -201,9 +201,13 @@ class TestA1DispatcherWiring:
         captured: list[str] = []
 
         def fake_run(
-            session_id: str, run_id: str, inp: Input | str, deps: Deps
+            session_id: str,
+            run_id: str,
+            inp: Input | str,
+            deps: Deps,
+            cost_sink: object = None,
         ) -> State:
-            """捕获 run() 收到的 Input.text。"""
+            """捕获 run() 收到的 Input.text（cost_sink 为 v1.6 新增注入点）。"""
             captured.append(str(getattr(inp, "text", "")))
             return State.initial(session_id, run_id, "", grid="4x4")
 

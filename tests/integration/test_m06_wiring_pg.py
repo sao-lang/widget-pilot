@@ -191,6 +191,7 @@ def test_pg_stores_injected_and_written() -> None:
         "做一个 4x4 日历控件",
         {
             "session_id": "s-pg",
+            "user_id": "u-pg-test",
             "run_id": "r-pg",
             "description": "做一个 4x4 日历控件",
             "grid": "4x4",
@@ -288,6 +289,7 @@ def test_clarification_loop_terminates_on_grid_answer() -> None:
         "做一个能翻月的日历",
         {
             "session_id": "s-clarify",
+            "user_id": "u-pg-test",
             "run_id": "r-clarify",
             "description": "做一个能翻月的日历",
             "grid": None,
@@ -304,6 +306,7 @@ def test_clarification_loop_terminates_on_grid_answer() -> None:
         "4x4",
         {
             "session_id": "s-clarify",
+            "user_id": "u-pg-test",
             "run_id": "r-clarify-2",
             "description": "4x4",
             "grid": "4x4",
@@ -321,6 +324,7 @@ def test_clarification_loop_terminates_on_grid_answer() -> None:
         "四行四列",
         {
             "session_id": "s-clarify",
+            "user_id": "u-pg-test",
             "run_id": "r-clarify-3",
             "description": "四行四列",
             "grid": "4x4",  # server resolve_grid(None, "四行四列") → 4x4
@@ -345,6 +349,7 @@ def test_invalid_grid_is_deterministic_reject_not_exception() -> None:
         "做一个日历",
         {
             "session_id": "s-bad-grid",
+            "user_id": "u-pg-test",
             "run_id": "r-bad-grid",
             "description": "做一个日历",
             "grid": "9x9",  # 非法枚举

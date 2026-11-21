@@ -32,10 +32,10 @@ class CheckpointRow(TypedDict):
     """链上前一行 hash（首行为空串）。"""
 
 
-# 注：extra 属性（objects/states/rows）在内存替身上存在，生产实现可能不同；
+# 注：extra 属性（objects/states/rows）在测试替身上存在，生产实现可能不同；
 # 用 Protocol 组合声明后经 cast 访问，hasattr 守卫保持原行为不变。
 class CheckpointStoreExtras(CheckpointStore, Protocol):
-    """带内存替身便利属性的 checkpoint 存储（§4.3 注入接口之外的测试便利）。"""
+    """带测试替身便利属性的 checkpoint 存储（§4.3 注入接口之外的测试便利）。"""
 
     objects: ObjectStore
     """对象存储（放状态大对象）。"""
@@ -65,7 +65,7 @@ def save_checkpoint(store: CheckpointStore, state: State, node: CheckpointNode) 
     extras = cast(CheckpointStoreExtras, store)
     ref = extras.objects.put(f"checkpoint/{state.run_id}/{state.rev}.json", data)
     store.save(state.run_id, state.rev, node, ref, row_hash)
-    # 便捷缓存（内存替身需要；生产 CheckpointStore.load 从 state_ref 反序列化）
+    # 便捷缓存（测试替身需要；生产 CheckpointStore.load 从 state_ref 反序列化）
     if hasattr(store, "states"):
         extras.states[state.run_id] = state
     return row_hash

@@ -38,3 +38,5 @@ class TaskFields(TypedDict):
     attachment_ids: list[str]
     clarified_grid: str | None
     clarification_reply: str
+    user_id: str
+    """会话 owner（M07 B1：偏好读取的租户隔离键）。"""

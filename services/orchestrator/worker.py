@@ -14,11 +14,13 @@ import asyncio
 import json
 import os
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import select
 
+from packages.agent_core.types import Input, State
 from services.control_plane.db import make_session_factory, session_scope
 from services.control_plane.models import Checkpoint
 from services.control_plane.sessions.pg_stores import PgSessionStore
@@ -96,19 +98,83 @@ async def main() -> None:
     from services.control_plane.audit.pg_ledger import PgAuditLedger
     from services.control_plane.sessions.pg_stores import PgSessionStore
     from services.control_plane.sessions.service import SessionService
+    from services.orchestrator.cost.meter_adapter import accrue
+    from services.orchestrator.cost.pg_ledger import PgCostLedger
+    from services.orchestrator.cost.ports import CostEntryMeta
     from services.orchestrator.guardrail_adapter import build_validator
+    from services.orchestrator.memory.adapters import (
+        PreferenceInjectionAdapter,
+        ProcedureHintAdapter,
+        high_confidence_grids,
+    )
+    from services.orchestrator.memory.pg_stores import (
+        PgPreferenceStore,
+        PgProcedureStore,
+    )
+    from services.orchestrator.memory.repro import ReproInputs
 
-    deps = build_deps(dsn, redis_url, owner=owner)  # 缺模型配置 → fail-fast
     queue = RedisTaskQueue(redis_url, TASK_QUEUE_KEY, consumer=owner)
     sessions = SessionService(PgSessionStore(dsn), audit=PgAuditLedger(dsn))
     # A1（v1.8）：把 M06 校验链接进生产编排入口（run() 前过护栏）。
     # L2/L3/L4 真实模型端口不注入（M20/M07 提供，属排除项），走默认结构化兜底。
     attachment_store = PgAttachmentStore(dsn)
+    # B1/B6（v1.6）：注入 M07 偏好/程序记忆 Store（真实 PG），
+    # 使 D-12「记忆读了就用」与 D-14 采纳软提示在生产生效。
+    preference_store = PgPreferenceStore(dsn)
+    procedure_store = PgProcedureStore(dsn)
+    preference_port = PreferenceInjectionAdapter(preference_store)
+    procedure_port = ProcedureHintAdapter(procedure_store)
+
+    def _preferred_grids_get(user_id: str) -> list[str]:
+        """按 user_id 读高置信 preferred_grids（B1，偏好是建议非门禁）。"""
+        return high_confidence_grids(preference_store.get(user_id))
+
+    def _enrich_input(run_input: Input) -> Input:
+        """把真实记忆端口注入 run 入参（v1.6；检索/附件端口待 M10/M05 落地）。
+
+        Raises:
+            RuntimeError: 生产关键端口（偏好/程序记忆）缺失——禁静默降级为空槽。
+        """
+        if preference_port is None or procedure_port is None:
+            raise RuntimeError("M07 生产装配缺少关键记忆端口（Preference/Procedure）")
+        return replace(
+            run_input,
+            preference_port=preference_port,
+            procedure_port=procedure_port,
+        )
+
+    # B7：真实 PG 成本账本 + 终态落账回调（repro 指纹含真实 preference_version）。
+    # 账本只从 deps.cost_ledger 取（单一事实源，不留闭包旁路端口）。
+    deps = build_deps(
+        dsn, redis_url, owner=owner, cost_ledger=PgCostLedger(dsn)
+    )  # 缺模型配置 → fail-fast
+    if deps.cost_ledger is None:
+        raise RuntimeError("cost_ledger 注入失败：build_deps 未挂载成本账本")
+    cost_ledger = deps.cost_ledger  # 闭包内局部收窄（Python 闭包不保留外部 guard 收窄）
+
+    def _cost_sink(state: State) -> None:
+        """终态落成本账（B7）：user_id 与 preference_version 从真实会话/偏好读。"""
+        row = sessions.get(state.session_id)
+        pref_version = preference_store.get(row.user_id).version
+        accrue(
+            state,
+            deps,
+            cost_ledger,
+            CostEntryMeta(
+                user_id=row.user_id,
+                repro_inputs=ReproInputs(preference_version=pref_version),
+            ),
+        )
+
     # A3（v1.8）：传 dsn 注入 PG 留证（guard_hit + IntentRouteLog；能力审计走 loop 内适配器）；
     # guard_hit PG 不可用时保守拒绝放行。表由迁移 0005/0007 建立（0009 删技能预取表）。
-    validator = build_validator(attachment_store.get, redis_url, dsn=dsn)
+    validator = build_validator(
+        attachment_store.get, redis_url, dsn=dsn,
+        preferred_grids_get=_preferred_grids_get,
+    )
     dispatcher = Dispatcher(
-        queue=queue, deps=deps, sessions=sessions, validator=validator
+        queue=queue, deps=deps, sessions=sessions, validator=validator,
+        input_enricher=_enrich_input, cost_sink=_cost_sink,
     )
 
     print(

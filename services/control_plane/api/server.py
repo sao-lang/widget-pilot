@@ -8,11 +8,17 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable, Iterator
-from typing import TYPE_CHECKING, Any, cast
+from typing import (  # purity-exempt: FastAPI 路由返回 JSONResponse/信封双形态的框架边界
+    TYPE_CHECKING,
+    Any,  # purity-exempt: FastAPI 路由双形态返回值的框架边界（同文件内三处已登记）
+    cast,
+)
 from uuid import uuid4
 
 from fastapi import (
+    Body,
     Depends,
     FastAPI,
     File,
@@ -26,7 +32,7 @@ from fastapi import (
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from packages.contracts.enums import SessionState
+from packages.contracts.enums import ReasonCode, SessionState
 from packages.contracts.types import ApiEnvelope, JsonObject, JsonValue
 from services.control_plane.accounts.service import (
     AuthError,
@@ -45,6 +51,8 @@ from services.control_plane.sessions.service import (
 from services.control_plane.sessions.sse import EventWindow
 from services.control_plane.sessions.stores import SessionRow, SessionStore
 from services.guardrails.grid_resolver import resolve_grid
+from services.orchestrator.memory.ports import PreferenceStorePort
+from services.orchestrator.memory.types import PreferenceField, PreferenceSource
 
 if TYPE_CHECKING:
     # task_enqueuer 的生产实现是 RedisTaskQueue.enqueue(task: Task) -> str；
@@ -52,6 +60,9 @@ if TYPE_CHECKING:
     from services.orchestrator.dispatcher import Task
 
 # 业务码常量（编码规则 5：语义字符串具名）
+logger = logging.getLogger(__name__)
+"""control-plane API 日志器（偏好学习等非门禁路径失败告警用）。"""
+
 _CODE_OK: str = "OK"
 _CODE_INPUT_INVALID: str = "INPUT_INVALID"
 _CODE_FORBIDDEN: str = "FORBIDDEN"
@@ -62,6 +73,8 @@ _AUTH_SCHEME: str = "Bearer"
 _FILE_ARG = File(...)
 _SESSION_FORM = Form(...)
 _DESCRIPTION_FORM = Form(..., min_length=1)
+# B008 规避：DELETE preferences 的可选 body 单例化（编码规则）
+_OPTIONAL_BODY = Body(default=None)
 
 
 class RegisterReq(BaseModel):
@@ -132,6 +145,29 @@ class PatchRolesReq(BaseModel):
     roles: list[PatchRoleItem]
 
 
+class PutPreferencesReq(BaseModel):
+    """显式写入偏好请求体（ADR-002 D-10；只含白名单字段）。
+
+    每字段可为标量或短字符串列表；Pydantic 拒绝未知字段（防学进 PII / 历史代码）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    palette: str | None = None
+    """配色偏好（短字符串）。"""
+    preferred_grids: list[str] | None = None
+    """常用规格列表。"""
+    preferred_widget_types: list[str] | None = None
+    """常用控件类型列表。"""
+
+
+class DeletePreferencesReq(BaseModel):
+    """清除偏好请求体（ADR-002 D-13；fields 为空则全清）。"""
+
+    model_config = ConfigDict(extra="forbid")
+    fields: list[str] | None = None
+    """待清除字段名；省略或空表示全字段清除。"""
+
+
 def _m05_ok(data: JsonValue, evidence_ref: str = "") -> ApiEnvelope:
     """M05 成功响应（openapi ApiResponse 完整字段，S-1/N5）。"""
     return {
@@ -169,6 +205,7 @@ def create_app(
     attachment_service: AttachmentServicePort | None,
     audit: AuditLedgerPort,
     task_enqueuer: Callable[[Task], str],
+    preference_store: PreferenceStorePort | None = None,
 ) -> FastAPI:
     """构造 M04 API app（所有真实依赖必须显式注入，源码不保留测试桩）。
 
@@ -180,6 +217,7 @@ def create_app(
         attachment_service: M05 附件服务；None 时不挂载附件路由（部署形态，非兼容桩）。
         audit: 审计账本（生产为 PgAuditLedger）。
         task_enqueuer: 任务入队回调（生产为 RedisTaskQueue.enqueue）。
+        preference_store: M07 偏好存储；None 时不挂载偏好路由（部署形态，非兼容桩）。
     """
     app = FastAPI(title="WidgetPilot control-plane M04", docs_url=None, redoc_url=None)
     auth = AuthService(user_store, jwt_secret)
@@ -363,6 +401,19 @@ def create_app(
                 "clarification_reply": "1",
             }
         )
+        # M07 D-10 第 2 类信号：澄清点选的 grid 写偏好（clarification=0.8，零 LLM）。
+        # 偏好是建议不是门禁：学习失败只丢证据，不影响澄清主流程。
+        if preference_store is not None and clarified:
+            from services.orchestrator.memory.preference_learning import (
+                learn_from_clarification,
+            )
+
+            try:
+                learn_from_clarification(
+                    preference_store, user.id, session_id, clarified, uuid4().hex
+                )
+            except Exception:  # noqa: BLE001 - 偏好学习失败只丢证据，不阻断澄清
+                logger.warning("clarification preference learning failed; continue")
         return _ok({"state": row.state.value})
 
     @app.post("/api/sessions/{session_id}/interrupt")
@@ -406,7 +457,7 @@ def create_app(
     def stream_events(
         session_id: str,
         user: UserRow = CurrentUser,
-        run_id: str | None = Query(default=None, alias="runId"),
+        run_id: str | None = Query(default=None, alias="runId"),  # purity-exempt: SSE 查询参数契约名，不可改
         last_event_id: int | None = Header(default=None, alias="Last-Event-ID"),
     ) -> StreamingResponse:
         """SSE 事件流（§4.1 L359）：先租户校验，按 Last-Event-ID 续传存量事件。
@@ -450,7 +501,7 @@ def create_app(
             session_id: str = _SESSION_FORM,
             description: str = _DESCRIPTION_FORM,
             user: UserRow = CurrentUser,
-        ) -> Any:
+        ) -> Any:  # purity-exempt: FastAPI 返回 JSONResponse/信封双形态，response_model 拒绝联合注解
             """附件上传：流式限量读取 + 传输层校验 + 存储 + role 判定。"""
             from services.control_plane.attachments.constants import (
                 MAX_ATTACHMENT_BYTES,
@@ -541,7 +592,7 @@ def create_app(
         @app.patch("/api/sessions/{session_id}/attachment-roles")
         def patch_attachment_roles(
             session_id: str, req: PatchRolesReq, user: UserRow = CurrentUser
-        ) -> Any:
+        ) -> Any:  # purity-exempt: FastAPI 返回 JSONResponse/信封双形态，response_model 拒绝联合注解
             """role 纠偏 + 从该步重跑（§4.1 / S3 双入口态）。"""
             updated: list[JsonObject] = []
             for item in req.roles:
@@ -576,7 +627,7 @@ def create_app(
         @app.get("/api/sessions/{session_id}/attachments")
         def list_attachments(
             session_id: str, user: UserRow = CurrentUser
-        ) -> Any:
+        ) -> Any:  # purity-exempt: FastAPI 返回 JSONResponse/信封双形态，response_model 拒绝联合注解
             """列出会话附件（§4.1 / A12：越权 403，不泄漏是否存在）。"""
             try:
                 rows = attachment_service.attachments.list_by_session(
@@ -616,6 +667,81 @@ def create_app(
                     ]
                 }
             )
+
+    # ---------- M07 用户偏好（本人读写清除，ADR-002 D-9~D-14）----------
+    # None 时不挂载（部署形态，非兼容桩）：偏好端点依赖真实 PG Store 注入。
+    if preference_store is not None:
+
+        @app.get("/api/users/me/preferences")
+        def get_preferences(user: UserRow = CurrentUser) -> ApiEnvelope:
+            """读取本人偏好（每字段带 source/weight/evidence_count/version）。"""
+            pref = preference_store.get(user.id)
+            return _ok(
+                {
+                    "user_id": pref.user_id,
+                    "version": pref.version,
+                    "fields": {
+                        name.value: {
+                            "value": ev.value,
+                            "source": ev.source.value,
+                            "weight": ev.weight,
+                            "evidence_count": ev.evidence_count,
+                            "updated_at": ev.updated_at,
+                        }
+                        for name, ev in pref.fields.items()
+                    },
+                }
+            )
+
+        @app.put("/api/users/me/preferences")
+        def put_preferences(
+            req: PutPreferencesReq, user: UserRow = CurrentUser
+        ) -> ApiEnvelope:
+            """显式写入偏好（explicit=1.0，四操作写入时裁定）。"""
+            # 请求字段 → 白名单字段枚举：未知字段已被 Pydantic extra=forbid 拒绝。
+            candidates: list[tuple[PreferenceField, JsonValue]] = []
+            if req.palette is not None:
+                candidates.append((PreferenceField.PALETTE, req.palette))
+            if req.preferred_grids is not None:
+                candidates.append(
+                    (PreferenceField.PREFERRED_GRIDS, cast(JsonValue, req.preferred_grids))
+                )
+            if req.preferred_widget_types is not None:
+                candidates.append(
+                    (
+                        PreferenceField.PREFERRED_WIDGET_TYPES,
+                        cast(JsonValue, req.preferred_widget_types),
+                    )
+                )
+            trace_id = uuid4().hex
+            pref = preference_store.get(user.id)
+            for field_name, value in candidates:
+                pref, _event = preference_store.apply(
+                    user.id, None, field_name, value,
+                    PreferenceSource.EXPLICIT, trace_id,
+                )
+            return _ok({"user_id": pref.user_id, "version": pref.version})
+
+        @app.delete("/api/users/me/preferences")
+        def delete_preferences(
+            req: DeletePreferencesReq | None = _OPTIONAL_BODY,
+            user: UserRow = CurrentUser,
+        ) -> ApiEnvelope:
+            """清除偏好（失效不删行，事件保留 revoked_at；version+1）。"""
+            raw_fields = req.fields if req and req.fields else None
+            try:
+                fields = (
+                    [PreferenceField(f) for f in raw_fields] if raw_fields else None
+                )
+            except ValueError as exc:
+                # ADR-002：偏好错误复用 INPUT_INVALID（不新增 ReasonCode）；
+                # 非法字段名须 400 而非 500（避免泄漏内部实现）。
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST, ReasonCode.INPUT_INVALID.value
+                ) from exc
+            trace_id = uuid4().hex
+            pref = preference_store.clear(user.id, fields, trace_id)
+            return _ok({"user_id": pref.user_id, "version": pref.version})
 
     # 测试钩子：把会话置为 AWAITING_INPUT（生产由 M06 语义层触发，此处仅供接线测试）
     return app

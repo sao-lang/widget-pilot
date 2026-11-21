@@ -100,6 +100,17 @@ def _task_str(value: TaskValue) -> str:
     return str(value) if value is not None else ""
 
 
+def _task_attachments(task: Task) -> list[str]:
+    """从任务载荷收窄附件 id 列表（B2：attachment_refs 透传给 run Input）。
+
+    畸形标量输入按单元素列表包裹，保持与 _check_guardrail 旧归一逻辑等价。
+    """
+    raw = task.get(_FIELD_ATTACHMENTS, [])
+    if isinstance(raw, list):
+        return [str(item) for item in raw]
+    return [str(raw)] if raw else []
+
+
 def _decode_message(msg_id: str | bytes, fields: dict[bytes | str, bytes | str]) -> Task:
     """把一条 Stream 消息解码为 Task（兼容 bytes 键，附内部消息 id）。
 
@@ -289,6 +300,8 @@ class Dispatcher:
         deps: Deps,
         sessions: SessionService,
         validator: ValidatorFn,
+        input_enricher: Callable[[Input], Input] | None = None,
+        cost_sink: Callable[[State], None] | None = None,
     ) -> None:
         """注入任务队列、执行依赖、会话服务与校验链（状态回写入口）。
 
@@ -297,11 +310,17 @@ class Dispatcher:
             deps: M03 run() 的全部依赖（生产真实 / 测试 fake）。
             sessions: 会话状态机服务（终态回写）。
             validator: M06 校验链入口（A1）；生产注入真实装配，测试注入放行桩。
+            input_enricher: v1.6 上下文端口注入回调（生产由 worker 绑定真实
+                Preference/Procedure 端口）；None 时 Input 不带数据端口，装配省略对应槽。
+            cost_sink: B7 终态成本落账回调（生产由 worker 绑定真实 PG）；
+                None 时不落账（run 的注入点，非测试兼容桩）。
         """
         self._queue = queue
         self._deps = deps
         self._sessions = sessions
         self._validator = validator
+        self._input_enricher = input_enricher
+        self._cost_sink = cost_sink
 
     def _write_back(self, session_id: str, user_id: str, state: State) -> None:
         """把 run() 终态映射回 SessionService（§5.2 状态迁移集中一处）。
@@ -339,12 +358,14 @@ class Dispatcher:
 
     def _check_guardrail(
         self, session_id: str, run_id: str, user_id: str, task: Task
-    ) -> bool:
-        """A1：run() 前过 M06 校验链；返回是否已确定性处理（无需进模型）。
+    ) -> ValidationResult | None:
+        """A1：run() 前过 M06 校验链；返回放行结论或 None（未校验/恢复跳过）。
 
         把任务字段收敛成一个 dict 传给装配层绑定的 validator 闭包——dispatcher
         不感知 embedder/store 等重依赖（由 worker 装配时绑定）。命中/挂起在此
-        直接回写会话状态，返回 True；放行或未注入返回 False。
+        直接回写会话状态并返回 ``ok=False`` 的结论（调用方跳过 run()）；
+        放行返回 ``ok=True`` 结论（B2：供 process_one 把全字段传进 run()）；
+        恢复任务或未注入 validator 返回 None。
 
         Args:
             session_id: 会话标识。
@@ -353,8 +374,8 @@ class Dispatcher:
             task: 原始任务字段（校验入参来源）。
 
         Returns:
-            True 表示校验已回写终态/挂起态，调用方须跳过 run()；
-            False 表示放行或未注入 validator（走旧行为）。
+            ``None`` = 未校验/恢复跳过（直接 run）；``ok=False`` = 已回写终态须跳过；
+            ``ok=True`` = 放行，携带 M06 全字段供下游消费。
 
         Raises:
             SessionError / ConflictError: 状态回写冲突（与 _write_back 同口径）。
@@ -363,15 +384,10 @@ class Dispatcher:
         # 校验链——首次提交已过护栏，恢复是 checkpoint 续跑而非新请求，
         # 否则空描述会被判 INPUT_INVALID 误挂起，跨实例恢复能力失效。
         if task.get(_FIELD_RESUME) == "1":
-            return False
+            return None
         # 任务字段来自 JSON 边界，逐项归一到 TaskFields 的确定形状；
         # attachment_ids 兼容畸形标量输入（旧装配层也做 list 包裹），保持行为等价。
-        raw_att_ids = task.get(_FIELD_ATTACHMENTS, [])
-        attachment_ids = (
-            raw_att_ids
-            if isinstance(raw_att_ids, list)
-            else ([raw_att_ids] if raw_att_ids else [])
-        )
+        attachment_ids = _task_attachments(task)
         fields: TaskFields = {
             "session_id": session_id,
             "run_id": run_id,
@@ -382,10 +398,11 @@ class Dispatcher:
             "clarification_reply": _task_str(
                 task.get(_FIELD_CLARIFICATION_REPLY, "")
             ),
+            "user_id": user_id,  # B1：偏好读取租户键
         }
         result = self._validator(str(task.get(_FIELD_DESC, "")), fields)
         if result.ok:
-            return False
+            return result  # B2：放行结论全字段交给 process_one 消费
         ref = result.evidence_ref or ""
         reason = result.reason_code.value if result.reason_code else ""
         if result.reason_code in _REJECT_CODES:
@@ -398,7 +415,7 @@ class Dispatcher:
             self._sessions.mark_awaiting_input(
                 session_id, user_id, reason or ReasonCode.SPEC_MISSING.value, ref
             )
-        return True
+        return result  # 已回写终态/挂起，调用方据此跳过 run()
 
     def process_one(self) -> int:
         """消费并处理一条任务；无任务返回 0。
@@ -415,17 +432,42 @@ class Dispatcher:
         user_id = _task_str(task.get(_FIELD_USER))
         try:
             # A1：校验链先过；命中/挂起时已由 _check_guardrail 回写状态，跳过模型。
-            handled = self._check_guardrail(session_id, run_id, user_id, task)
-            if not handled:
-                state = run(
-                    session_id,
-                    run_id,
-                    Input(
-                        text=_task_str(task.get(_FIELD_DESC)),
-                        grid=_task_str(task.get(_FIELD_GRID)) or None,
-                        capability_catalog=_l0_catalog(),  # ADR-003 / B1：L0 目录进上下文
+            validation = self._check_guardrail(session_id, run_id, user_id, task)
+            if validation is None or validation.ok:
+                # B2（v1.6）：把 M06 放行结论全字段传进 run()，不重复校验、不丢档位建议。
+                # B3：从 SessionRow 读用户澄清回答，回注 State.clarification_answer
+                # （M04 answer_clarification 已写 SessionRow，但 dispatcher 恢复时未传给 run）。
+                clarification_answer: str | None = None
+                if task.get(_FIELD_RESUME) == "1":
+                    session_row = self._sessions.get(session_id)
+                    clarification_answer = session_row.clarification_answer
+                run_input = Input(
+                    text=_task_str(task.get(_FIELD_DESC)),
+                    grid=_task_str(task.get(_FIELD_GRID)) or None,
+                    capability_catalog=_l0_catalog(),  # ADR-003 / B1：L0 目录进上下文
+                    model_tier=validation.model_tier if validation else None,
+                    evidence_ref=validation.evidence_ref if validation else None,
+                    widget_type=(
+                        validation.widget_type.value if validation and validation.widget_type else None
                     ),
-                    self._deps,
+                    intent_normalized=(
+                        validation.intent_normalized.value
+                        if validation and validation.intent_normalized else None
+                    ),
+                    attachments=list(
+                        validation.attachment_refs
+                        if validation and validation.attachment_refs
+                        else _task_attachments(task)
+                    ),
+                    clarification_answer=clarification_answer,
+                    context_user_id=user_id,  # v1.6：记忆端口读取的租户键
+                )
+                # v1.6：生产由 worker 注入真实记忆检索端口（B1/B6/B8），测试不注入则省略数据槽。
+                if self._input_enricher is not None:
+                    run_input = self._input_enricher(run_input)
+                state = run(
+                    session_id, run_id, run_input, self._deps,
+                    cost_sink=self._cost_sink,
                 )
                 self._write_back(session_id, user_id, state)
         except Exception:

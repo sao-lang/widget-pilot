@@ -18,11 +18,20 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Literal, NamedTuple, TypedDict, Unpack, cast
+from typing import TYPE_CHECKING, Literal, NamedTuple, TypedDict, Unpack, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from packages.contracts.enums import ModelTier, SessionState
+
+if TYPE_CHECKING:
+    # 仅类型检查期导入端口协议：避免 packages.context.ports 反向 import 本模块形成循环。
+    from packages.agent_core.context.ports import (
+        AttachmentInsightPort,
+        PreferencePort,
+        ProcedurePort,
+        RetrievalPort,
+    )
 
 # ---------------------------------------------------------------------------
 # JSON 值别名：外部（provider / 事件 / schema）决定的不确定结构只用这两个别名承载
@@ -188,7 +197,7 @@ class ScoreDimensions(TypedDict):
 
 
 class StateUpdate(TypedDict, total=False):
-    """:meth:`State.bump` 可更新字段全集：键确定，取代 ``**changes: Any``。"""
+    """:meth:`State.bump` 可更新字段全集：键确定，取代旧动态参数写法。"""
 
     session_id: str
     """所属会话 ID。"""
@@ -447,7 +456,7 @@ class State:
             terminal=None,
         )
 
-    def pause(self, reason: str | None = None) -> State:
+    def pause(self, reason: str | None = None) -> State:  # purity-exempt: reason 为接口语义参数，docstring 已说明
         """AWAIT_INPUT / ASK_USER → AWAITING_INPUT，挂起不占计算资源。
 
         reason 仅作调用方语义标注（ReasonCode 由 Decision 承载），不改状态字段。
@@ -493,7 +502,7 @@ class State:
     def bump(self, **changes: Unpack[StateUpdate]) -> State:
         """生成一个新 State 副本（不可变式更新），供各层 apply_* 使用。
 
-        可更新字段由 :class:`StateUpdate` 显式列出，取代旧的 ``**changes: Any``，
+        可更新字段由 :class:`StateUpdate` 显式列出，取代旧的动态参数写法，
         既保留函数式更新语义，又让键集合在类型层面确定。
         """
         return replace(self, **changes)
@@ -614,6 +623,26 @@ class Input:
     """附件引用列表。"""
     capability_catalog: tuple[JsonObject, ...] = ()
     """L0 能力目录（ADR-003）；调度侧从 registry.level0() 注入，常驻进上下文。"""
+    model_tier: ModelTier | None = None
+    """M06 校验链建议的模型档位（B2）；None 由 loop 确定性分档。"""
+    evidence_ref: str | None = None
+    """M06 输入快照证据引用（B2）；进复现指纹与审计链。"""
+    clarification_answer: str | None = None
+    """用户澄清回答（B3）；恢复时回注 State.clarification_answer 槽位。"""
+    widget_type: str | None = None
+    """M06 归一化的控件类型 hint（B2）；值恒 custom 或具体枚举文本。"""
+    intent_normalized: str | None = None
+    """M06 归一化意图类别（B2 全字段消费）；仅作上下文证据不驱动决策。"""
+    preference_port: PreferencePort | None = None
+    """第 5 槽用户记忆真实端口（v1.6）；None 时装配省略该槽，禁占位串。"""
+    procedure_port: ProcedurePort | None = None
+    """第 2 槽程序记忆软提示端口（D-14）；不写 prompt 前缀。"""
+    retrieval_port: RetrievalPort | None = None
+    """第 3 槽检索端口（M10）；None 时装配省略该槽。"""
+    attachment_port: AttachmentInsightPort | None = None
+    """第 4 槽附件洞察端口（M05）；None 时装配省略该槽。"""
+    context_user_id: str = ""
+    """记忆/程序记忆读取的租户键（配合上面两个端口）。"""
 
 
 @dataclass
@@ -897,6 +926,22 @@ class SlotConfig:
     """槽位 token 预算。"""
     now: datetime | None = None
     """注入时钟（不读系统时间）。"""
+    # 以下四个为 M07 真实数据端口：默认 None 时对应槽省略（不塞占位串），
+    # 需真实数据的生产路径由装配层显式注入；协议定义见 context/ports.py。
+    preference_port: PreferencePort | None = None
+    """用户记忆槽端口（高置信门禁由端口实现负责）；None 时省略该槽。"""
+    procedure_port: ProcedurePort | None = None
+    """程序记忆采纳软提示端口；None 时省略该槽。"""
+    retrieval_port: RetrievalPort | None = None
+    """检索片段槽端口；None 时省略该槽。"""
+    attachment_port: AttachmentInsightPort | None = None
+    """附件洞察槽端口；None 时省略该槽。"""
+    user_id: str = ""
+    """租户隔离的用户标识，传给偏好/程序记忆端口。"""
+    widget_type: str = ""
+    """当前控件类型，传给程序记忆端口做采纳记录匹配。"""
+    attachment_refs: tuple[str, ...] = ()
+    """附件引用键列表，传给附件洞察端口；默认无附件。"""
 
 
 @dataclass

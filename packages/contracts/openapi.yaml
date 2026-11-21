@@ -23,7 +23,8 @@ tags:
   - name: bundles       # M09 / M16
   - name: corpus        # M10
   - name: ops           # M10 / M11
-  - name: guardrails    # M06（只读查询：guard_hit / skills manifest）
+  - name: guardrails    # M06（只读查询：guard_hit）
+  - name: preferences   # M07（用户偏好：本人读写清除，ADR-002 D-9~D-14）
   - name: bff           # M02（可选 BFF，不做鉴权判定）
 
 paths:
@@ -331,6 +332,48 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
 
   # ---------- bundles（M09 / M16，权限：本人）----------
+  # ---------- preferences（M07，本人；ADR-002 D-9~D-14）----------
+  /api/users/me/preferences:
+    get:
+      tags: [preferences]
+      summary: 读取本人偏好（每字段带 source/weight/evidence_count/version）
+      operationId: getPreferences
+      responses:
+        "200": { $ref: "#/components/responses/ApiOk" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    put:
+      tags: [preferences]
+      summary: 显式写入偏好（explicit=1.0，四操作写入时裁定，低权重不覆盖高权重）
+      operationId: putPreferences
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                palette: { type: string }
+                preferred_grids: { type: array, items: { type: string } }
+                preferred_widget_types: { type: array, items: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/ApiOk" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    delete:
+      tags: [preferences]
+      summary: 清除偏好（可选 fields 单字段；失效不删行，事件保留 revoked_at）
+      operationId: deletePreferences
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                fields: { type: array, items: { type: string } }
+      responses:
+        "200": { $ref: "#/components/responses/ApiOk" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
   /api/bundles:
     get:
       tags: [bundles]

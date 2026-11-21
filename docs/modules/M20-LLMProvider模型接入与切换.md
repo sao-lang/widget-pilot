@@ -969,6 +969,21 @@ embedding_active: "emb_a"             # 当前激活 embedding；切换必须走
 > 责任边界：M06 只做级联判定与留证；**embedding 推理、端点调用、凭证持有全部归 M20/M07**，护栏进程不持凭证。
 > L4 主 LLM 兜底（`ports.IntentGateway`）由 M07 经 ModelGateway 前沿档位注入，见 M07 §9.0。
 
+### 9.0b 【M07 协同】本模块对 M07 的接线义务（勿遗漏）
+
+> M7 本次全量实现模型分档、L4 Gateway 与复现能力：按 `ModelTier` 选端点、L4 `IntentGateway` 前沿档、Responses 双 wire 归一都依赖本模块。
+> 当前生产 `_EnvModelGateway` 单一 `MODEL_NAME`（`deps.py:276`，M7 盘点 B5），L4 端口默认 None（B4），
+> Responses wire「v1.4 仅设计未实现」（M7 文档 :452，change-contract Open :41 责任人 M20）。逐项核对：
+
+| # | 接线义务 | M07 侧接线点 | 不接的后果 |
+|---|---|---|---|
+| 1 | **提供模型分档端点**：定稿 `model_providers.yaml`，按 `ModelTier` 选端点替换单一 `MODEL_NAME`（schema【推导·需评审】本模块 :976） | `services/orchestrator/deps.py:38-40,276` 单一 `MODEL_NAME`；`M07...md:404-414`/:1167；M7 盘点 B5 :125 | 三因子 rubric 分档失去意义，全档共用一个端点，成本/质量不可分层（B5） |
+| 2 | **提供 L4 前沿档端点供 M07 实现 `IntentGateway`**：真模型留端点、无 key fail-fast、测试显式注入 mock | `services/guardrails/ports.py:54-65` `IntentGateway`；`guardrail_adapter.py:117,211` 传 None；M07 文档 §9.0 #1 :1129；M7 盘点 B4 :124 | L4 恒走 `StructuredFallback` 白名单归类，前沿档能力缺失（B4） |
+| 3 | **Responses API wire adapter**：实现 chat-completions / responses 双 wire 归一（本模块 §10 `wire_api` / Responses wire adapter「本轮未实现」:998-999） | M7 文档 :452/:1146；change-contract Open :41（责任人 M20） | M7 网关只能跑 chat-completions 单一线协议，Responses 能力无法真测 |
+| 4 | **分档阈值切换触发 M10 回归**：`tier_mapping` / `model_version` / embedding 绑定等切换时触发 M10 回归门禁，与既有本模块 §9.0 #3 联动 | 本模块 §9.0 #3 :966、§9「变更触发的回归范围」:987；`model_config_version` / `tier_mapping` | 分档阈值切换后无门禁，M07 分档与 M10 检索阈值失配静默劣化 |
+
+> 维护约定：新增 M07 协同缺口时同步到 M07 文档与本文档，并在 M7 模型缺口文档反向索引留痕。
+
 | 项 | 说明 | 处理 / 责任建议 |
 |---|---|---|
 | `ProviderAdapter` Protocol 定稿 | 本模块新增接口，需与 M03 `ModelGateway` 注入接口、L1/L2 签名对齐 | **【推导·需评审】** M03 + M02 评审后固化到 `providers/protocol.py` |

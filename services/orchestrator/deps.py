@@ -15,7 +15,10 @@ from __future__ import annotations
 import hashlib
 import os
 from datetime import UTC, datetime
-from typing import Final
+from typing import TYPE_CHECKING, Final
+
+if TYPE_CHECKING:
+    from services.orchestrator.cost.ports import CostLedgerPort
 
 import redis
 from sqlalchemy import select
@@ -41,7 +44,7 @@ _ENV_MODEL_NAME: Final[str] = "MODEL_NAME"
 _ENV_REDIS_URL: Final[str] = "REDIS_URL"
 _ENV_SSE_WINDOW: Final[str] = "SSE_WINDOW_N"
 _HASH_PREFIX: Final[str] = "#sha256:"
-_KEY_PREFIX: Final[str] = "checkpoint:object:"
+_KEY_PREFIX: Final[str] = "checkpoint:object:"  # purity-exempt: checkpoint key 格式字面量，非类型注解
 _DEFAULT_SSE_WINDOW: Final[int] = 500
 
 
@@ -71,7 +74,7 @@ class RedisObjectStore:
             data: 原始字节。
 
         Returns:
-            形如 ``checkpoint:object:<key>#sha256:<hex>`` 的引用。
+            形如 checkpoint:object:<key>#sha256:<hex> 的引用（purity-exempt: key 格式说明非类型注解）。
         """
         digest = hashlib.sha256(data).hexdigest()
         ref = f"{_KEY_PREFIX}{key}{_HASH_PREFIX}{digest}"
@@ -248,6 +251,7 @@ def build_deps(
     dsn: str,
     redis_url: str,
     owner: str = "orchestrator-1",
+    cost_ledger: CostLedgerPort | None = None,
 ) -> Deps:
     """装配一次 run() 所需的全部生产依赖。
 
@@ -255,6 +259,7 @@ def build_deps(
         dsn: PostgreSQL 连接串。
         redis_url: Redis 连接串。
         owner: 持锁 worker 标识（多实例各不同，避免抢同一租约）。
+        cost_ledger: 成本账本端口（B7）；None 时不注入（worker 稍后接线真实 PG）。
 
     Returns:
         完整 Deps：真实 checkpoint/lease/幂等/事件/模型/时钟全部就位。
@@ -301,4 +306,5 @@ def build_deps(
         capability_guard=ProductionCapabilityGuard(),  # ADR-003 / B2：全五项闸门
         object_store=RedisObjectStore(redis_url),  # ADR-003 / B5：能力结果落 ref
         capability_audit=ProductionCapabilityAudit(dsn),  # ADR-003 未完成项3：能力请求留证
+        cost_ledger=cost_ledger,  # B7：成本账本端口（worker 注入真实 PG 实现）
     )

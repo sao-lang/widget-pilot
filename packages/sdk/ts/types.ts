@@ -226,6 +226,25 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/users/me/preferences": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 读取本人偏好（每字段带 source/weight/evidence_count/version） */
+        get: operations["getPreferences"];
+        /** 显式写入偏好（explicit=1.0，四操作写入时裁定，低权重不覆盖高权重） */
+        put: operations["putPreferences"];
+        post?: never;
+        /** 清除偏好（可选 fields 单字段；失效不删行，事件保留 revoked_at） */
+        delete: operations["deletePreferences"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/bundles": {
         parameters: {
             query?: never;
@@ -974,6 +993,60 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+        };
+    };
+    getPreferences: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: components["responses"]["ApiOk"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    putPreferences: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    palette?: string;
+                    preferred_grids?: string[];
+                    preferred_widget_types?: string[];
+                };
+            };
+        };
+        responses: {
+            200: components["responses"]["ApiOk"];
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    deletePreferences: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    fields?: string[];
+                };
+            };
+        };
+        responses: {
+            200: components["responses"]["ApiOk"];
+            401: components["responses"]["Unauthorized"];
         };
     };
     listBundles: {

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from typing import cast
 from uuid import uuid4
 
@@ -37,7 +38,7 @@ from packages.agent_core.types import (
     TerminalKind,
     Usage,
 )
-from packages.contracts.enums import AgentEventKind, ReasonCode, SessionState
+from packages.contracts.enums import AgentEventKind, ModelTier, ReasonCode, SessionState
 
 logger = logging.getLogger(__name__)
 """审计旁路日志：留证失败时告警，不打挂业务（M2 留证隔离纪律）。"""
@@ -59,7 +60,7 @@ def _persist(state: State, deps: Deps, node: CheckpointNode) -> State:
     rev = max(state.rev, store.latest_rev(state.run_id) + 1)
     to_save = state.bump(rev=rev)
     save_checkpoint(store, to_save, node)
-    # states 是内存替身便利属性，cast 到带 extras 的视图后写入（规则 6 边界收口）
+    # states 是测试用便利属性，cast 到带 extras 的视图后写入（规则 6 边界收口）
     cast(CheckpointStoreExtras, store).states[state.run_id] = to_save
     return to_save.bump(rev=rev + 1)
 
@@ -156,6 +157,7 @@ def _record_capability_audit(
 
 
 def _default_capability_guard(
+    # purity-exempt: 五项均为接口约定参数，由生产 Deps 实现消费
     capability_id: str, level: int, surface: str, count: int, tokens: int
 ) -> tuple[bool, str | None]:
     """内核默认闸门（ADR-003 / B2）：白名单/surface/level 三项确定性判定。
@@ -181,13 +183,31 @@ def _acquire(deps: Deps, run_id: str) -> Lease | None:
     return deps.lease_provider.acquire(run_id, deps.owner, LEASE_TTL_S)
 
 
-def run(session_id: str, run_id: str, user_input: Input | str, deps: Deps) -> State:
-    """§11.3 原文签名（追加 deps 注入参数；user_input 可为 Input 或 str）。"""
+def run(session_id: str, run_id: str, user_input: Input | str, deps: Deps, cost_sink: Callable[[State], None] | None = None) -> State:
+    """§11.3 原文签名（追加 deps 注入参数；user_input 可为 Input 或 str；cost_sink 为终态成本落账注入点）。"""
     # 入参归一化：结构化 Input 拆出 text/grid，裸字符串按纯文本、无网格处理
     catalog: tuple[JsonObject, ...] = ()
+    suggested_tier: ModelTier | None = None
+    evidence_ref: str | None = None
+    clarification_answer: str | None = None
+    context_ports: SlotConfig | None = None
     if isinstance(user_input, Input):
         text, grid = user_input.text, user_input.grid
         catalog = user_input.capability_catalog
+        suggested_tier = user_input.model_tier
+        evidence_ref = user_input.evidence_ref
+        clarification_answer = user_input.clarification_answer
+        # v1.6：从 Input 收四个真实数据端口；无端口时 SlotConfig 全 None → 装配省略对应槽。
+        context_ports = SlotConfig(
+            capability_catalog=catalog,
+            preference_port=user_input.preference_port,
+            procedure_port=user_input.procedure_port,
+            retrieval_port=user_input.retrieval_port,
+            attachment_port=user_input.attachment_port,
+            user_id=user_input.context_user_id,
+            widget_type=user_input.widget_type or "",
+            attachment_refs=tuple(user_input.attachments),
+        )
     else:
         text, grid = user_input, None
 
@@ -196,10 +216,31 @@ def run(session_id: str, run_id: str, user_input: Input | str, deps: Deps) -> St
     if state is None:
         state = State.initial(session_id, run_id, text, grid)
 
+    # B2/B3（v1.6）：把 M06 放行结论的建议档位、证据引用、澄清回答回注 State。
+    # 只在首轮（iteration==0）回注档位建议，避免回边后覆盖重算档位；
+    # 澄清回答任何轮次都回注（恢复续跑必须让答案生效，防"假续跑"）。
+    if suggested_tier is not None and state.iteration == 0:
+        state = state.bump(spec=state.spec.model_copy(update={"tier": suggested_tier}))
+    if evidence_ref is not None and state.iteration == 0:
+        state = state.bump(spec=state.spec.model_copy(update={"evidence": evidence_ref}))
+    if clarification_answer is not None:
+        state = state.bump(clarification_answer=clarification_answer)
+
     # ADR-003 / B1：把 L0 能力目录装配进上下文（系统契约后的固定槽位），
-    # 让模型看得见能力并经 LOAD_CAPABILITY 自主选择。用 assemble 保证固定槽位+caching。
-    if catalog:
-        catalog_messages = assemble(state, SlotConfig(capability_catalog=catalog))
+    # 让模型看得见能力并经 LOAD_CAPABILITY 自主选择。
+    # v1.6：有任一真实数据端口也要装配（否则记忆/检索/附件永远进不了 prompt）。
+    # 用 assemble 保证固定槽位+caching；无端口时对应槽省略，绝不塞占位串。
+    has_data_ports = context_ports is not None and any(
+        (
+            context_ports.preference_port,
+            context_ports.procedure_port,
+            context_ports.retrieval_port,
+            context_ports.attachment_port,
+        )
+    )
+    if catalog or has_data_ports:
+        slot_config = context_ports if context_ports is not None else SlotConfig(capability_catalog=catalog)
+        catalog_messages = assemble(state, slot_config)
         state = state.bump(spec=state.spec.model_copy(update={"messages": catalog_messages}))
 
     # 2. 抢租约
@@ -236,9 +277,13 @@ def run(session_id: str, run_id: str, user_input: Input | str, deps: Deps) -> St
             # 5. 分支动作：按 Decision.kind 分派，与 decide 的出口一一对应
             if decision.kind == DecisionKind.CALL_MODEL:
                 out = deps.model.complete(decision.messages, tier=decision.tier, stream=True)
-                # 网关可能返回非 ModelOutput（如单测桩/异常兜底字符串）：统一包装再计入 usage
+                # 真实契约断言：网关必须返回 ModelOutput；非契约值 fail-fast。
+                # 禁止 str(out) 兜底——那会把上游违约伪装成模型输出吞掉。
                 if not isinstance(out, ModelOutput):
-                    out = ModelOutput(content=str(out), usage=Usage())
+                    raise TypeError(
+                        "ModelGateway.complete must return ModelOutput, "
+                        f"got {type(out).__name__}"
+                    )
                 state = apply_model_output(state, out)
                 state = meter.add(state, usage=out.usage, tier=out.tier)
             elif decision.kind == DecisionKind.LOAD_CAPABILITY:
@@ -346,6 +391,10 @@ def run(session_id: str, run_id: str, user_input: Input | str, deps: Deps) -> St
             cur_seq = send(cur_seq, snap, decision, AgentEventKind.COST,
                            cast(JsonObject, {"budget_used": dict(state.budget_used)}))
             if state.terminal is not None:
+                # 终态确定即落成本账（依赖注入点：生产由 worker 注入真实落库回调，
+                # 测试不注入则无副作用；非测试兼容桩）。
+                if cost_sink is not None:
+                    cost_sink(state)
                 # 终态事件按 kind 区分 done/error：前端据此关闭或展示失败态
                 cur_seq = send(cur_seq, snap, decision,
                                AgentEventKind.DONE if state.terminal.kind == TerminalKind.DONE
@@ -380,6 +429,9 @@ def run(session_id: str, run_id: str, user_input: Input | str, deps: Deps) -> St
                 evidence_ref=f"max-iter/{run_id}",
             )
             state = _persist(state, deps, CheckpointNode.FINAL)
+            # MAX_ITER 兜底终态同样要落成本账（B7，与循环内终态一致）。
+            if cost_sink is not None:
+                cost_sink(state)
         return state
     finally:
         # 11. 释放租约（异常路径同样释放，防止租约泄漏）

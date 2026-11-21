@@ -115,6 +115,7 @@ def build_validator(
     embedder: Embedder | None = None,
     classifier: IntentClassifier | None = None,
     gateway: IntentGateway | None = None,
+    preferred_grids_get: Callable[[str], list[str]] | None = None,
 ) -> Callable[[str, TaskFields], ValidationResult]:
     """装配生产校验链入口，供 Dispatcher 注入（A1）。
 
@@ -127,6 +128,8 @@ def build_validator(
         embedder: L2 端口（M20 提供；None 走默认零依赖实现）。
         classifier: L3 端口（M20/M07 提供；None 走默认兜底）。
         gateway: L4 端口（M07 提供；None 走默认结构化兜底）。
+        preferred_grids_get: M07 偏好读取回调（B1）：按 user_id 返回高置信
+            ``preferred_grids``；None 时不注入偏好（部署形态，无内存降级）。
 
     Returns:
         符合 ValidatorFn 签名的闭包：``(description, fields) -> ValidationResult``。
@@ -189,6 +192,18 @@ def build_validator(
         # R2（复审）：澄清重入标记透传——grid_confirmed 由此决定，不依赖 grid 解析成功。
         clarification_reply = str(fields.get("clarification_reply", "")) == "1"
 
+        # B1（v1.6）：从 M07 偏好 Store 读高置信 preferred_grids 注入校验链，
+        # 使 D-12「记忆读了就用」在生产生效。回调未注入则不传（无内存降级）。
+        # 读取失败按"无偏好"降级仅丢建议，不影响放行（偏好是建议非门禁）。
+        preferred_grids: list[str] | None = None
+        if preferred_grids_get is not None:
+            try:
+                grids = preferred_grids_get(str(fields.get("user_id", "")))
+                preferred_grids = grids or None
+            except Exception:  # noqa: BLE001 - 偏好只读建议，失败不阻断护栏主链
+                logger.warning("preferred_grids lookup failed; continue without preference")
+                preferred_grids = None
+
         try:
             return validate_chain(
                 session_id=session_id,
@@ -200,6 +215,7 @@ def build_validator(
                 budget_left=_DEFAULT_BUDGET_LEFT,  # M11 未接：宽裕默认，不误拒
                 clarified_grid=clarified_grid,
                 clarification_reply=clarification_reply,
+                preferred_grids=preferred_grids,
                 event_sink=event_sink,
                 on_fallback=lambda reason: logger.warning(
                     "guardrail fallback: %s", reason

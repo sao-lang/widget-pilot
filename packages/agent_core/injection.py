@@ -1,4 +1,6 @@
-"""M03 注入接口（§4.3，【推导·需评审】已固化到 injection.py）。
+"""
+purity-exempt-file: 本文件为依赖注入 Protocol 契约集合（Deps/Span/Clock 等），方法体 `...` 均为接口声明非占位；注释中提及测试替身仅说明注入用途，生产实现由 services 层提供。
+M03 注入接口（§4.3，【推导·需评审】已固化到 injection.py）。
 
 库内禁止 import 具体基础设施客户端；PG / Redis / 对象存储 / 向量库 /
 model gateway / OTel 全部以 Protocol 注入，保证 §8.1 可用内存替身单测。
@@ -11,7 +13,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from types import TracebackType
-from typing import Protocol, Self, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, Self, runtime_checkable
+
+if TYPE_CHECKING:
+    # 仅类型检查期导入服务层端口，避免 packages → services 的运行时循环依赖。
+    from services.orchestrator.cost.ports import CostLedgerPort
 
 from packages.agent_core.types import (
     AgentEvent,
@@ -269,3 +275,5 @@ class Deps:
     """对象存储（ADR-003 / B5）；生产必注入，用于能力结果落 ref。"""
     capability_audit: CapabilityAudit | None = None
     """能力加载审计（ADR-003 未完成项3）；None 时不记录（测试/无审计环境）。"""
+    cost_ledger: CostLedgerPort | None = None
+    """成本账本注入点（B7）；生产由 build_deps 装配，worker 据此构造 cost_sink。"""
