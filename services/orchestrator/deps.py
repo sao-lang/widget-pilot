@@ -277,10 +277,17 @@ def build_deps(
     # ADR-003 / Q2：composition root 单次注册首批能力并冻结；视觉理解复用同一
     # ModelGateway（Q9）。已冻结时跳过——同进程重复 build_deps 不重复注册。
     from packages.agent_core.tools.registry import is_frozen
-    from services.orchestrator.capabilities import register_capabilities
+    from services.control_plane.attachments.s3_store import S3ObjectStore
+    from services.orchestrator.capabilities import (
+        make_s3_blob_reader,
+        register_capabilities,
+    )
 
     if not is_frozen():
-        register_capabilities(gateway=gateway)
+        # ADR-003 未完成项4：附件能力用 S3 原文读取（带 sha256 校验），
+        # 不再用本地路径 reader——生产传对象存储 key 时后者必然 FileNotFoundError。
+        register_capabilities(gateway=gateway, blob_reader=make_s3_blob_reader(S3ObjectStore()))
+    from services.orchestrator.capability_audit_adapter import ProductionCapabilityAudit
     from services.orchestrator.capability_guard_adapter import ProductionCapabilityGuard
 
     return Deps(
@@ -293,4 +300,5 @@ def build_deps(
         owner=owner,
         capability_guard=ProductionCapabilityGuard(),  # ADR-003 / B2：全五项闸门
         object_store=RedisObjectStore(redis_url),  # ADR-003 / B5：能力结果落 ref
+        capability_audit=ProductionCapabilityAudit(dsn),  # ADR-003 未完成项3：能力请求留证
     )

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import cast
 from uuid import uuid4
 
@@ -37,6 +38,9 @@ from packages.agent_core.types import (
     Usage,
 )
 from packages.contracts.enums import AgentEventKind, ReasonCode, SessionState
+
+logger = logging.getLogger(__name__)
+"""审计旁路日志：留证失败时告警，不打挂业务（M2 留证隔离纪律）。"""
 
 # 模型 final JSON 中会被认定为「可信结论」并写入 SpecState 的字段白名单。
 # 键为 JSON 字段名，值为 SpecState 上的目标属性名；白名单之外一律忽略。
@@ -124,6 +128,31 @@ def _store_capability_result(deps: Deps, run_id: str, rev: int, output: str) -> 
         # 内核兜底：无对象存储时用纯 key 形态（内容由调用方另取，生产必注入 store）
         return f"capability-result/{run_id}/{rev}"
     return deps.object_store.put(f"capability-result/{run_id}/{rev}", output.encode("utf-8"))
+
+
+def _record_capability_audit(
+    deps: Deps,
+    session_id: str,
+    run_id: str,
+    trace_id: str,
+    capability_id: str,
+    level: int,
+    surface: str,
+    decision: str,
+    started_ms: int,
+) -> None:
+    """记录一条能力请求审计（ADR-003 未完成项3）；无审计端口时跳过。"""
+    if deps.capability_audit is None:
+        return
+    from time import monotonic
+
+    try:
+        latency_ms = int((monotonic() * 1000) - started_ms)
+        deps.capability_audit.record(
+            session_id, run_id, trace_id, capability_id, level, surface, decision, latency_ms
+        )
+    except Exception as exc:  # noqa: BLE001 - 审计是旁路留证，失败不得击穿校验链
+        logger.warning("capability audit record failed (evidence dropped): %s", exc)
 
 
 def _default_capability_guard(
@@ -214,7 +243,11 @@ def run(session_id: str, run_id: str, user_input: Input | str, deps: Deps) -> St
                 state = meter.add(state, usage=out.usage, tier=out.tier)
             elif decision.kind == DecisionKind.LOAD_CAPABILITY:
                 # ADR-003：① 过闸门（B2）② 执行/加载（FR-4）③ 失败转自纠正（B3）
-                # ④ L1/L2 均计 token（B4）⑤ 结果落对象存储、ref 不内联（B5）。
+                # ④ L1/L2 均计 token（B4）⑤ 结果落对象存储、ref 不内联（B5）
+                # ⑥ 每个请求留审计证据（未完成项3）。
+                from time import monotonic
+
+                started_ms = int(monotonic() * 1000)
                 guard_check = (
                     deps.capability_guard.check
                     if deps.capability_guard is not None
@@ -236,6 +269,10 @@ def run(session_id: str, run_id: str, user_input: Input | str, deps: Deps) -> St
                     # B3：把拒绝事实注入消息，让下一轮模型自纠正（而不是盲目重试）
                     state = _append_denial_message(state, decision.capability_id or "", deny_reason)
                     state = meter.add(state, tool_calls=1)
+                    _record_capability_audit(
+                        deps, session_id, run_id, trace_id, decision.capability_id or "",
+                        decision.level, decision.surface, "DENIED", started_ms,
+                    )
                     continue
                 try:
                     result = load_capability(decision)
@@ -247,6 +284,10 @@ def run(session_id: str, run_id: str, user_input: Input | str, deps: Deps) -> St
                         )
                         state = _append_denial_message(state, decision.capability_id or "", exc.code)
                         state = meter.add(state, tool_calls=1)
+                        _record_capability_audit(
+                            deps, session_id, run_id, trace_id, decision.capability_id or "",
+                            decision.level, decision.surface, exc.code, started_ms,
+                        )
                         continue
                     raise
                 ref = _store_capability_result(deps, run_id, state.rev, result.output)
@@ -260,6 +301,10 @@ def run(session_id: str, run_id: str, user_input: Input | str, deps: Deps) -> St
                     state,
                     tool_calls=1,
                     usage=Usage(input_tokens=0, output_tokens=len(result.output)),
+                )
+                _record_capability_audit(
+                    deps, session_id, run_id, trace_id, decision.capability_id or "",
+                    decision.level, decision.surface, "LOADED", started_ms,
                 )
             elif decision.kind == DecisionKind.REPAIR:
                 # 回边，不新增 Run；计数与信号切换由 repair.feedback 统一负责

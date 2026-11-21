@@ -133,6 +133,50 @@ def test_load_level2_skill_returns_body_not_executed():
     assert "body.calendar.v3" in result.output
 
 
+def test_load_handler_valueerror_becomes_coreerror():
+    """handler 抛 ValueError（如 S3 无 hash/篡改）→ CoreError 业务失败，不逃逸。"""
+    def bad_ref(args: Args) -> str:
+        raise ValueError("attachment ref missing sha256 hash")
+
+    register(
+        "tool.bad_ref",
+        Capability(
+            id="tool.bad_ref", kind="tool", brief="坏引用", detail_ref="args",
+            payload_ref="handler", surfaces=frozenset({"generation"}), cost_hint=1,
+            args_model=Args, handler=bad_ref,
+        ),
+    )
+    with pytest.raises(CoreError) as ei:
+        load(Decision(
+            DecisionKind.LOAD_CAPABILITY, capability_id="tool.bad_ref", level=2,
+            args={"city": "SZ"}, surface="generation",
+        ))
+    assert ei.value.code == "CONTRACT_MISMATCH"
+    assert ei.value.retryable is False
+
+
+def test_load_handler_oserror_becomes_infra():
+    """handler 抛 OSError（如 S3 网络故障）→ CoreError infra，走重试。"""
+    def down(args: Args) -> str:
+        raise OSError("S3 unavailable")
+
+    register(
+        "tool.down",
+        Capability(
+            id="tool.down", kind="tool", brief="故障", detail_ref="args",
+            payload_ref="handler", surfaces=frozenset({"generation"}), cost_hint=1,
+            args_model=Args, handler=down,
+        ),
+    )
+    with pytest.raises(CoreError) as ei:
+        load(Decision(
+            DecisionKind.LOAD_CAPABILITY, capability_id="tool.down", level=2,
+            args={"city": "SZ"}, surface="generation",
+        ))
+    assert ei.value.code == "SANDBOX_UNAVAILABLE"
+    assert ei.value.retryable is True
+
+
 def test_load_unregistered_rejected():
     """FR-6：未注册能力被拒。"""
     with pytest.raises(CoreError) as ei:

@@ -146,8 +146,8 @@ class PgSkillPrefetchLogStore:
         """
         sql = (
             f"INSERT INTO {_TABLE_SKILL_PREFETCH} "
-            "(session_id, run_id, widget_type, grid, recipe_ids, hit, reason, trace_id) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+            "(session_id, run_id, widget_type, grid, recipe_ids, hit, reason, trace_id, capability_kind) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
         )
         # M2（v1.8）：留证失败隔离（同 intent_route_log，PG 抖动不击穿校验链）。
         try:
@@ -163,6 +163,7 @@ class PgSkillPrefetchLogStore:
                         row.hit,
                         row.reason,
                         row.trace_id,
+                        row.capability_kind,
                     ),
                 )
         except psycopg.Error as exc:
@@ -173,7 +174,7 @@ class PgSkillPrefetchLogStore:
         with _connect_dict(self._dsn) as conn:
             rows = conn.execute(
                 f"SELECT session_id, run_id, widget_type, grid, recipe_ids, "
-                f"reason, trace_id FROM {_TABLE_SKILL_PREFETCH} "
+                f"reason, trace_id, capability_kind FROM {_TABLE_SKILL_PREFETCH} "
                 "WHERE hit = FALSE ORDER BY id"
             ).fetchall()
         return tuple(
@@ -186,6 +187,11 @@ class PgSkillPrefetchLogStore:
                 hit=False,
                 reason=(str(row["reason"]) if row["reason"] is not None else None),
                 trace_id=str(row["trace_id"]),
+                capability_kind=(
+                    str(row["capability_kind"])
+                    if row.get("capability_kind") is not None
+                    else None
+                ),
             )
             for row in rows
         )
@@ -211,8 +217,8 @@ class PgNeedSkillLogStore:
         sql = (
             f"INSERT INTO {_TABLE_NEED_SKILL} "
             "(session_id, run_id, recipe_id, depth, turn_count, tokens, "
-            "decision, reason, trace_id) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            "decision, reason, trace_id, capability_id, level) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
         )
         # M2（v1.8）：留证失败隔离（同上，PG 抖动不击穿校验链）。
         try:
@@ -229,6 +235,8 @@ class PgNeedSkillLogStore:
                         row.decision.value if row.decision is not None else None,
                         row.reason,
                         row.trace_id,
+                        row.capability_id,
+                        row.level,
                     ),
                 )
         except psycopg.Error as exc:

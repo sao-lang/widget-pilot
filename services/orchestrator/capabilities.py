@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from pydantic import BaseModel
 
@@ -50,6 +50,36 @@ class RecipeArgs(BaseModel):
 def _default_blob_reader(source_ref: str) -> bytes:
     """默认原文读取器：本地路径（开发/测试）；生产由 build_deps 注入 S3 reader。"""
     return Path(source_ref).read_bytes()
+
+
+class HashVerifiedObjectStore(Protocol):
+    """只读原文所需的最小接口（鸭子协议，便于测试替身）。"""
+
+    def get_with_hash_verify(self, key: str, expected_hash: str) -> bytes:
+        """按 key 读取并校验 sha256，篡改即抛。"""
+        ...
+
+
+def make_s3_blob_reader(store: HashVerifiedObjectStore) -> Callable[[str], bytes]:
+    """把 S3ObjectStore 包装成附件能力用的原文读取器（ADR-003 未完成项4）。
+
+    原文引用形如 ``att/.../original#sha256:<hash>``。读取时拆出 key 与 hash，
+    走带校验的读取——篡改或无 hash 一律拒绝（fail-closed，不返回脏原文）。
+
+    Args:
+        store: 具备 ``get_with_hash_verify(key, hash) -> bytes`` 的对象存储。
+
+    Returns:
+        以 source_ref 为入参、返回原文字节的读取器。
+    """
+
+    def reader(source_ref: str) -> bytes:
+        key, sep, expected_hash = source_ref.partition("#sha256:")
+        if not sep or not expected_hash:
+            raise ValueError(f"attachment ref missing sha256 hash: {source_ref!r}")
+        return store.get_with_hash_verify(key, expected_hash)
+
+    return reader
 
 
 def _make_visual_handler(

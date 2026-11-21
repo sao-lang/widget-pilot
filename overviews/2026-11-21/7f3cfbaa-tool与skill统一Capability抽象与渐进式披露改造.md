@@ -2,12 +2,11 @@
 
 ## L0 索引卡（续接时先读这一段，≤12 行）
 - 场景 / 路径：链【12 提交 → 11/3 写方案+同步文档 → 9 拷问设计 → 5/6 写代码】/ 混合（提交·文档·只读·改码）
-- 当前闸门：①-⑤ 全完成；S4 全绿（pytest 428 passed / pyright 0 / ruff 全绿 / contracts drift=[]）；独立 review Round 1 Blocker 5→Round 2 复审 Blocker 清零可合入；Should 3 中 B3 盲区已修+B4/B5 已补测试证据
-- 交付产物：ADR-003（docs/adr/）、同步后的设计方案+M03/M06/M07/M10/00 文档、Capability 实现（agent_core + services）、迁移 0008、11 组新测试
-- 未完成项：① Docker 执行无沙箱隔离（Q5 明示暂缺，登记债）② 视觉模型真实端点待环境（Q6，mock 测试）③ M06 三表新列 DDL 已落但写入方待补（S3）④ S3 reader 待装配 ⑤ 独立 review 复审
-- 下一步：最终门禁确认 → 复审 Round 2 → 收尾合并提交
+- 当前闸门：①-⑤ 全完成 + 补做两项未完成项完成；S4 全绿（pytest 393+ passed / pyright 0 / ruff 全绿 / contracts drift=[]；Docker 未起时 50 skipped 属环境守卫）；补做独立复审 Blocker 1（handler 异常击穿）已修+Should 2 已修
+- 交付产物：ADR-003、代码阅读指南、同步后的设计+M03/M06/M07/M10/00 文档、Capability 实现、迁移 0008、15 组测试
+- 未完成项：① Docker 执行无沙箱隔离（Q5 明示暂缺，登记债）② 视觉模型真实端点待环境（Q6，mock 测试）；原第 3/4 项（日志写入、S3 reader）已补齐
+- 下一步：最终门禁确认 → 提交并 push → 更新工作记忆
 - 用户执行顺序硬约束：先提交 → 再写方案文档 → 改其他文档 → 拷问设计 → 最后写代码（已遵守）
-- 用户执行顺序硬约束：先提交 → 再写方案文档 → 改其他文档 → 拷问设计 → 最后写代码（不可乱序）
 
 ## 环境
 - 日期时间：2026-11-21 06:52 GMT+8
@@ -82,3 +81,25 @@
   - [B4] L1 未计 token、level 非 Literal — 已修：L1/L2 均计 output_tokens；`level: Literal[1,2]` + `kind: Literal["tool","skill"]`。
   - [B5] 结果内联进 tool_result_ref（checkpoint 膨胀 + user role 回灌不可信文本）— 已修：`_store_capability_result` 落 ObjectStore，ref 只存纯 key。
 - Fix loop 轮次：1 轮（Round 1 → 5 Blocker 全修）；复审结论见 L0「当前闸门」，Blocker 清零证据=新增端到端测试 + 全量门禁。
+
+### 1523 续：补做原未完成项 3/4 + 独立复审 Round 3
+
+- 用户诉求：问"未完成项 3、4 为什么没做"，核实后确认两项技术上可做（非环境阻断），用户选择"两项都补"。
+- 场景 / 动作：场景 5/6 迭代补做 + code-quality-review 复审。
+- 本轮问题与状态：
+  - [已解决] 项4 S3 reader — `capabilities.py::make_s3_blob_reader`（拆 key#sha256 + get_with_hash_verify，无 hash/篡改 fail-closed）；`build_deps` 注入 `S3ObjectStore()`。测试 `test_s3_blob_reader.py` / `test_build_deps_blob_reader.py`。
+  - [已解决] 项3 能力日志写入 — `NeedSkillLogRow`/`SkillPrefetchLogRow` + `pg_stores` INSERT 写迁移 0008 新列；内核 `CapabilityAudit` 鸭子协议 + `Deps.capability_audit` + run.py 三出口记录；服务层 `ProductionCapabilityAudit` 写 need_skill_log（LOADED→decision=None/DENIED→REJECT 兼容 Counter）。测试 `test_capability_audit_adapter.py` / `test_m03_capability_audit_wiring.py` / `test_m06_capability_columns_sql.py`（后者用 mock connect 验证 INSERT 11/9 列参数对齐，真实落库待 PG）。
+  - [已解决] 独立复审 Round 3 Blocker 1 — handler 抛 ValueError/KeyError/OSError 非 CoreError 会击穿 run loop（`invoke.load` 未包装）。修：`load()` 捕获 handler 异常，ValueError/KeyError→CoreError.business(CONTRACT_MISMATCH)，其它 Exception→CoreError.infra(SANDBOX_UNAVAILABLE)；补端到端测试断言坏引用转自纠正、不逃逸、留审计。
+  - [已解决] Round 3 Should — 审计失败未隔离（run.py `_record_capability_audit` 包 try/except）；CONTRACT_MISMATCH 记为 REJECT（不低报为通过）。
+  - [环境阻断] Docker daemon 未运行 — 无法起 PG 做真实落库回归，50 skipped 是集成用例环境守卫；INSERT 结构已用 mock SQL 测试证明，实际落库待 Docker 起来后 `docker compose -f docker-compose.dev.yml --profile core up -d` 重跑。
+- 产物 / 改动：见 ADR §11.5 已更新状态与代码阅读指南 §5.3/§9。
+- 闸门 / 下一步：最终门禁 → 提交+push（延续用户上次授权的工作流）。
+
+## 独立 review 报告（续）
+
+### Round 3：补做两项的独立复审（全新上下文子代理）
+- 结论：Blocker 1 / Should 2 / Nit 2；Blocker 已修待复审。
+- Findings：
+  - [Blocker] `capabilities.py:76` + `invoke.py:69` — S3 reader 的 ValueError/KeyError/OSError 非 CoreError，穿透 load() 与 run() 的 catch。已修：`invoke.py` handler 调用外包 try/except 转 CoreError（业务/infra 分类），补 `test_load_handler_valueerror_becomes_coreerror` / `test_load_handler_oserror_becomes_infra` / `test_handler_valueerror_self_corrects_without_crash`。
+  - [Should] `run.py:_record_capability_audit` 无异常隔离 — 已修 try/except（丢证据不打挂业务）。
+  - [Should] `capability_audit_adapter.py` CONTRACT_MISMATCH 记 None（低报通过）— 已修 `is_reject = decision != "LOADED"`。

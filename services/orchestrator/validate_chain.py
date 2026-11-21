@@ -376,6 +376,7 @@ def validate_chain(
             pref.hit,
             pref.reason,
             trace_id,
+            capability_kind="skill",  # ADR-003：技能预取统一记能力族
         )
     )
     # step15 前置解析：need_skill 结构化请求若存在，先解析以便 skill 事件带归因（§4.2）。
@@ -422,6 +423,8 @@ def validate_chain(
                 ns.decision,
                 ns.reason,
                 trace_id,
+                capability_id=req.recipe_id,  # ADR-003：统一能力句柄
+                level=2,  # need_skill 请求即 L2 正文加载
             )
         )
         if not ns.ok:

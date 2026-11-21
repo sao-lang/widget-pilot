@@ -156,7 +156,7 @@ run.py:162  assemble(SlotConfig(capability_catalog=...))          ← 进上下�
 
 **这是最容易断的地方**：任何一环缺失，模型就看不到能力，整个渐进披露变成死代码。
 
-### 5.2 `orchestrator/capabilities.py`（207 行）—— 首批 6 个能力
+### 5.2 `orchestrator/capabilities.py`（237 行）—— 首批 6 个能力 + S3 reader 工厂
 
 | id | kind | 实现 |
 |---|---|---|
@@ -174,7 +174,9 @@ run.py:162  assemble(SlotConfig(capability_catalog=...))          ← 进上下�
 | `control_plane/attachments/vision.py` | 58 | 视觉理解：复用 ModelGateway 发多模态消息；无网关时 `degraded=True`，不造假语义 |
 | `sandbox_runner/executor.py` | 71 | `docker run --rm -i` 执行；`isolation_note="none"`——**暂无沙箱隔离，禁止生产处理不可信代码** |
 | `context/slots.py` | 87 | L0 目录槽位固定在系统契约之后、规程之前（保 prompt caching） |
-| `migrations/0008_capability_columns.py` | 49 | 给 M06 两表加 `capability_id`/`level`/`capability_kind` 列（DDL 已落，写入方待补） |
+| `migrations/0008_capability_columns.py` | 49 | 给 M06 两表加 `capability_id`/`level`/`capability_kind` 列（写入方已补齐） |
+| `orchestrator/capability_audit_adapter.py` | 52 | 把 loop 的 L1/L2 请求写进 need_skill_log；`LOADED→decision=None` / `DENIED→REJECT`，兼容既有 Counter 口径 |
+| `capabilities.py::make_s3_blob_reader` | — | 附件原文 reader：拆 `key#sha256:hash` 校验读取，无 hash/篡改 fail-closed |
 
 ---
 
@@ -227,8 +229,11 @@ ADR §11.5 登记的未完成项，代码里有明确痕迹：
 
 1. **Docker 执行无沙箱隔离** — `executor.py:17 isolation_note="none"`；禁止生产处理不可信代码。
 2. **视觉模型真实端点待环境** — `vision.py` 无网关时 `degraded=True`，测试用 mock。
-3. **三表新列 DDL 已落但写入方待补** — 迁移 0008 有列，`NeedSkillLogRow` 尚未写新列。
-4. **附件 S3 reader 待装配** — `capabilities.py:50` 默认本地路径 reader。
+
+另两项（原 §11.5 第 3、4 条）已于 2026-11-21 补齐，读代码时会看到它们的实现痕迹：
+
+- **附件 S3 reader** — `capabilities.py:make_s3_blob_reader()` + `deps.py` 注入 `S3ObjectStore()`；按 `key#sha256:hash` 校验读取，无 hash/篡改 fail-closed。默认本地 reader 仅供测试。
+- **能力日志写入** — `NeedSkillLogRow`/`pg_stores` 写迁移 0008 新列；loop 经 `CapabilityAudit` 协议 + `ProductionCapabilityAudit` 记录 L1/L2 请求（PG 实际落库待真实环境回归）。
 
 ---
 

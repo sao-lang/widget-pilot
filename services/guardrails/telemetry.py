@@ -38,6 +38,8 @@ class SkillPrefetchLogRow:
     hit: bool
     reason: str | None
     trace_id: str = ""
+    capability_kind: str | None = None
+    """能力族标记（ADR-003）；旧记录为 None，新技能预取记 'skill'。"""
 
 
 @dataclass(slots=True, frozen=True)
@@ -53,3 +55,7 @@ class NeedSkillLogRow:
     decision: HitDecision | None
     reason: str | None
     trace_id: str = ""
+    capability_id: str | None = None
+    """统一能力句柄（ADR-003）；旧 need_skill 记录为 None，新记录填 id。"""
+    level: int | None = None
+    """披露层级 1=详情 / 2=执行或正文（ADR-003）；旧记录为 None。"""

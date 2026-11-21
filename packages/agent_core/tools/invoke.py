@@ -66,7 +66,20 @@ def load(d: Decision) -> ToolResult:
             args = spec.args_model.model_validate(d.args)
         except ValidationError as e:
             raise CoreError.business(ReasonCode.INPUT_INVALID, f"invalid args for {spec.id!r}: {e}") from e
-        result = spec.handler(args)
+        try:
+            result = spec.handler(args)
+        except CoreError:
+            raise  # 保留 handler 自己的业务/infra 分类
+        except (ValueError, KeyError) as exc:
+            # 附件引用缺失/无 hash/hash 不符：模型可自纠正的契约违规（业务失败）
+            raise CoreError.business(
+                ReasonCode.CONTRACT_MISMATCH, f"capability {spec.id!r} bad ref: {exc}"
+            ) from exc
+        except Exception as exc:  # 外部 handler 未知故障收口为 infra
+            # S3/网络/超时等未知故障：基础设施类，交重试策略
+            raise CoreError.infra(
+                ReasonCode.SANDBOX_UNAVAILABLE, f"capability {spec.id!r} handler failed: {exc}"
+            ) from exc
     elif spec.kind == "skill":
         result = f"body:{spec.payload_ref}" if spec.body is None else spec.body
     else:

@@ -65,6 +65,25 @@ class ModelGateway(Protocol):
 
 
 @runtime_checkable
+class CapabilityAudit(Protocol):
+    """能力加载审计（ADR-003 未完成项3）：内核不 import 上层，鸭子协议解耦。"""
+
+    def record(
+        self,
+        session_id: str,
+        run_id: str,
+        trace_id: str,
+        capability_id: str,
+        level: int,
+        surface: str,
+        decision: str,
+        latency_ms: int,
+    ) -> None:
+        """记录一条 L1/L2 能力请求（只追加，不含原文/密钥）。"""
+        ...
+
+
+@runtime_checkable
 class CapabilityGuard(Protocol):
     """能力加载闸门（ADR-003）：内核不 import 上层，用鸭子协议解耦。"""
 
@@ -248,3 +267,5 @@ class Deps:
     """能力加载闸门（ADR-003）；生产必注入，None 时内核用确定性默认闸门。"""
     object_store: ObjectStore | None = None
     """对象存储（ADR-003 / B5）；生产必注入，用于能力结果落 ref。"""
+    capability_audit: CapabilityAudit | None = None
+    """能力加载审计（ADR-003 未完成项3）；None 时不记录（测试/无审计环境）。"""
