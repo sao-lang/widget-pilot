@@ -1,9 +1,9 @@
 # 多 Widget 任务的多 Agent 协作架构：整合设计
 
-**状态**: 草案整合视图（2026-11-22）；**多 widget 任务直接采用多 Agent 角色协作**，不是"扇出 vs 多 agent"二选一
+**状态**: v1.0 整合视图（2026-11-22）；**多 widget 任务直接采用多 Agent 角色协作**，不是"扇出 vs 多 agent"二选一
 **范围**: 一次用户消息要求生成 ≥2 个 widget 时，从入口校验、约束式规划、任务扇出，到每个任务内 Generator/Reviewer 角色协作、汇总回传的完整链路
 **关系**: `docs/adr/ADR-006-一次对话多控件生成的主控调度与子任务并发.md`（任务层：身份、事件、扇出、校验时序）、`docs/adr/ADR-007-多Agent角色协作架构.md`（角色层：角色、消息、黑板、终止协议）。本文是两者的统一阅读入口；单项决策与变更记录仍留在 ADR。
-**当前进度**: **文档阶段**。用户已拍板 ADR-006 的 O1/O3/O5 与规划器方向，ADR-007 的 O1/O2/O3 按推荐项收敛，并明确"多 widget 任务下的多 agent 架构直接接进来、先写文档"。未改生产代码，未跑测试。
+**当前进度**: **任务层 + 角色层代码已落地（2026-11-22）**。ADR-006 任务层（契约 kind=21、head=0017、`tasks/` 任务层、保守触发、seq 原子域、事件归因）与 ADR-007 角色层（Router 六种类型化消息、`agent_workspace` 乐观锁、Generator/Reviewer 循环、GatewayPlanLLM/GatewayGenerator/GatewayReviewer 真实模型端口）均已改码；全量 **622 passed**（真 PG/Redis/Docker 集成真跑）、ruff 全绿、pyright 0 errors、contracts drift=[]。**缺口（不冒充已实现）**：无真实模型端点（生产 fail-fast、测试 mock，多 widget 端到端跑不了真模型）；M08 V3 门禁未强制串进 `run()`；reasoning SSE tail/前端折叠未做。逐块状态见 §8 路线图与 ADR-006 §12 / ADR-007 §10。
 
 ---
 
@@ -89,7 +89,7 @@
 |---|---|
 | 标识 | `session_id` → `parent_run_id` → `task_id` → `run_id`；角色层再加 `agent_id` / `role` / `turn` |
 | 事件字段 | 在现有 8 个 required 字段上加 `taskId` / `taskIndex` / `role` / `turn` / `agentId`（均可选） |
-| 事件 kind | 17 → 20：新增 `agent_message` / `review` / `delegate`；同步 `enums.source.json`、schema、四生成物与 `test_m03_contract.py` 计数断言 |
+| 事件 kind | ✅ **17 → 21**：新增 `agent_message` / `review` / `delegate`（本 ADR）+ `reasoning`（ADR-008）；已同步 `enums.source.json`、schema、四生成物与 `test_m03_contract.py` 计数断言（21），drift=[] |
 | 事件归因 | `done`/`error` 带 `taskId` = 任务级；不带 = 会话级，只有 Coordinator 能发会话级 `done`/`error` |
 | seq | Redis 原子 `INCR` 统一域 `wp:eventseq:{session_id}`，以 `max(session.last_seq, 窗口最大 seq)` 做 seed；解决并发撞号 |
 | SessionState | 仍 8 值，不扩；任务/角色状态放内部枚举与黑板 |
@@ -108,14 +108,14 @@
 
 | 类别 | 文件 / 迁移 | 变更 |
 |---|---|---|
-| 事件 schema | `packages/contracts/events.schema.json` | 加 5 个可选字段；新增 3 个 kind；`plan` oneOf 增对象分支；error/notice discriminator 保持 fail-closed |
-| 枚举 | `packages/contracts/enums.source.json` | `AgentEventKind` 17→20；`$constants` 加 3 个上限；SessionState/ReasonCode 不变 |
-| REST | `packages/contracts/openapi.yaml` | clarifications 加可选 `taskId`；`GET /sessions/{id}` 加 `tasks[]` 摘要 |
-| Python 契约 | `agent_core/types.py:AgentEvent`、`contracts/types.py:TaskFields` | 手写镜像同步 |
-| 生成物 | `pnpm gen:enums/zod/openapi/python` | 四同步，`pnpm contracts:check` drift=[] |
-| DB | `0012_generation_tasks`、`0013_agent_collaboration` | 任务表 + `agent_message` / `agent_workspace`；`guard_hit`/audit 加 task_id |
-| 模型端口 | `PlannerPort` / `GeneratorPort` / `ReviewerPort` | 真实接线 + 生产 fail-fast；测试 mock；登记模型缺口文档 |
-| 测试 | `tests/unit/test_m03_contract.py` 等 | kind 计数 20；单任务入队/终态断言不变；新增并发、消息、黑板与返修用例 |
+| 事件 schema | `packages/contracts/events.schema.json` | ✅ 加 5 个可选字段（`taskId/taskIndex/role/turn/agentId`）；新增 plan/guard/sandbox/reasoning/agent_message/review/delegate payload 分支；`plan` oneOf 增对象分支；error/notice discriminator 保持 fail-closed |
+| 枚举 | `packages/contracts/enums.source.json` | ✅ `AgentEventKind` **17→21**（+reasoning/agent_message/review/delegate）；`$constants` 加 3 个上限；SessionState/ReasonCode 不变 |
+| REST | `packages/contracts/openapi.yaml` | ✅ clarifications 加可选 `taskId`；`GET /sessions/{id}` 加 `tasks[]` 摘要；`/api/sessions/{id}/tasks`、`/api/tasks/{id}/turns`、`target_task_id` 真消费 |
+| Python 契约 | `agent_core/types.py:AgentEvent`、`contracts/types.py:TaskFields` | ✅ 手写镜像同步 |
+| 生成物 | `pnpm gen:enums/zod/openapi/python` | ✅ 四同步，`pnpm contracts:check` drift=[] |
+| DB | `0015_generation_tasks`、`0016_agent_collab`、`0017_session_bundle_ref` | ✅ 任务表 + `agent_message` / `agent_workspace` + `task_turn` / `sessions.bundle_ref`；`guard_hit`/audit 加 task_id；head=0017、真 PG upgrade 通过 |
+| 模型端口 | `GatewayPlanLLM` / `GatewayGenerator` / `GatewayReviewer`（`tasks/model_ports.py`） | ✅ 真实 `deps.model` 接线 + 生产 fail-fast；测试 mock；缺口登记 M07 §2.10–2.12 |
+| 测试 | `tests/unit/test_m03_contract.py` 等 | ✅ kind 计数 21；单任务入队/终态断言不变；任务层单测 12 + DB 层 24 + M08 单测 57/集成 5；全量 622 passed |
 
 ## §7 已拍板 / 假设 / 未决
 
@@ -128,20 +128,22 @@
 | 已拍板 | 角色维度 | 功能角色 Planner/Generator/Reviewer，不按 widget 类型 |
 | 已拍板 | 框架 | 继续手写最小协议，不引入 Agent 框架（D-5 不变） |
 | 已拍板 | 通信 | 中心路由 + 类型化消息，不做点对点自由通信 |
-| 已拍板 | 本次范围 | 先写文档整合；多 widget 任务直接接多 Agent 架构，不改码 |
+| 已拍板 | 本次范围 | v0.1 原为"先写文档整合、不改码"；**v1.0 已改码落地**——多 widget 任务直接接多 Agent 架构（任务层 + 角色层代码已落地，见 §8） |
 | 假设 | 并发上限 | 默认 3、硬上限 8（O4 未正式拍板，按此推进） |
-| 未决 | §1.7 非目标 | ADR-007 批准即正式撤销"不做多 Agent 角色编排"，留痕不删历史 |
+| 已生效 | §1.7 非目标 | ADR-007 批准即**正式撤销**"不做多 Agent 角色编排"，留痕不删历史（见 ADR-007 头部 / §1） |
 
-## §8 路线图（每阶段独立验收）
+## §8 路线图与完成状态（每阶段独立验收）
 
-| 阶段 | 内容 | 出口 |
-|---|---|---|
-| 文档（当前） | 本文 + ADR-006 v0.2 + ADR-007 v0.1 + 索引同步 | 三份文档口径一致，无相互矛盾的分支描述 |
-| P0 | 契约 + `0012`/`0013` 迁移 + 四生成物同步 | `contracts:check` drift=[]；alembic head=0013；现有测试不降 |
-| P1 | `FactExtractor` + `PlanLLM`（mock） + `PlanValidator`；N=1 零回归 | 单任务全绿；规划器单测覆盖幻觉附件 id、歧义、有界修复 |
-| P2 | 任务扇出/汇总、独立 run、seq 原子化、事件 taskId | 3 任务并发，seq 无重复无缺口，成本 3 行独立 |
-| P3 | **角色层直接接入多 widget 任务**：Router、黑板、Generator/Reviewer、返修与循环升级 | 3 任务各跑一轮评审；事件带 role/turn/agentId；单条 `done` |
-| P4 | 澄清 / 取消 / 预算 / 文档与模型缺口同步；真实端点联调 | 全部验收用例通过；无真实端点时多 widget 登记环境阻断 |
+**状态更新于 2026-11-22（v1.0）**：P0–P3 代码已落地并验收；P4 文档/模型缺口已同步，真实端点联调因无端点登记环境阻断。
+
+| 阶段 | 内容 | 出口 | 状态（v1.0） |
+|---|---|---|---|
+| 文档（v0.1） | 本文 + ADR-006 v0.2 + ADR-007 v0.1 + 索引同步 | 三份文档口径一致，无相互矛盾的分支描述 | ✅ 完成（v0.1 阶段留痕），本轮三份 ADR + 本文 + 00 总览索引已同步为 v1.0 |
+| P0 | 契约 + 迁移 + 四生成物同步 | `contracts:check` drift=[]；alembic head 前移；现有测试不降 | ✅ 完成：kind **17→21**、head=**0017_session_bundle_ref**（迁移 `0015/0016/0017`）、四同步 drift=[] |
+| P1 | `FactExtractor` + `PlanLLM`（真实 deps.model）+ `PlanValidator`；N=1 零回归 | 单任务全绿；规划器单测覆盖幻觉附件 id、歧义、有界修复 | ✅ 代码完成：`tasks/planner.py`/`ports.py`/`model_ports.py`；保守触发下单任务直路零回归。缺口：无真实端点 → 生产 fail-fast、测试 mock |
+| P2 | 任务扇出/汇总、独立 run、seq 原子化、事件 taskId | 3 任务并发，seq 无重复无缺口，成本 3 行独立 | ✅ 完成：`tasks/fanout.py`/`coordinator.py`/`events.py`/`pg_stores.py`；seq 域 `wp:eventseq:{session_id}`；任务层单测 12 + DB 层 24 |
+| P3 | **角色层直接接入多 widget 任务**：Router、黑板、Generator/Reviewer、返修与循环升级 | 3 任务各跑一轮评审；事件带 role/turn/agentId；单条 `done` | ✅ 代码完成：`tasks/router.py`（六种消息）、`pg_stores.py`（黑板乐观锁）、`roles.py`（MAX_REVIEW_ROUNDS=2、同 hash 升级人工）；kind 含 agent_message/review/delegate。真模型端到端未做（无端点） |
+| P4 | 澄清 / 取消 / 预算 / 文档与模型缺口同步；真实端点联调 | 全部验收用例通过；无真实端点时多 widget 登记环境阻断 | 🟡 文档与缺口已同步；真实端点联调 ❌（无端点，登记环境阻断）。M08 V3 门禁未强制串进 `run()`（见 M08 §9.0） |
 
 ## §9 验收要点（合并）
 
@@ -165,3 +167,4 @@
 | 版本 | 日期 | 变更 |
 |---|---|---|
 | v0.1 | 2026-11-22 | 首次整合；按用户澄清将多 Agent 角色层直接接入多 widget 任务链路，取消"扇出 vs 多 agent"二选一表述 |
+| v1.0 | 2026-11-22 | 任务层 + 角色层代码已落地：本文进度从"文档阶段"改为"代码已落地"；§4/§6 事件 kind 更正为 17→21（+reasoning）；§6 迁移更正为 `0015/0016/0017`、head=0017、模型端口更正为 GatewayPlanLLM/GatewayGenerator/GatewayReviewer；§7 本次范围从"不改码"改为"已改码"、§1.7 非目标撤销生效；§8 路线图 P0–P3 ✅、P4 🟡（真实端点联调 + M08 V3 门禁未做）；登记三类缺口（无真实模型端点 / M08 V3 未强制串进 run() / reasoning SSE tail 未做）。全量 622 passed。 |

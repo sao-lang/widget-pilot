@@ -1,6 +1,6 @@
-# ADR-007：多 Agent 角色协作架构（草案）
+# ADR-007：多 Agent 角色协作架构（v1.0，代码已落地；§1.7 非目标已撤销）
 
-**状态**: 草案 / **未批准**（2026-11-22；需 ADR-006 P0–P2 与 M20 真实模型端点就绪后才可进入规格固化）
+**状态**: **v1.0 已落地（2026-11-22）**——角色层（Router 六种类型化消息、`agent_workspace` 乐观锁、Generator/Reviewer 功能角色循环 `MAX_REVIEW_ROUNDS=2` 同 hash 升级人工、模型端口 GatewayPlanLLM/GatewayGenerator/GatewayReviewer）均已改码；事件带 role/turn/agentId，AgentEventKind 17→21。**批准生效**：正式撤销 §1.7"不做多 Agent 角色编排"（留痕不删历史），D-5"不用 Agent 框架"保留。全量 **622 passed**（真 PG/Redis/Docker 集成真跑）、ruff 全绿、pyright 0 errors、contracts drift=[]。**缺口**：无真实模型端点 → 生产 fail-fast、测试 mock（§1 第 2 点按用户拍板处理）；详见 §10/§12。
 **范围**: 多 widget 任务（N>1）**默认接入**的功能角色协作层（生成、评审、返修）；定义角色、通信、共享状态、预算、终止与可观测协议。单任务 N=1 仍走 ADR-006 零回归分支，不启用角色层。
 **关联**: ADR-003（能力渐进披露）、ADR-004（意图去类型化）、ADR-005（进护栏）、**ADR-006（并发扇出，本 ADR 的前置任务层）**；统一阅读入口 `docs/多Widget任务的多Agent协作架构-整合设计.md`；`docs/modules/00-总览与模块地图.md` §1.6 D-5 / §1.7
 **变更类型**: 架构级设计变更；用户 2026-11-22 明确"多 widget 任务下的多 agent 架构直接接进来"，本 ADR 不再是可选升级路径。批准即正式撤销 §1.7"不做多 Agent 角色编排"（留痕不删历史）。D-5"不用 Agent 框架"保留（用户已拍板手写最小协议）。
@@ -10,10 +10,10 @@
 
 ## §1 前置门槛（不满足不得开工）
 
-1. ADR-006 的 P0（契约+迁移）、P1（规划器+单任务零回归）、P2（fan-out/fan-in、seq 原子化、事件 taskId）已验收。
-2. M20 真实模型端点/分档/L4 Gateway 已接线——本 ADR 的角色 agent 全是模型驱动，不能靠 mock 上生产；mock 只用于协议单测。
-3. 沙箱-runner 并发压测通过，且 cost per completed task 有基线数据（ADR-006 扇出版）。
-4. 用户拍板 O1–O5（§11）。
+1. ADR-006 的 P0（契约+迁移）、P1（规划器+单任务零回归）、P2（fan-out/fan-in、seq 原子化、事件 taskId）已验收——✅ **v1.0 已满足**（head=0017、kind=21、`tasks/` 任务层、seq 原子域；见 ADR-006 §12）。
+2. M20 真实模型端点/分档/L4 Gateway 已接线——**本轮用户拍板处理：当前无真实模型端点/key，按"生产 fail-fast + 测试 mock"覆盖**（不静默降级、不冒充已接真模型）。`GatewayPlanLLM`/`GatewayGenerator`/`GatewayReviewer` 走真实 `deps.model`，缺 env 直接起不来（fail-fast）；协议与角色循环单测用 mock 端口；多任务/角色层端到端跑不了真模型，登记"环境阻断"（见 M07 模型缺口文档 §2.10–2.12）。**原门槛"真端点已接线"未满足，但按用户拍板以 fail-fast+mock 覆盖，不阻塞代码落地**。
+3. 沙箱-runner 并发压测通过，且 cost per completed task 有基线数据（ADR-006 扇出版）——🟡 M08 真 Docker 一次性沙箱已落地（5 个集成用例 + 57 单测），但**并发压测与 A/B `cost per completed task` 基线未做**（§9 启用门槛保留）。
+4. 用户拍板 O1–O5（§11）——✅ O1/O2/O3 按推荐项已收敛；O4（启动时机）随本轮 fail-fast+mock 方案落地；O5（§1.7 非目标）本 ADR 批准即撤销，已生效。
 
 ## §2 与 ADR-006 的本质差异
 
@@ -57,10 +57,10 @@
 | 新标识 | `agent_id`（一次角色实例的 uuid）、`role`、`turn`（会话内轮次） |
 | checkpoint | 主键仍 `(run_id, rev)`；state blob 内增加 `role/turn/agent_id`，不扩表主键 |
 | 事件字段 | 在 ADR-006 的 `taskId/taskIndex` 之上再加 `role`、`turn`、`agentId` |
-| 事件 kind | 新增 `agent_message` / `review` / `delegate` 三种（17 → 20），须同步 `enums.source.json`、schema、四生成物与 `tests/unit/test_m03_contract.py` 计数断言 |
+| 事件 kind | ✅ 新增 `agent_message` / `review` / `delegate` 三种 + ADR-008 的 `reasoning` 一种，**最终 17 → 21**（`enums.source.json` 实测 21）；已同步 schema、四生成物与 `test_m03_contract` 计数断言（21），drift=[] |
 | 会话状态 | `SessionState` 仍 8 值；新增内部 `AgentSessionState`（`PLANNING / EXECUTING / REVIEWING / REVISING / ESCALATED`）仅存黑板，不进 M02 契约 |
-| DB 迁移 | `0013_agent_collaboration`：`agent_message` / `agent_workspace` 两表 + `generation_task` 加 `role/turn` 列 |
-| 模型端口 | `PlannerPort` / `GeneratorPort` / `ReviewerPort` 三个真实端口；生产缺端点 fail-fast，测试 mock |
+| DB 迁移 | ✅ 实际落地为 `0016_agent_collab`（设计期编号 `0013_agent_collaboration`）：`agent_message` / `agent_workspace` 两表 + `generation_task` 加 `role/turn` 列；真 PG upgrade 通过 |
+| 模型端口 | ✅ `tasks/model_ports.py` 的 GatewayPlanLLM/GatewayGenerator/GatewayReviewer 走真实 `deps.model`；生产缺端点 fail-fast，测试 mock |
 
 ## §7 预算、终止与异常
 
@@ -82,14 +82,16 @@
 - M11 新增指标：每 task 轮次数、评审往返数、消息量、升级人工率、**cost per completed task**。
 - **启用门槛**：在相同任务集上做 A/B 对照——`cost per completed task` 必须优于 ADR-006 单角色扇出基线，且首次通过率 / 附件规格错配率有显著改善，否则不默认启用角色层，结论写回 O 段（延续 2026-11-22 早前评估的结论）。收益论证与代价表见 `docs/多Widget任务的多Agent协作架构-整合设计.md` §1.1。
 
-## §10 落地阶段（每阶段独立验收）
+## §10 落地阶段与状态（每阶段独立验收）
 
-| 阶段 | 内容 | 出口 |
-|---|---|---|
-| S0 | ADR-006 P0–P2 + M20 端点 + 沙箱并发压测 | 前置门槛全部满足，有 ADR-006 基线数字 |
-| S1 | 单任务双角色（Generator + Reviewer）协议闭环，mock 模型跑单测、真端点跑集成 | 消息协议、黑板乐观锁、轮次/循环升级均有用例 |
-| S2 | 多任务 × 角色：每 task 独立角色循环，Router fan-in | 3 task 并发协作，事件无撞号，成本按 task+turn 分账 |
-| S3 | 可选：动态委托 / 领域专精角色 | 需再次评审，不自动视为本 ADR 授权范围 |
+**状态更新于 2026-11-22（v1.0）**：S1/S2 代码已落地并有用例（全量 622 passed）；S0 的 M20 真端点按用户拍板以 fail-fast+mock 覆盖、沙箱并发压测未做；S3 仍属未授权范围。
+
+| 阶段 | 内容 | 出口 | 状态（v1.0） |
+|---|---|---|---|
+| S0 | ADR-006 P0–P2 + M20 端点 + 沙箱并发压测 | 前置门槛全部满足，有 ADR-006 基线数字 | 🟡 ADR-006 P0–P2 ✅；M20 真端点 ❌（按 §1 第 2 点 fail-fast+mock 覆盖）；沙箱并发压测 / `cost per completed task` 基线 ❌ 未做（§9 启用门槛保留） |
+| S1 | 单任务双角色（Generator + Reviewer）协议闭环，mock 模型跑单测、真端点跑集成 | 消息协议、黑板乐观锁、轮次/循环升级均有用例 | ✅ 代码落地：`tasks/router.py`（六种类型化消息）、`tasks/pg_stores.py`（`agent_workspace` 乐观锁）、`tasks/roles.py`（`MAX_REVIEW_ROUNDS=2`、同 hash 升级人工）。mock 单测通过；真端点集成 ❌（无端点） |
+| S2 | 多任务 × 角色：每 task 独立角色循环，Router fan-in | 3 task 并发协作，事件无撞号，成本按 task+turn 分账 | ✅ 代码落地（task 层单测 12 + DB 层 24 + `test_m06_multitask_pg` 真 PG）；事件带 `role/turn/agentId`、seq 原子域无撞号；真模型端到端联调 ❌（无端点，环境阻断） |
+| S3 | 可选：动态委托 / 领域专精角色 | 需再次评审，不自动视为本 ADR 授权范围 | ❌ 未做（S3 不在本轮授权范围，需另起评审） |
 
 ## §11 未决（需用户拍板）
 
@@ -106,3 +108,4 @@
 | 版本 | 日期 | 变更 |
 |---|---|---|
 | v0.1 草案 | 2026-11-22 | 首次提出；定义功能角色、中心路由类型化消息、版本化黑板、三级预算与终止协议；明确前置依赖 ADR-006 P0–P2 + M20，正式撤销 §1.7 待批准 |
+| v1.0 已落地 | 2026-11-22 | 角色层代码全部落地并验收（全量 622 passed）：Router 六种类型化消息 + `agent_workspace` 乐观锁 + Generator/Reviewer 角色循环（MAX_REVIEW_ROUNDS=2，同 hash 升级人工）+ GatewayPlanLLM/GatewayGenerator/GatewayReviewer 真实模型端口 + 事件 role/turn/agentId；kind 17→21、迁移 `0016_agent_collab`。§1 第 2 点按用户拍板以 fail-fast+mock 覆盖"M20 真端点"门槛；§1.7 非目标正式撤销生效；登记模型端点缺失与沙箱并发压测/AB 基线未做两项缺口。 |
