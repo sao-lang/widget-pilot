@@ -7,18 +7,45 @@ interrupt 幂等（A6）；终态 resume 抛 ConflictError（A13）；
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from hashlib import sha256
 from uuid import uuid4
 
 from packages.contracts import enums as _contracts_enums
 from packages.contracts.enums import SessionState
 from services.control_plane.api.guard import ForbiddenError, TenantGuard
-from services.control_plane.audit.ledger import AuditActions, AuditLedgerPort
+from services.control_plane.audit.ledger import (
+    AuditActions,
+    AuditLedgerPort,
+    AuditPayload,
+)
 from services.control_plane.sessions.stores import (
     SessionRow,
     SessionStore,
 )
 
-__all__ = ["ConflictError", "SessionError", "SessionService"]
+__all__ = [
+    "REVISION_ACTION",
+    "REVISION_DECISION_MERGE",
+    "REVISION_DECISION_RERUN",
+    "ConflictError",
+    "SessionError",
+    "SessionService",
+]
+
+_REVISION_STATES = frozenset(
+    (SessionState.AWAITING_INPUT, SessionState.PAUSED, SessionState.RUNNING)
+)
+"""可重入的会话修正前置态（ADR-010 §4：挂起撤销 / 暂停改需求 / 运行中改需求）。"""
+
+REVISION_ACTION = "session_revision"
+"""会话修正审计动作（复用 AuditLedgerPort，不新增 ReasonCode）。"""
+
+REVISION_DECISION_MERGE = "REVOKED_MERGE"
+"""审计 decision：撤销违法输入后合并为新 message（§4.1）。"""
+
+REVISION_DECISION_RERUN = "RERUN"
+"""审计 decision：任务中途改需求重新走任务（§4.2）。"""
 
 
 class SessionError(Exception):
@@ -170,6 +197,72 @@ class SessionService:
         row.original_description = description
         self._commit(row, before_state)
         self._audit(row, AuditActions.STATE_TRANSITION)
+        return row
+
+    def submit_revision(
+        self,
+        session_id: str,
+        user_id: str,
+        description: str,
+        *,
+        keep_original: bool = False,
+        revision: str = REVISION_DECISION_RERUN,
+        detail: Mapping[str, str | int | bool | None] | None = None,
+    ) -> SessionRow:
+        """会话修正重入（ADR-010 §4）：非终态 → RUNNING，分配新 run_id。
+
+        与 submit_message 的区别：允许从 AWAITING_INPUT / PAUSED / RUNNING 重入
+        （挂起撤销、暂停改需求、运行中改需求），不重置 checkpoint_rev——历史
+        checkpoint 与审计均保留（§4.2 不删历史）。撤销合并场景传
+        ``keep_original=True`` 保留 T1 原文；改需求重跑默认用新描述覆盖槽位。
+
+        Args:
+            session_id: 会话标识。
+            user_id: 请求者；经 _assert_owner 校验归属。
+            description: 本轮有效描述（合并结果或新需求），不可为空。
+            keep_original: True 保留 original_description 原值（T1 原文不删）；
+                False 用 description 覆盖（新一轮需求）。
+            revision: 审计 decision（REVOKED_MERGE / RERUN），复用现有码不新增 ReasonCode。
+            detail: 附加审计证据（如剥离词、合并摘要哈希）；只含标量，不写原文。
+
+        Returns:
+            迁移后的会话行（state=RUNNING，run_id 新分配）。
+
+        Raises:
+            ForbiddenError: 非会话 owner。
+            ConflictError: 会话为终态或 DRAFT（无可修正的先前轮次）。
+            SessionError: description 为空。
+        """
+        row = self.get(session_id)
+        self._assert_owner(user_id, row)
+        if row.state not in _REVISION_STATES:
+            raise ConflictError("session not in a revisable state")
+        if not description:
+            raise SessionError("description required")
+        before_state = row.state
+        row.state = SessionState.RUNNING
+        row.run_id = str(uuid4())
+        if not keep_original:
+            row.original_description = description
+        self._commit(row, before_state)
+        self._audit(row, AuditActions.STATE_TRANSITION)
+        payload: AuditPayload = {
+            "from_state": before_state.value,
+            "revision": revision,
+            "keep_original": keep_original,
+            "description_sha256": sha256(description.encode("utf-8")).hexdigest(),
+            "checkpoint_rev": row.checkpoint_rev,
+        }
+        if detail:
+            payload.update(detail)
+        self.audit.append(
+            user_id=row.user_id,
+            session_id=row.id,
+            action=REVISION_ACTION,
+            decision=revision,
+            payload=payload,
+            trace_id="",
+        )
         return row
 
     def mark_awaiting_input(

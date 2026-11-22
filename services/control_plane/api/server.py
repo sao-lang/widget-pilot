@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Iterator
+from hashlib import sha256
 from typing import (  # purity-exempt: FastAPI 路由返回 JSONResponse/信封双形态的框架边界
     TYPE_CHECKING,
     Any,  # purity-exempt: FastAPI 路由双形态返回值的框架边界（同文件内三处已登记）
@@ -43,7 +44,14 @@ from services.control_plane.accounts.stores import UserRow, UserStore
 from services.control_plane.api.guard import ForbiddenError
 from services.control_plane.attachments.ports import AttachmentServicePort
 from services.control_plane.audit.ledger import AuditLedgerPort
+from services.control_plane.sessions.revision import (
+    default_revision_phrases,
+    detect_revocation_intent,
+    merge_revised_description,
+)
 from services.control_plane.sessions.service import (
+    REVISION_DECISION_MERGE,
+    REVISION_DECISION_RERUN,
     ConflictError,
     SessionError,
     SessionService,
@@ -55,6 +63,7 @@ from services.orchestrator.memory.ports import PreferenceStorePort
 from services.orchestrator.memory.types import PreferenceField, PreferenceSource
 from services.orchestrator.tasks.fanout import needs_planning
 from services.orchestrator.tasks.ports import TaskStorePort, TaskTurnStorePort
+from services.orchestrator.tasks.states import TaskState, is_terminal
 
 if TYPE_CHECKING:
     # task_enqueuer 的生产实现是 RedisTaskQueue.enqueue(task: Task) -> str；
@@ -379,56 +388,128 @@ def create_app(
         req: MessageReq,
         user: UserRow = CurrentUser,
     ) -> ApiEnvelope:
-        """提交描述：DRAFT→RUNNING，202 已受理（§5.5 异步语义）。"""
-        # ADR-009 O4：多任务会话无 target_task_id → ASK_USER 消歧，不擅自选最近任务。
-        if task_store is not None and not req.target_task_id:
+        """提交描述：DRAFT→RUNNING，202 已受理（§5.5 异步语义）。
+
+        ADR-010 §4：仅两类会话修正分支走新逻辑，其余请求保持原链路。
+        """
+        # ---- ADR-010 §4：识别两类修正场景（纯确定性判定，零模型） ----
+        run_description = req.description
+        revision_kind = ""
+        revision_detail: dict[str, str | int | bool | None] | None = None
+        try:
+            current = sessions.get(session_id)
+        except SessionError:
+            current = None  # 不存在交回下方原链路处理（保持原 400 行为）
+        if current is not None and current.state is SessionState.AWAITING_INPUT:
+            # §4.1：用户撤回上一轮违法输入 → 合并 T1+T2，T1 原文不删。
+            phrases = default_revision_phrases()
+            if detect_revocation_intent(req.description, phrases.revocations):
+                merged = merge_revised_description(
+                    current.original_description,
+                    req.description,
+                    dangerous_phrases=phrases.dangerous_actions,
+                    revocation_phrases=phrases.revocations,
+                )
+                run_description = merged.description
+                revision_kind = REVISION_DECISION_MERGE
+                # 合并证据写审计（只存哈希与剥离词，不写违法原文）。
+                revision_detail = {
+                    "stripped_phrases": ",".join(merged.stripped_phrases),
+                    "merged_sha256": sha256(run_description.encode("utf-8")).hexdigest(),
+                }
+        elif (
+            current is not None
+            and current.state in (SessionState.RUNNING, SessionState.PAUSED)
+            and req.description.strip() != current.original_description.strip()
+        ):
+            # §4.2：任务中途"改需求"→ 中断当前 run 后以新描述重走。
+            # 描述未变仍是重复提交（原 400 语义），不误入重跑分支。
+            run_description = req.description
+            revision_kind = REVISION_DECISION_RERUN
+
+        if revision_kind:
+            # §4.2：interrupt 幂等（RUNNING→PAUSED，PAUSED 保持），checkpoint/审计不删。
+            if revision_kind == REVISION_DECISION_RERUN:
+                try:
+                    sessions.interrupt(session_id, user.id)
+                except ForbiddenError as exc:
+                    raise HTTPException(status.HTTP_403_FORBIDDEN, _CODE_FORBIDDEN) from exc
+                except ConflictError as exc:
+                    raise HTTPException(status.HTTP_409_CONFLICT, _CODE_CONFLICT) from exc
+                # 旧任务置 CANCELLED（可选注入 task_store，无则不强制）。
+                if task_store is not None:
+                    for task in task_store.list_by_session(session_id):
+                        if not is_terminal(task.state):
+                            task_store.update_state(task.id, TaskState.CANCELLED.value)
             try:
-                existing = task_store.list_by_session(session_id)
-                if len(existing) > 1:
-                    sessions.mark_awaiting_input(
-                        session_id, user.id, "CLARIFICATION_REQUIRED", "task-disambiguation"
-                    )
-                    return _ok(
-                        {
-                            "state": "AWAITING_INPUT",
-                            "reason_code": "CLARIFICATION_REQUIRED",
-                            "question": "会话内有多个任务，请用 target_task_id 指定要修改的任务",
-                            "tasks": [getattr(t, "id", "") for t in existing],
-                        }
-                    )
+                row = sessions.submit_revision(
+                    session_id,
+                    user.id,
+                    run_description,
+                    keep_original=revision_kind == REVISION_DECISION_MERGE,
+                    revision=revision_kind,
+                    detail=revision_detail,
+                )
             except ForbiddenError as exc:
                 raise HTTPException(status.HTTP_403_FORBIDDEN, _CODE_FORBIDDEN) from exc
-            except Exception as exc:  # noqa: BLE001 - 消歧是增强路径，读失败沿用单任务链路
-                logger.warning("task disambiguation read failed: %s", exc)
-        try:
-            row = sessions.submit_message(
-                session_id, user.id, req.description, req.attachment_ids
-            )
-        except ForbiddenError as exc:
-            raise HTTPException(status.HTTP_403_FORBIDDEN, _CODE_FORBIDDEN) from exc
-        except (SessionError, ConflictError) as exc:
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST, _CODE_INPUT_INVALID
-            ) from exc
+            except (SessionError, ConflictError) as exc:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST, _CODE_INPUT_INVALID
+                ) from exc
+        else:
+            # ---- 原有链路（零回归）：ADR-009 消歧 + submit_message ----
+            # ADR-009 O4：多任务会话无 target_task_id → ASK_USER 消歧，不擅自选最近任务。
+            if task_store is not None and not req.target_task_id:
+                try:
+                    existing = task_store.list_by_session(session_id)
+                    if len(existing) > 1:
+                        sessions.mark_awaiting_input(
+                            session_id, user.id, "CLARIFICATION_REQUIRED", "task-disambiguation"
+                        )
+                        return _ok(
+                            {
+                                "state": "AWAITING_INPUT",
+                                "reason_code": "CLARIFICATION_REQUIRED",
+                                "question": "会话内有多个任务，请用 target_task_id 指定要修改的任务",
+                                "tasks": [getattr(t, "id", "") for t in existing],
+                            }
+                        )
+                except ForbiddenError as exc:
+                    raise HTTPException(status.HTTP_403_FORBIDDEN, _CODE_FORBIDDEN) from exc
+                except Exception as exc:  # noqa: BLE001 - 消歧是增强路径，读失败沿用单任务链路
+                    logger.warning("task disambiguation read failed: %s", exc)
+            try:
+                row = sessions.submit_message(
+                    session_id, user.id, req.description, req.attachment_ids
+                )
+            except ForbiddenError as exc:
+                raise HTTPException(status.HTTP_403_FORBIDDEN, _CODE_FORBIDDEN) from exc
+            except (SessionError, ConflictError) as exc:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST, _CODE_INPUT_INVALID
+                ) from exc
+
         # B1b：迁移成功后入队，dispatcher 消费驱动 agent loop（生产注入真实队列）
-        task_enqueuer(
-            {
-                "session_id": session_id,
-                "user_id": user.id,  # review B1：挂起回写需真实 owner 做租户校验
-                "run_id": row.run_id or "",
-                "description": req.description,
-                "grid": req.grid or "",
-                # C1/A1（v1.8）：附件 id 随任务下传，dispatcher 过校验链时
-                # 由 guardrail_adapter 解析成 AttachmentView（此前是死参数）。
-                "attachment_ids": req.attachment_ids,
-                # ADR-009：多任务消歧 / 迭代目标 task_id（单任务为空）。
-                "target_task_id": req.target_task_id or "",
-                # ADR-006：保守触发——仅多 widget 信号请求置 planning=1 走约束式规划器；
-                # 单 widget 保持原 run() 直路零回归。触发只决定是否调规划器，N/描述/附件
-                # 仍全由真实 PlanLLM 裁定（见 services/orchestrator/tasks/fanout.py）。
-                "planning": "1" if needs_planning(req.description) else "0",
-            }
-        )
+        task_payload: Task = {
+            "session_id": session_id,
+            "user_id": user.id,  # review B1：挂起回写需真实 owner 做租户校验
+            "run_id": row.run_id or "",
+            "description": run_description,
+            "grid": req.grid or "",
+            # C1/A1（v1.8）：附件 id 随任务下传，dispatcher 过校验链时
+            # 由 guardrail_adapter 解析成 AttachmentView（此前是死参数）。
+            "attachment_ids": req.attachment_ids,
+            # ADR-009：多任务消歧 / 迭代目标 task_id（单任务为空）。
+            "target_task_id": req.target_task_id or "",
+            # ADR-006：保守触发——仅多 widget 信号请求置 planning=1 走约束式规划器；
+            # 单 widget 保持原 run() 直路零回归。触发只决定是否调规划器，N/描述/附件
+            # 仍全由真实 PlanLLM 裁定（见 services/orchestrator/tasks/fanout.py）。
+            "planning": "1" if needs_planning(run_description) else "0",
+        }
+        if revision_kind:
+            # 下游据此识别修正轮次（仅两分支携带，正常路径不含该字段）。
+            task_payload["revision"] = revision_kind
+        task_enqueuer(task_payload)
         return _ok({"runId": row.run_id, "state": row.state.value})
 
     @app.post(
