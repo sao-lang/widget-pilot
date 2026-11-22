@@ -5,24 +5,32 @@
 
 与 guard_hit_pg 同纪律：PG 失败抛异常（fail-closed），**绝不降级为非持久化实现**；
 事件 hash 链写入在单事务内用 advisory xact lock 串行化，读末行 row_hash 后追加。
+SQL 全部由 SQLAlchemy ORM/方言表达，不依赖具体 DBAPI。
 """
+
 from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import asdict, replace
-from typing import (  # purity-exempt: cast(Any,dict_row) 收口需要
-    Any,  # purity-exempt: cast(Any,dict_row) 唯一收口点需要
-    Final,
-    Literal,
-    cast,
-)
+from typing import Final, Literal, cast
 
-import psycopg
-from psycopg.rows import DictRow, dict_row
-from psycopg.types.json import Jsonb
+from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.orm import Session
 
 from packages.agent_core.types import JsonValue
+from services.control_plane.db import make_session_factory, session_scope
+from services.control_plane.models import (
+    PreferenceEvent as PreferenceEventRow,
+)
+from services.control_plane.models import (
+    UserPreference as PreferenceRow,
+)
+from services.control_plane.models import (
+    UserProcedure as ProcedureRow,
+)
 from services.orchestrator.memory.learning import decide_operation
 from services.orchestrator.memory.types import (
     SOURCE_WEIGHT,
@@ -36,40 +44,10 @@ from services.orchestrator.memory.types import (
     utc_now_iso,
 )
 
-_TABLE_PREFERENCE: Final[str] = "user_preference"
-_TABLE_EVENT: Final[str] = "preference_event"
-_TABLE_PROCEDURE: Final[str] = "user_procedure"
 _GENESIS: Final[str] = "0" * 64
-_ASYNCPG_PREFIX: Final[str] = "postgresql+asyncpg://"
 # 固定 bigint 写锁键：串行化偏好写入 + 事件链追加，防并发断链/丢版本。
 _PREF_ADVISORY_KEY: Final[int] = 2026112102
 _PROC_ADVISORY_KEY: Final[int] = 2026112103
-
-
-def _sync_dsn(url: str) -> str:
-    """asyncpg DSN（compose 生产格式）→ psycopg 同步 DSN（B1）。
-
-    Args:
-        url: 原始 DSN，可能是 SQLAlchemy asyncpg 格式。
-
-    Returns:
-        psycopg 可直接连接的同步 DSN。
-    """
-    return (
-        url.replace(_ASYNCPG_PREFIX, "postgresql://", 1)
-        if url.startswith(_ASYNCPG_PREFIX)
-        else url
-    )
-
-
-def _connect_dict(dsn: str) -> psycopg.Connection[DictRow]:
-    """开返回 dict 行的同步连接（psycopg 类型桩未把 row_factory 纳入泛型推断）。"""
-    # purity-exempt: dict_row 由 psycopg 运行时注入行工厂，类型桩无法表达其行类型，
-    # 故在此唯一 helper 收口一次动态转换，下游只用 DictRow 具名视图。
-    return cast(
-        psycopg.Connection[DictRow],
-        psycopg.connect(dsn, row_factory=cast(Any, dict_row)),  # purity-exempt: psycopg row_factory 类型桩缺口，唯一收口点
-    )
 
 
 def _json_text(value: JsonValue | None) -> str:
@@ -77,9 +55,9 @@ def _json_text(value: JsonValue | None) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
-def _encode_fields(fields: dict[PreferenceField, FieldEvidence]) -> Jsonb:
-    """领域字段映射 → jsonb 值（StrEnum 由 json 自然序列化为字符串）。"""
-    return Jsonb({key.value: asdict(value) for key, value in fields.items()})
+def _encode_fields(fields: dict[PreferenceField, FieldEvidence]) -> dict[str, object]:
+    """领域字段映射 → JSONB 可序列化的 dict（StrEnum 键转字符串）。"""
+    return {key.value: asdict(value) for key, value in fields.items()}
 
 
 def _as_float(value: JsonValue | None, default: float = 0.0) -> float:
@@ -134,16 +112,18 @@ def _event_hash(event: PreferenceEvent, prev_hash: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _event_from_row(row: DictRow) -> PreferenceEvent:
+def _event_from_row(row: Mapping[str, object]) -> PreferenceEvent:
     """PG 行 → 事件（验链用；非法枚举/字段抛错，不静默容忍脏数据）。"""
+    old_value = cast(JsonValue | None, row["old_value"])
+    new_value = cast(JsonValue | None, row["new_value"])
     return PreferenceEvent(
         user_id=str(row["user_id"]),
         session_id=str(row["session_id"]) if row["session_id"] else None,
         field_name=PreferenceField(str(row["field_name"])),
-        old_value=row["old_value"],
-        new_value=row["new_value"],
+        old_value=old_value,
+        new_value=new_value,
         source=PreferenceSource(str(row["source"])),
-        source_weight=float(row["source_weight"]),
+        source_weight=float(cast(float, row["source_weight"])),
         decision=PreferenceDecision(str(row["decision"])),
         trace_id=str(row["trace_id"]),
         created_at=str(row["created_at"]),
@@ -153,111 +133,107 @@ def _event_from_row(row: DictRow) -> PreferenceEvent:
     )
 
 
-def _load_preference(cur: psycopg.Cursor[DictRow], user_id: str) -> UserPreference:
+def _load_preference(session: Session, user_id: str) -> UserPreference:
     """在已加锁事务内读取偏好；无记录返回空偏好（version=1）。"""
-    cur.execute(
-        f"SELECT fields, version FROM {_TABLE_PREFERENCE} WHERE user_id = %s",
-        (user_id,),
-    )
-    row = cur.fetchone()
+    row = session.execute(
+        select(PreferenceRow.fields, PreferenceRow.version).where(
+            PreferenceRow.user_id == user_id
+        )
+    ).first()
     if row is None:
         return UserPreference(user_id=user_id)
     return UserPreference(
         user_id=user_id,
-        fields=_decode_fields(row["fields"]),
-        version=int(row["version"]),
+        fields=_decode_fields(row.fields),
+        version=int(row.version),
     )
 
 
-def _upsert_preference(cur: psycopg.Cursor[DictRow], pref: UserPreference) -> None:
+def _upsert_preference(session: Session, pref: UserPreference) -> None:
     """整行 upsert：fields 全量覆盖，version 写调用方算好的绝对值。"""
-    cur.execute(
-        f"INSERT INTO {_TABLE_PREFERENCE} (user_id, fields, version) "
-        "VALUES (%s, %s, %s) "
-        "ON CONFLICT (user_id) DO UPDATE "
-        "SET fields = EXCLUDED.fields, version = EXCLUDED.version",
-        (pref.user_id, _encode_fields(pref.fields), pref.version),
+    fields = _encode_fields(pref.fields)
+    session.execute(
+        pg_insert(PreferenceRow)
+        .values(user_id=pref.user_id, fields=fields, version=pref.version)
+        .on_conflict_do_update(
+            index_elements=["user_id"], set_={"fields": fields, "version": pref.version}
+        )
     )
 
 
 def _mark_events(
-    cur: psycopg.Cursor[DictRow],
+    session: Session,
     user_id: str,
     field_name: PreferenceField,
     column: Literal["superseded_at", "revoked_at"],
     now: str,
 ) -> None:
     """把该用户该字段仍有效的 ADD/UPDATE 事件标记失效（只改列，不删行）。"""
-    cur.execute(
-        f"UPDATE {_TABLE_EVENT} SET {column} = %s "
-        "WHERE user_id = %s AND field_name = %s "
-        f"AND {column} IS NULL AND decision IN (%s, %s)",
-        (
-            now,
-            user_id,
-            field_name.value,
-            PreferenceDecision.ADD.value,
-            PreferenceDecision.UPDATE.value,
-        ),
+    target = getattr(PreferenceEventRow, column)
+    session.execute(
+        update(PreferenceEventRow)
+        .where(PreferenceEventRow.user_id == user_id)
+        .where(PreferenceEventRow.field_name == field_name.value)
+        .where(target.is_(None))
+        .where(
+            PreferenceEventRow.decision.in_(
+                (PreferenceDecision.ADD.value, PreferenceDecision.UPDATE.value)
+            )
+        )
+        .values(**{column: now})
     )
 
 
-def _append_event(cur: psycopg.Cursor[DictRow], event: PreferenceEvent) -> str:
+def _append_event(session: Session, event: PreferenceEvent) -> str:
     """追加一条事件并返回行哈希（读末行 row_hash 串成链）。"""
-    cur.execute(f"SELECT row_hash FROM {_TABLE_EVENT} ORDER BY id DESC LIMIT 1")
-    last = cur.fetchone()
-    prev_hash = str(last["row_hash"]) if last else _GENESIS
+    last = session.execute(
+        select(PreferenceEventRow.row_hash)
+        .order_by(PreferenceEventRow.id.desc())
+        .limit(1)
+    ).first()
+    prev_hash = str(last.row_hash) if last else _GENESIS
     row_hash = _event_hash(event, prev_hash)
-    cur.execute(
-        f"INSERT INTO {_TABLE_EVENT} "
-        "(user_id, session_id, field_name, old_value, new_value, source, "
-        "source_weight, decision, superseded_at, revoked_at, trace_id, "
-        "created_at, row_hash) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-        (
-            event.user_id,
-            event.session_id,
-            event.field_name.value,
-            Jsonb(event.old_value),
-            Jsonb(event.new_value),
-            event.source.value,
-            event.source_weight,
-            event.decision.value,
-            event.superseded_at,
-            event.revoked_at,
-            event.trace_id,
-            event.created_at,
-            row_hash,
-        ),
+    session.add(
+        PreferenceEventRow(
+            user_id=event.user_id,
+            session_id=event.session_id,
+            field_name=event.field_name.value,
+            old_value=event.old_value,
+            new_value=event.new_value,
+            source=event.source.value,
+            source_weight=event.source_weight,
+            decision=event.decision.value,
+            superseded_at=event.superseded_at,
+            revoked_at=event.revoked_at,
+            trace_id=event.trace_id,
+            created_at=event.created_at,
+            row_hash=row_hash,
+        )
     )
     return row_hash
 
 
 class PgPreferenceStore:
-    """语义 + 情节记忆 PG 存储：四操作写入 + 事件 hash 链（PG 失败抛异常）。
-
-    Attributes:
-        _dsn: 归一化后的 psycopg 同步 DSN（asyncpg 前缀已去除）。
-    """
+    """语义 + 情节记忆 PG 存储：四操作写入 + 事件 hash 链（PG 失败抛异常）。"""
 
     def __init__(self, dsn: str) -> None:
-        """注入 PG DSN（每次读写开短连接，跨实例天然读回同一份数据）。"""
-        self._dsn = _sync_dsn(dsn)  # 归一化后的同步 DSN
+        """注入 PG DSN（每次读写开短 Session，跨实例天然读回同一份数据）。"""
+        self._factory = make_session_factory(dsn)
 
     def get(self, user_id: str) -> UserPreference:
         """按 user_id 读取偏好；无记录返回空偏好（version=1，fields 为空）。"""
-        with _connect_dict(self._dsn) as conn:
-            row = conn.execute(
-                f"SELECT fields, version FROM {_TABLE_PREFERENCE} "
-                "WHERE user_id = %s",
-                (user_id,),
-            ).fetchone()
+        with session_scope(self._factory) as session:
+            row = session.execute(
+                select(PreferenceRow.fields, PreferenceRow.version).where(
+                    PreferenceRow.user_id == user_id
+                )
+            ).first()
         if row is None:
             return UserPreference(user_id=user_id)
         return UserPreference(
             user_id=user_id,
-            fields=_decode_fields(row["fields"]),
-            version=int(row["version"]),
+            fields=_decode_fields(row.fields),
+            version=int(row.version),
         )
 
     def apply(
@@ -274,10 +250,10 @@ class PgPreferenceStore:
         ADD/UPDATE 写偏好并 version+1；UPDATE 把旧事件标 superseded_at；
         NOOP 只记事件（低权重不覆盖高权重，I-M3）；DELETE 仅由 clear 入口触发。
         """
-        value = cast(JsonValue, new_value)
-        with _connect_dict(self._dsn) as conn, conn.cursor() as cur:
-            cur.execute("SELECT pg_advisory_xact_lock(%s)", (_PREF_ADVISORY_KEY,))
-            pref = _load_preference(cur, user_id)
+        value = new_value
+        with session_scope(self._factory) as session:
+            session.execute(select(func.pg_advisory_xact_lock(_PREF_ADVISORY_KEY)))
+            pref = _load_preference(session, user_id)
             existing = pref.fields.get(field_name)
             decision = decide_operation(existing, source, value)
             now = utc_now_iso()
@@ -302,12 +278,12 @@ class PgPreferenceStore:
                     updated_at=now,
                 )
                 pref.version += 1
-                _upsert_preference(cur, pref)
+                _upsert_preference(session, pref)
                 # UPDATE 才失效旧证据；ADD 没有旧证据可失效。
                 if decision is PreferenceDecision.UPDATE:
-                    _mark_events(cur, user_id, field_name, "superseded_at", now)
+                    _mark_events(session, user_id, field_name, "superseded_at", now)
             # NOOP 分支：不碰偏好表、版本不变，仅落审计事件（I-M3）。
-            row_hash = _append_event(cur, event)
+            row_hash = _append_event(session, event)
         return pref, replace(event, row_hash=row_hash)
 
     def clear(
@@ -317,9 +293,9 @@ class PgPreferenceStore:
         trace_id: str,
     ) -> UserPreference:
         """清除全字段或指定字段：值置空、version+1、事件保留 revoked_at。"""
-        with _connect_dict(self._dsn) as conn, conn.cursor() as cur:
-            cur.execute("SELECT pg_advisory_xact_lock(%s)", (_PREF_ADVISORY_KEY,))
-            pref = _load_preference(cur, user_id)
+        with session_scope(self._factory) as session:
+            session.execute(select(func.pg_advisory_xact_lock(_PREF_ADVISORY_KEY)))
+            pref = _load_preference(session, user_id)
             targets = (
                 list(pref.fields)
                 if fields is None
@@ -328,7 +304,7 @@ class PgPreferenceStore:
             now = utc_now_iso()
             for field_name in targets:
                 old = pref.fields.pop(field_name)
-                _mark_events(cur, user_id, field_name, "revoked_at", now)
+                _mark_events(session, user_id, field_name, "revoked_at", now)
                 # 清除属显式操作：DELETE 事件的 source 记 EXPLICIT，新值置空。
                 deleted = PreferenceEvent(
                     user_id=user_id,
@@ -343,20 +319,34 @@ class PgPreferenceStore:
                     created_at=now,
                     revoked_at=now,
                 )
-                _append_event(cur, deleted)
+                _append_event(session, deleted)
             pref.version += 1
-            _upsert_preference(cur, pref)
+            _upsert_preference(session, pref)
         return pref
 
     def verify_event_chain(self) -> bool:
         """从 PG 读回全链：按 id 顺序复算 prev_hash 衔接与行哈希是否一致。"""
-        with _connect_dict(self._dsn) as conn:
-            rows = conn.execute(
-                f"SELECT * FROM {_TABLE_EVENT} ORDER BY id"
-            ).fetchall()
+        with session_scope(self._factory) as session:
+            rows = session.execute(
+                select(
+                    PreferenceEventRow.user_id,
+                    PreferenceEventRow.session_id,
+                    PreferenceEventRow.field_name,
+                    PreferenceEventRow.old_value,
+                    PreferenceEventRow.new_value,
+                    PreferenceEventRow.source,
+                    PreferenceEventRow.source_weight,
+                    PreferenceEventRow.decision,
+                    PreferenceEventRow.trace_id,
+                    PreferenceEventRow.created_at,
+                    PreferenceEventRow.superseded_at,
+                    PreferenceEventRow.revoked_at,
+                    PreferenceEventRow.row_hash,
+                ).order_by(PreferenceEventRow.id)
+            ).all()
         expected_prev = _GENESIS
         for row in rows:
-            event = _event_from_row(row)
+            event = _event_from_row(cast(Mapping[str, object], row._mapping))
             if event.row_hash != _event_hash(event, expected_prev):
                 return False
             expected_prev = event.row_hash
@@ -364,33 +354,36 @@ class PgPreferenceStore:
 
 
 class PgProcedureStore:
-    """程序记忆 PG 存储：显式采纳 +1 / 撤销 -1（归零失效不删行）。
-
-    Attributes:
-        _dsn: 归一化后的 psycopg 同步 DSN。
-    """
+    """程序记忆 PG 存储：显式采纳 +1 / 撤销 -1（归零失效不删行）。"""
 
     def __init__(self, dsn: str) -> None:
         """注入 PG DSN（表内只存结构化短字段，不写 prompt 前缀，I-P1）。"""
-        self._dsn = _sync_dsn(dsn)  # 归一化后的同步 DSN
+        self._factory = make_session_factory(dsn)
 
     def get_for_type(self, user_id: str, widget_type: str) -> list[UserProcedure]:
         """按用户 + 控件类型读取采纳记录；含归零行（count=0 不注入由端口判定）。"""
-        with _connect_dict(self._dsn) as conn:
-            rows = conn.execute(
-                f"SELECT user_id, recipe_id, widget_type, adopt_count, "
-                f"last_adopted_at, version FROM {_TABLE_PROCEDURE} "
-                "WHERE user_id = %s AND widget_type = %s ORDER BY recipe_id",
-                (user_id, widget_type),
-            ).fetchall()
+        with session_scope(self._factory) as session:
+            rows = session.execute(
+                select(
+                    ProcedureRow.user_id,
+                    ProcedureRow.recipe_id,
+                    ProcedureRow.widget_type,
+                    ProcedureRow.adopt_count,
+                    ProcedureRow.last_adopted_at,
+                    ProcedureRow.version,
+                )
+                .where(ProcedureRow.user_id == user_id)
+                .where(ProcedureRow.widget_type == widget_type)
+                .order_by(ProcedureRow.recipe_id)
+            ).all()
         return [
             UserProcedure(
-                user_id=str(row["user_id"]),
-                recipe_id=str(row["recipe_id"]),
-                widget_type=str(row["widget_type"]),
-                adopt_count=int(row["adopt_count"]),
-                last_adopted_at=str(row["last_adopted_at"]),
-                version=int(row["version"]),
+                user_id=str(row.user_id),
+                recipe_id=str(row.recipe_id),
+                widget_type=str(row.widget_type),
+                adopt_count=int(row.adopt_count),
+                last_adopted_at=str(row.last_adopted_at),
+                version=int(row.version),
             )
             for row in rows
         ]
@@ -400,34 +393,41 @@ class PgProcedureStore:
         user_id: str,
         recipe_id: str,
         widget_type: str,
-        trace_id: str,  # purity-exempt: 接口契约参数名，U1 表暂无 trace 列故未落库
+        trace_id: str,  # 接口契约参数名；U1 表暂无 trace 列故未落库
     ) -> UserProcedure:
-        """显式采纳 +1（首次插入为 1）、version+1。
-
-        Args:
-            user_id: 租户隔离键。
-            recipe_id: 被采纳的规程句柄。
-            widget_type: 采纳控件类型。
-            trace_id: 接口约定预留（U1 程序记忆表暂无 trace 列，不落库）。
-        """
+        """显式采纳 +1（首次插入为 1）、version+1。"""
         now = utc_now_iso()
-        with _connect_dict(self._dsn) as conn, conn.cursor() as cur:
-            cur.execute("SELECT pg_advisory_xact_lock(%s)", (_PROC_ADVISORY_KEY,))
-            cur.execute(
-                f"INSERT INTO {_TABLE_PROCEDURE} "
-                "(user_id, recipe_id, widget_type, adopt_count, "
-                "last_adopted_at, version) "
-                "VALUES (%s, %s, %s, %s, %s, %s) "
-                "ON CONFLICT (user_id, recipe_id) DO UPDATE SET "
-                f"widget_type = EXCLUDED.widget_type, "
-                f"adopt_count = {_TABLE_PROCEDURE}.adopt_count + 1, "
-                f"last_adopted_at = EXCLUDED.last_adopted_at, "
-                f"version = {_TABLE_PROCEDURE}.version + 1 "
-                "RETURNING user_id, recipe_id, widget_type, adopt_count, "
-                "last_adopted_at, version",
-                (user_id, recipe_id, widget_type, 1, now, 1),
+        with session_scope(self._factory) as session:
+            session.execute(select(func.pg_advisory_xact_lock(_PROC_ADVISORY_KEY)))
+            stmt = (
+                pg_insert(ProcedureRow)
+                .values(
+                    user_id=user_id,
+                    recipe_id=recipe_id,
+                    widget_type=widget_type,
+                    adopt_count=1,
+                    last_adopted_at=now,
+                    version=1,
+                )
+                .on_conflict_do_update(
+                    index_elements=["user_id", "recipe_id"],
+                    set_={
+                        "widget_type": widget_type,
+                        "adopt_count": ProcedureRow.adopt_count + 1,
+                        "last_adopted_at": now,
+                        "version": ProcedureRow.version + 1,
+                    },
+                )
+                .returning(
+                    ProcedureRow.user_id,
+                    ProcedureRow.recipe_id,
+                    ProcedureRow.widget_type,
+                    ProcedureRow.adopt_count,
+                    ProcedureRow.last_adopted_at,
+                    ProcedureRow.version,
+                )
             )
-            row = cur.fetchone()
+            row = session.execute(stmt).mappings().first()
         if row is None:  # INSERT ... RETURNING 必返一行；否则 fail-closed
             raise RuntimeError("user_procedure upsert 未返回行")
         return UserProcedure(
@@ -441,12 +441,14 @@ class PgProcedureStore:
 
     def record_revoke(self, user_id: str, recipe_id: str) -> None:
         """采纳撤销 -1（下限 0，归零只失效不删行）、version+1；无记录则无操作。"""
-        with _connect_dict(self._dsn) as conn, conn.cursor() as cur:
-            cur.execute("SELECT pg_advisory_xact_lock(%s)", (_PROC_ADVISORY_KEY,))
-            cur.execute(
-                f"UPDATE {_TABLE_PROCEDURE} "
-                "SET adopt_count = GREATEST(adopt_count - 1, 0), "
-                "version = version + 1 "
-                "WHERE user_id = %s AND recipe_id = %s",
-                (user_id, recipe_id),
+        with session_scope(self._factory) as session:
+            session.execute(select(func.pg_advisory_xact_lock(_PROC_ADVISORY_KEY)))
+            session.execute(
+                update(ProcedureRow)
+                .where(ProcedureRow.user_id == user_id)
+                .where(ProcedureRow.recipe_id == recipe_id)
+                .values(
+                    adopt_count=func.greatest(ProcedureRow.adopt_count - 1, 0),
+                    version=ProcedureRow.version + 1,
+                )
             )

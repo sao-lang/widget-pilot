@@ -5,13 +5,12 @@
 - RedisIdempotencyStore：side_effect 幂等表（Redis SETNX 原子占位）
 - RedisEventBus：Redis Streams 扇出 + 保留窗口
 
-这些是**完整可运行的异步实现**（psycopg3 / redis-py asyncio）。本机无 Docker
-daemon 时 §8 验收用 conftest 内存替身跑全用例；真实 PG SQL 原子性
-（UPDATE ... WHERE lease_until < now()）与 Redis Streams 扇出须在有容器环境
-补跑 A3/A4/A11，未补跑项在 overview 如实登记，不冒充 GATE OK。
+这些是**完整可运行的同步实现**（SQLAlchemy ORM / redis-py 同步客户端）。
+真实 PG SQL 原子性（UPDATE ... WHERE lease_until < now()）与 Redis Streams
+扇出须在有容器环境补跑 A3/A4/A11，本机无容器时集成用例按守卫 skip。
 
-注：M03 Protocol 是同步签名（见 injection.py），生产适配器用 psycopg 同步
-连接承载；事件总线用 redis-py 同步客户端，避免把 async 泄漏进内核。
+注：M03 Protocol 是同步签名（见 injection.py），生产适配器用 SQLAlchemy
+Session 承载；事件总线用 redis-py 同步客户端，避免把 async 泄漏进内核。
 """
 
 from __future__ import annotations
@@ -21,7 +20,6 @@ from collections.abc import Callable, Mapping
 from datetime import datetime
 from typing import Final
 
-import psycopg
 import redis
 from sqlalchemy import func, literal, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -30,7 +28,11 @@ from sqlalchemy.exc import IntegrityError
 from packages.agent_core.errors import CoreError
 from packages.agent_core.types import AgentEvent, CheckpointNode, State
 from services.control_plane.accounts.constants import LEASE_TTL_S
-from services.control_plane.db import make_session_factory, session_scope
+from services.control_plane.db import (
+    is_unique_violation,
+    make_session_factory,
+    session_scope,
+)
 from services.control_plane.models import Checkpoint
 
 # 事件解码由调用方注入（Stream data → AgentEvent），避免适配器重实现 schema 还原（规则 8）
@@ -133,9 +135,9 @@ class PgCheckpointStore:
                     )
                 )
         except IntegrityError as exc:
-            # 行为等价：原 psycopg 实现直接抛 UniqueViolation（I1 断言点），
-            # ORM 包装成 IntegrityError——此处还原底层异常，保持对外契约不变
-            if isinstance(exc.orig, psycopg.errors.UniqueViolation):
+            # 行为等价：原实现直接抛驱动 UniqueViolation（I1 断言点）。
+            # ORM 包装成 IntegrityError——此处还原底层异常，保持对外契约不变。
+            if exc.orig is not None and is_unique_violation(exc.orig):
                 raise exc.orig from exc
             raise
 

@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import psycopg
 import pytest
 import redis
 
@@ -23,6 +22,7 @@ from services.control_plane.sessions.service import SessionService
 from services.orchestrator.deps import build_checkpoint_store
 from services.orchestrator.dispatcher import Dispatcher, RedisTaskQueue
 from tests.support import pass_through_validator
+from tests.support.pg import pg_available, pg_connection, pg_execute
 
 PG_DSN = "postgresql://widgetpilot:widgetpilot_dev@127.0.0.1:5432/widgetpilot"
 REDIS_URL = "redis://127.0.0.1:6379/0"
@@ -31,9 +31,9 @@ QUEUE_KEY = "orchestrator:tasks:test-dispatcher"
 
 def _infra_available() -> bool:
     """探测 PG/Redis 是否可达；不可达则跳过（不冒充通过）。"""
+    if not pg_available(PG_DSN):
+        return False
     try:
-        with psycopg.connect(PG_DSN, connect_timeout=2):
-            pass
         redis.from_url(REDIS_URL, socket_connect_timeout=2).ping()
     except Exception:  # noqa: BLE001 - 连通性探测吞掉任意连接错误以决定 skip
         return False
@@ -49,12 +49,8 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(autouse=True)
 def clean_infra() -> None:
     """每例前清空会话/checkpoint 表与任务队列（集成测试隔离）。"""
-    with psycopg.connect(PG_DSN) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "TRUNCATE TABLE users, sessions, checkpoint, audit_event CASCADE"
-            )
-        conn.commit()
+    with pg_connection(PG_DSN) as conn:
+        pg_execute(conn, "TRUNCATE TABLE users, sessions, checkpoint, audit_event CASCADE")
     client = redis.from_url(REDIS_URL)
     client.delete(QUEUE_KEY)
     client.flushdb()

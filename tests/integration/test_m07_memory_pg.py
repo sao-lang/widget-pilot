@@ -8,11 +8,7 @@
 """
 from __future__ import annotations
 
-from typing import Any, cast
-
-import psycopg
 import pytest
-from psycopg.rows import dict_row
 
 from services.orchestrator.memory.pg_stores import (
     PgPreferenceStore,
@@ -23,6 +19,7 @@ from services.orchestrator.memory.types import (
     PreferenceField,
     PreferenceSource,
 )
+from tests.support.pg import pg_available, pg_connection, pg_execute, pg_fetchall
 
 PG_DSN = "postgresql://widgetpilot:widgetpilot_dev@127.0.0.1:5432/widgetpilot"
 _TABLES = ("user_preference", "preference_event", "user_procedure")
@@ -30,12 +27,7 @@ _TABLES = ("user_preference", "preference_event", "user_procedure")
 
 def _infra_available() -> bool:
     """探测 PG 可达性；不可达则 skip。"""
-    try:
-        with psycopg.connect(PG_DSN, connect_timeout=2):
-            pass
-    except Exception:  # noqa: BLE001 - 连通性探测吞任意错以决定 skip
-        return False
-    return True
+    return pg_available(PG_DSN)
 
 
 pytestmark = pytest.mark.skipif(
@@ -47,20 +39,20 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(autouse=True)
 def clean_memory_tables() -> None:
     """每例前 TRUNCATE 三张记忆表并重置自增 id（集成测试隔离）。"""
-    with psycopg.connect(PG_DSN) as conn:
-        conn.execute(f"TRUNCATE TABLE {', '.join(_TABLES)} RESTART IDENTITY")
-        conn.commit()
+    with pg_connection(PG_DSN) as conn:
+        pg_execute(conn, f"TRUNCATE TABLE {', '.join(_TABLES)} RESTART IDENTITY")
 
 
 def _event_rows() -> list[dict[str, object]]:
     """从 PG 读回全部事件行（按 id 升序，dict 形式便于断言）。"""
-    with psycopg.connect(PG_DSN, row_factory=cast(Any, dict_row)) as conn:
-        rows = conn.execute(
+    with pg_connection(PG_DSN) as conn:
+        rows = pg_fetchall(
+            conn,
             "SELECT id, user_id, field_name, old_value, new_value, source, "
             "decision, superseded_at, revoked_at, trace_id, row_hash "
-            "FROM preference_event ORDER BY id"
-        ).fetchall()
-    return [dict(row) for row in rows]
+            "FROM preference_event ORDER BY id",
+        )
+    return [dict(row._mapping) for row in rows]
 
 
 class TestPgPreferenceStore:
@@ -121,12 +113,12 @@ class TestPgPreferenceStore:
             "u1", None, PreferenceField.PALETTE, "2x2", PreferenceSource.EXPLICIT, "t2"
         )
         assert store.verify_event_chain() is True
-        with psycopg.connect(PG_DSN) as conn:
-            conn.execute(
+        with pg_connection(PG_DSN) as conn:
+            pg_execute(
+                conn,
                 "UPDATE preference_event SET new_value = '\"TAMPERED\"'::jsonb "
-                "WHERE id = 1"
+                "WHERE id = 1",
             )
-            conn.commit()
         assert store.verify_event_chain() is False
 
     def test_tenant_isolation(self) -> None:

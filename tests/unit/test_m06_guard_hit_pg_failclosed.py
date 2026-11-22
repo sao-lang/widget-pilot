@@ -1,6 +1,6 @@
 """M06 §2.3 / runbook §2：guard_hit PG 留证失败 → 保守拒绝放行。
 
-用 monkeypatch 让 validate_chain 抛 psycopg.Error（模拟 PG 不可用/写留证失败），
+用 monkeypatch 让 validate_chain 抛 SQLAlchemyError（模拟 PG 不可用/写留证失败），
 验证装配层把它转成拒绝结论（ok=False），绝不降级内存放行。
 """
 
@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from typing import cast
 
-import psycopg
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
 import services.orchestrator.guardrail_adapter as adapter
 from packages.contracts.enums import ReasonCode
@@ -20,7 +20,7 @@ def test_pg_unavailable_returns_reject_not_pass(monkeypatch: pytest.MonkeyPatch)
     """PG 抛错时 build_validator 返回拒绝结论，不放行进模型。"""
     def boom(**kwargs: object) -> None:
         """模拟 guard_hit 留证写 PG 失败。"""
-        raise psycopg.OperationalError("simulated PG outage")
+        raise SQLAlchemyError("simulated PG outage")
 
     class _UnusedRedisClient:
         """占位 Redis 客户端：boom 先抛错，客户端方法不会被调用。"""

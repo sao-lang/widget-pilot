@@ -27,18 +27,13 @@ Thumbs.db
 # 本地日志
 *.log
 
-# Local overview backup & session pointer
-.overview-archive/
-.conductor-session.json
 
 # Local tool state / coverage artifacts
 .VSCodeCounter/
 .coverage
-.migration-ledger.json
 
-# conductor 本地状态（运行痕迹，不进版本库）
-.commitment-ledger.json
-.purity-baseline*.json
-
-# conductor 本地状态（运行痕迹，不进版本库）
-.purity-baseline.json
+# conductor 产物（会话记录与契约跟踪入版本库，运行痕迹忽略）
+.conductor/session.json
+.conductor/ledgers/
+.conductor/baselines/
+.conductor/archive/

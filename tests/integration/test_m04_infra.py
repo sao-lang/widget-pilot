@@ -17,7 +17,6 @@ import json
 from datetime import UTC, datetime
 from uuid import uuid4
 
-import psycopg
 import pytest
 import redis
 
@@ -27,6 +26,7 @@ from packages.contracts.enums import SessionState
 from services.control_plane.accounts.pg_stores import PgUserStore
 from services.control_plane.accounts.service import AuthService
 from services.control_plane.accounts.stores import DuplicateEmailError, UserRow
+from services.control_plane.db import is_unique_violation
 from services.control_plane.sessions.pg_stores import PgSessionStore
 from services.control_plane.sessions.service import SessionService
 from services.control_plane.sessions.stores import SessionRow
@@ -37,6 +37,7 @@ from services.orchestrator.adapters import (
     RedisIdempotencyStore,
 )
 from tests.support import AuditLedger
+from tests.support.pg import pg_available, pg_connection, pg_execute
 
 PG_DSN = "postgresql://widgetpilot:widgetpilot_dev@127.0.0.1:5432/widgetpilot"
 REDIS_URL = "redis://127.0.0.1:6379/0"
@@ -44,9 +45,9 @@ REDIS_URL = "redis://127.0.0.1:6379/0"
 
 def _infra_available() -> bool:
     """探测 PG/Redis 是否可达；不可达则跳过集成测试（不冒充通过）。"""
+    if not pg_available(PG_DSN):
+        return False
     try:
-        with psycopg.connect(PG_DSN, connect_timeout=2):
-            pass
         redis.from_url(REDIS_URL, socket_connect_timeout=2).ping()
     except Exception:  # noqa: BLE001 - 连通性探测必须吞掉任意连接错误以决定 skip
         return False
@@ -62,17 +63,15 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(autouse=True)
 def clean_tables() -> None:
     """每个用例前清空 M04 业务表（集成测试隔离，避免跨用例污染）。"""
-    with psycopg.connect(PG_DSN) as conn:
-        with conn.cursor() as cur:
-            for table in (
-                "checkpoint",
-                "side_effect",
-                "audit_event",
-                "sessions",
-                "users",
-            ):
-                cur.execute(f"TRUNCATE TABLE {table} CASCADE")
-        conn.commit()
+    with pg_connection(PG_DSN) as conn:
+        for table in (
+            "checkpoint",
+            "side_effect",
+            "audit_event",
+            "sessions",
+            "users",
+        ):
+            pg_execute(conn, f"TRUNCATE TABLE {table} CASCADE")
     redis.from_url(REDIS_URL).flushdb()
 
 
@@ -121,14 +120,13 @@ class TestPgLease:
         run_id = f"run-{uuid4()}"
         provider.acquire(run_id, "worker-a", ttl_s=1)
         # 直接把 lease_until 改为过去，模拟 worker 崩溃后租约过期
-        with psycopg.connect(PG_DSN) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE checkpoint SET lease_until = now() - interval '1 minute' "
-                    "WHERE run_id = %s",
-                    (run_id,),
-                )
-            conn.commit()
+        with pg_connection(PG_DSN) as conn:
+            pg_execute(
+                conn,
+                "UPDATE checkpoint SET lease_until = now() - interval '1 minute' "
+                "WHERE run_id = %s",
+                (run_id,),
+            )
         assert run_id in provider.scan_expired(datetime.now(UTC))
         takeover = provider.acquire(run_id, "worker-b", ttl_s=30)
         assert takeover is not None
@@ -158,8 +156,9 @@ class TestPgCheckpoint:
         run_id = f"run-{uuid4()}"
         store = PgCheckpointStore(PG_DSN, object_get=lambda ref: b"{}")
         store.save(run_id, 1, CheckpointNode.FINAL, "ref1", "h1")
-        with pytest.raises(psycopg.errors.UniqueViolation):
+        with pytest.raises(Exception) as ei:  # 驱动相关异常，统一按 SQLSTATE 判定
             store.save(run_id, 1, CheckpointNode.FINAL, "ref2", "h2")
+        assert is_unique_violation(ei.value)
 
 
 class TestRedisInfra:

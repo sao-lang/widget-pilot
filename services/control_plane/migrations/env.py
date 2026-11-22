@@ -7,16 +7,17 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+from services.control_plane.db import sync_dsn
+
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 database_url = os.getenv("DATABASE_URL", "")
-# asyncpg URL → alembic 同步驱动 psycopg 兼容处理（迁移用同步连接）
-if database_url.startswith("postgresql+asyncpg://"):
-    database_url = database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
 if not database_url:
     database_url = "postgresql://widgetpilot:widgetpilot_dev@127.0.0.1:5432/widgetpilot"
+# Alembic 走同步连接：与运行时 ORM 统一用 pg8000 驱动。
+database_url = sync_dsn(database_url)
 config.set_main_option("sqlalchemy.url", database_url)
 
 target_metadata = None  # 业务表 DDL 归 M04/M11；基线迁移为手工编写

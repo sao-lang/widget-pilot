@@ -10,7 +10,7 @@ dependencies = [
     "pydantic>=2.9",
     "alembic>=1.14",
     "asyncpg>=0.30",
-    "psycopg[binary]>=3.2",
+    "pg8000>=1.31",  # SQLAlchemy 同步驱动（ORM/Alembic 共用，替代 psycopg）
     "httpx>=0.27",
     "python-dotenv>=1.0",
     # 以下为各模块 §2 技术栈已定稿的运行期基础库（M01 §11.7 差异核对补入）

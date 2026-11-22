@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from packages.agent_core.types import JsonValue
 from services.control_plane.db import make_session_factory, session_scope
-from services.control_plane.models import FactSummary as FactSummaryRow
+from services.control_plane.models_fact_summary import FactSummary as FactSummaryRow
 
 _FACT_ADVISORY_KEY: int = 2026112201
 

@@ -14,9 +14,10 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from sqlalchemy import JSON, BigInteger, Boolean, Float, Index, Integer, Text, func
-from sqlalchemy.dialects.postgresql import TIMESTAMP
+from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from packages.agent_core.types import JsonValue
 from packages.contracts.enums import SessionState, UserRole
 from packages.contracts.types import JsonObject
 from services.control_plane.accounts.stores import UserRow
@@ -129,6 +130,8 @@ class Session(Base):
     """FAILED 原因码（§4.4 A14）。"""
     evidence_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     """FAILED 证据引用（§4.4 A14）。"""
+    bundle_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """当前轮产物 bundle 引用（ADR-009 完整版，迁移 0017）。"""
     created_at: Mapped[datetime] = mapped_column(
         _TzDateTime, nullable=False, server_default=func.now()
     )
@@ -163,6 +166,7 @@ class Session(Base):
             evidence_ref=self.evidence_ref
             if isinstance(self.evidence_ref, str)
             else None,
+            bundle_ref=self.bundle_ref if isinstance(self.bundle_ref, str) else None,
             created_at=_as_datetime(self.created_at),
             updated_at=_as_datetime(self.updated_at),
         )
@@ -328,3 +332,160 @@ class Attachment(Base):
             idem_key=str(self.idem_key or ""),
             evidence_ref=str(self.evidence_ref or ""),
         )
+
+
+class IntentRouteLog(Base):
+    """M06 意图裁定只追加日志（对齐迁移 0005_m06_telemetry）。"""
+
+    __tablename__ = "intent_route_log"
+    __table_args__ = (
+        Index("ix_intent_route_log_session_id", "session_id"),
+        Index("ix_intent_route_log_created_at", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(Text, nullable=False)
+    run_id: Mapped[str] = mapped_column(Text, nullable=False)
+    route_layer: Mapped[str] = mapped_column(Text, nullable=False)
+    intent: Mapped[str] = mapped_column(Text, nullable=False)
+    similarity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    samples_version: Mapped[str] = mapped_column(Text, nullable=False)
+    trace_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    fallback_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        _TzDateTime, nullable=False, server_default=func.now()
+    )
+
+
+class CapabilityAuditLog(Base):
+    """M06 能力请求只追加审计日志（对齐迁移 0005/0008）。"""
+
+    __tablename__ = "capability_audit_log"
+    __table_args__ = (
+        Index("ix_capability_audit_log_session_id", "session_id"),
+        Index("ix_capability_audit_log_created_at", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(Text, nullable=False)
+    run_id: Mapped[str] = mapped_column(Text, nullable=False)
+    capability_id: Mapped[str] = mapped_column(Text, nullable=False)
+    level: Mapped[int] = mapped_column(Integer, nullable=False)
+    turn_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    decision: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trace_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    created_at: Mapped[datetime] = mapped_column(
+        _TzDateTime, nullable=False, server_default=func.now()
+    )
+
+
+class GuardHit(Base):
+    """M06 命中留证只追加日志 + prev_hash 链（对齐迁移 0007_guard_hit）。"""
+
+    __tablename__ = "guard_hit"
+    __table_args__ = (
+        Index("ix_guard_hit_session_id", "session_id"),
+        Index("ix_guard_hit_trace_id", "trace_id"),
+        Index("ix_guard_hit_created_at", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(Text, nullable=False)
+    run_id: Mapped[str] = mapped_column(Text, nullable=False)
+    hit_type: Mapped[str] = mapped_column(Text, nullable=False)
+    rule_id: Mapped[str] = mapped_column(Text, nullable=False)
+    judgement: Mapped[str] = mapped_column(Text, nullable=False)
+    excerpt: Mapped[str] = mapped_column(Text, nullable=False)
+    stage: Mapped[str] = mapped_column(Text, nullable=False, server_default="INPUT")
+    decision: Mapped[str] = mapped_column(Text, nullable=False)
+    trace_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    prev_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    row_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    should_pass: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        _TzDateTime, nullable=False, server_default=func.now()
+    )
+
+
+class UserPreference(Base):
+    """M07 语义记忆：每用户一行字段证据映射 + 版本（对齐迁移 0010）。"""
+
+    __tablename__ = "user_preference"
+
+    user_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    fields: Mapped[dict[str, object]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+
+
+class PreferenceEvent(Base):
+    """M07 情节记忆：只追加事件 + row_hash 链，失效只改列不删行。"""
+
+    __tablename__ = "preference_event"
+    __table_args__ = (
+        Index("ix_preference_event_user_id_field", "user_id", "field_name"),
+        Index("ix_preference_event_row_hash", "row_hash"),
+        Index("ix_preference_event_created_at", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    field_name: Mapped[str] = mapped_column(Text, nullable=False)
+    old_value: Mapped[JsonValue | None] = mapped_column(JSONB, nullable=True)
+    new_value: Mapped[JsonValue | None] = mapped_column(JSONB, nullable=True)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    source_weight: Mapped[float] = mapped_column(Float, nullable=False)
+    decision: Mapped[str] = mapped_column(Text, nullable=False)
+    trace_id: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    superseded_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revoked_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    row_hash: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class UserProcedure(Base):
+    """M07 程序记忆：显式采纳计数，归零失效不删行（对齐迁移 0010）。"""
+
+    __tablename__ = "user_procedure"
+
+    user_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    recipe_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    widget_type: Mapped[str] = mapped_column(Text, nullable=False)
+    adopt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    last_adopted_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+
+
+class CostLedger(Base):
+    """M07 成本账：run_id 唯一幂等追加（对齐迁移 0011_cost_ledger）。"""
+
+    __tablename__ = "cost_ledger"
+    __table_args__ = (
+        Index("ix_cost_ledger_session_id", "session_id"),
+        Index("ix_cost_ledger_user_id", "user_id"),
+        Index("ix_cost_ledger_created_at", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    session_id: Mapped[str] = mapped_column(Text, nullable=False)
+    user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    model_tier: Mapped[str] = mapped_column(Text, nullable=False)
+    tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    iterations: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    tool_calls: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    sandbox_minutes: Mapped[float] = mapped_column(
+        Float, nullable=False, server_default="0"
+    )
+    repro_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        _TzDateTime, nullable=False, server_default=func.now()
+    )
+

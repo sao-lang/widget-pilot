@@ -9,13 +9,13 @@
 
 from __future__ import annotations
 
-import psycopg
 import pytest
 
 from infra.dev.seed.run_seed import seed_accounts
 from packages.contracts.enums import UserRole
 from services.control_plane.accounts.pg_stores import PgUserStore
 from services.control_plane.accounts.service import AuthError, AuthService
+from tests.support.pg import pg_available, pg_connection, pg_execute, pg_scalar
 
 PG_DSN = "postgresql://widgetpilot:widgetpilot_dev@127.0.0.1:5432/widgetpilot"
 SEED_SECRET = "seed-only-secret-not-for-production"
@@ -23,12 +23,7 @@ SEED_SECRET = "seed-only-secret-not-for-production"
 
 def _infra_available() -> bool:
     """探测 PG 是否可达；不可达则跳过（不冒充通过）。"""
-    try:
-        with psycopg.connect(PG_DSN, connect_timeout=2):
-            pass
-    except Exception:  # noqa: BLE001 - 连通性探测必须吞掉任意连接错误以决定 skip
-        return False
-    return True
+    return pg_available(PG_DSN)
 
 
 pytestmark = pytest.mark.skipif(
@@ -40,10 +35,8 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(autouse=True)
 def clean_users() -> None:
     """每例前清空 users 表（集成测试隔离）。"""
-    with psycopg.connect(PG_DSN) as conn:
-        with conn.cursor() as cur:
-            cur.execute("TRUNCATE TABLE users CASCADE")
-        conn.commit()
+    with pg_connection(PG_DSN) as conn:
+        pg_execute(conn, "TRUNCATE TABLE users CASCADE")
 
 
 class TestSeedAccounts:
@@ -63,11 +56,8 @@ class TestSeedAccounts:
         """重复播种不新增行，第二次返回 0。"""
         assert seed_accounts(PG_DSN) == 2
         assert seed_accounts(PG_DSN) == 0
-        with psycopg.connect(PG_DSN) as conn, conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM users")
-            row = cur.fetchone()
-            assert row is not None
-            assert row[0] == 2
+        with pg_connection(PG_DSN) as conn:
+            assert pg_scalar(conn, "SELECT COUNT(*) FROM users") == 2
 
     def test_seeded_account_can_login(self) -> None:
         """argon2 hash 真实可校验：播后的账号能用明文密码登录。"""

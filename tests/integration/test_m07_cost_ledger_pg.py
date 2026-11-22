@@ -7,15 +7,21 @@
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any, cast
 
-import psycopg
 import pytest
-from psycopg.rows import DictRow, dict_row
 
 from services.orchestrator.cost.pg_ledger import PgCostLedger
 from services.orchestrator.cost.ports import CostEntry
+from tests.support.pg import (
+    pg_available,
+    pg_connection,
+    pg_execute,
+    pg_fetchone,
+    pg_scalar,
+)
 
 PG_DSN = "postgresql://widgetpilot:widgetpilot_dev@127.0.0.1:5432/widgetpilot"
 _TABLE = "cost_ledger"
@@ -24,12 +30,7 @@ _FIXED_TIME = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
 
 def _infra_available() -> bool:
     """探测 PG 可达性；不可达则 skip。"""
-    try:
-        with psycopg.connect(PG_DSN, connect_timeout=2):
-            pass
-    except Exception:  # noqa: BLE001 - 连通性探测吞任意错以决定 skip
-        return False
-    return True
+    return pg_available(PG_DSN)
 
 
 pytestmark = pytest.mark.skipif(
@@ -41,9 +42,8 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(autouse=True)
 def clean_cost_ledger() -> None:
     """每例前清空 cost_ledger 表（集成测试隔离）。"""
-    with psycopg.connect(PG_DSN) as conn:
-        conn.execute(f"TRUNCATE TABLE {_TABLE} RESTART IDENTITY")
-        conn.commit()
+    with pg_connection(PG_DSN) as conn:
+        pg_execute(conn, f"TRUNCATE TABLE {_TABLE} RESTART IDENTITY")
 
 
 def _entry() -> CostEntry:
@@ -62,16 +62,17 @@ def _entry() -> CostEntry:
     )
 
 
-def _read_row(run_id: str) -> DictRow | None:
+def _read_row(run_id: str) -> Mapping[str, Any] | None:
     """从 PG 读回指定 run 的账目行（dict 行视图）。"""
-    with psycopg.connect(PG_DSN, row_factory=cast(Any, dict_row)) as conn:
-        row = conn.execute(
+    with pg_connection(PG_DSN) as conn:
+        row = pg_fetchone(
+            conn,
             f"SELECT run_id, session_id, user_id, model_tier, tokens, iterations, "
             f"tool_calls, sandbox_minutes, repro_fingerprint, created_at "
             f"FROM {_TABLE} WHERE run_id = %s",
             (run_id,),
-        ).fetchone()
-    return cast(DictRow | None, row)
+        )
+    return None if row is None else cast(Mapping[str, Any], row._mapping)
 
 
 class TestPgCostLedger:
@@ -99,12 +100,11 @@ class TestPgCostLedger:
         ledger.append(_entry())
         ledger.append(_entry())
 
-        with psycopg.connect(PG_DSN) as conn:
-            count = conn.execute(
-                f"SELECT count(*) FROM {_TABLE} WHERE run_id = %s", ("run-1",)
-            ).fetchone()
-        assert count is not None
-        assert count[0] == 1
+        with pg_connection(PG_DSN) as conn:
+            count = pg_scalar(
+                conn, f"SELECT count(*) FROM {_TABLE} WHERE run_id = %s", ("run-1",)
+            )
+        assert count == 1
 
     def test_repro_fingerprint_persisted(self) -> None:
         """repro_fingerprint（含 preference_version 算出的值）逐字落库。"""

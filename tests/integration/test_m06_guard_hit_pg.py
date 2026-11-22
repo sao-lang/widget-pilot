@@ -9,23 +9,18 @@ PG 不可用保守拒绝（不放行进模型）由单测 test_m06_guard_hit_pg_
 
 from __future__ import annotations
 
-import psycopg
 import pytest
 
 from services.guardrails.guard_hit_pg import PgGuardHitStore
 from services.guardrails.types import GuardHitType, InputGuardHit
+from tests.support.pg import pg_available, pg_connection, pg_execute
 
 PG_DSN = "postgresql://widgetpilot:widgetpilot_dev@127.0.0.1:5432/widgetpilot"
 
 
 def _infra_available() -> bool:
     """探测 PG 可达性；不可达则 skip。"""
-    try:
-        with psycopg.connect(PG_DSN, connect_timeout=2):
-            pass
-    except Exception:  # noqa: BLE001 - 连通性探测吞任意错以决定 skip
-        return False
-    return True
+    return pg_available(PG_DSN)
 
 
 pytestmark = pytest.mark.skipif(
@@ -37,9 +32,8 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(autouse=True)
 def clean_guard_hit() -> None:
     """每例前清空 guard_hit 表（集成测试隔离）。"""
-    with psycopg.connect(PG_DSN) as conn:
-        conn.execute("TRUNCATE TABLE guard_hit RESTART IDENTITY")
-        conn.commit()
+    with pg_connection(PG_DSN) as conn:
+        pg_execute(conn, "TRUNCATE TABLE guard_hit RESTART IDENTITY")
 
 
 def _hit(rule_id: str = "INJ_IGNORE_RULES") -> InputGuardHit:
@@ -115,7 +109,6 @@ class TestPgGuardHitStore:
         """篡改 row_hash 后 verify_chain 返回 False（防篡改生效）。"""
         store = PgGuardHitStore(PG_DSN)
         store.log_hit("s1", "r1", _hit(), "t1")
-        with psycopg.connect(PG_DSN) as conn:
-            conn.execute("UPDATE guard_hit SET judgement = 'TAMPERED'")
-            conn.commit()
+        with pg_connection(PG_DSN) as conn:
+            pg_execute(conn, "UPDATE guard_hit SET judgement = 'TAMPERED'")
         assert PgGuardHitStore(PG_DSN).verify_chain() is False

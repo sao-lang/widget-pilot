@@ -19,7 +19,6 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import Final
 
-import psycopg
 import redis
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -227,9 +226,9 @@ def build_validator(
                 gateway=gateway,
                 route_log=route_log,
             )
-        except (psycopg.Error, SQLAlchemyError):
+        except SQLAlchemyError:
             # M06 §2.3 + runbook §2：任一留证表写入失败 → 保守拒绝放行，
-            # 绝不降级内存（无证据放行）。guard_hit 走 psycopg，审计走 SQLAlchemy。
+            # 绝不降级内存（无证据放行）。所有留证表统一走 SQLAlchemy ORM。
             # m2/R2-1（v1.8）：evidence_ref 用项目 canonical 快照哈希生成，
             # 与 validate_chain 同口径（M11 verify_snapshot 可回放）。
             from services.guardrails.audit import (

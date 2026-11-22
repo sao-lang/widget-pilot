@@ -65,14 +65,14 @@ docker compose --profile core up -d
 > （`PgGuardHitStore`：hash 链 + 事务级 advisory lock 串行化追加防断链）+ 装配层注入 + PG 失败保守拒绝；
 > 集成测试 `tests/integration/test_m06_guard_hit_pg.py`。以下原 TODO 清单保留作设计依据。
 
-**文件**：`services/guardrails/guard_hit.py`（当前 `InMemoryGuardHitStore`）
+**文件**：`services/guardrails/guard_hit.py`（接口）+ `services/guardrails/guard_hit_pg.py`（生产 `PgGuardHitStore`）
 **设计依据**：M06 文档 §6.1 字段表、`guard_hit` 表 + `prev_hash` hash 链、§2.3「PG 不可用 → 保守拒绝」。
 
 待办清单（后续 AI 接手）：
 1. 新建迁移 `services/control_plane/migrations/versions/0004_m06_guard_hit.py`，字段按 §6.1：
    `id / session_id / run_id / hit_type / rule_id / judgement / excerpt / stage / decision /
    trace_id / prev_hash / row_hash / should_pass / created_at`，前四留证字段 NOT NULL。
-2. 实现 `PgGuardHitStore`（asyncpg，仿 `PgCheckpointStore` 写法，见 `services/orchestrator/adapters.py`），
+2. 实现 `PgGuardHitStore`（SQLAlchemy ORM + pg8000，仿 `PgCheckpointStore` 写法，见 `services/orchestrator/adapters.py`），
    实现 `log_hit()` 与 `false_positive_rate()` 的 PG 版；写入前校验 hash 链完整性。
 3. 装配层在 PG 不可用时**保守拒绝放行**（§2.3），不放行进模型——这条不能降级。
 4. 集成测试放 `tests/integration/test_m06_infra.py`，复用 `test_m04_infra.py` 的连通性 skip 守卫，

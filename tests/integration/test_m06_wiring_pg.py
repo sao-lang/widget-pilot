@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import psycopg
 import pytest
 import redis
 
@@ -25,6 +24,7 @@ from services.control_plane.sessions.service import SessionService
 from services.guardrails.types import GuardHitType
 from services.orchestrator.dispatcher import Dispatcher, RedisTaskQueue
 from services.orchestrator.guardrail_adapter import build_validator
+from tests.support.pg import pg_available, pg_connection, pg_execute
 
 PG_DSN = "postgresql://widgetpilot:widgetpilot_dev@127.0.0.1:5432/widgetpilot"
 REDIS_URL = "redis://127.0.0.1:6379/0"
@@ -33,9 +33,9 @@ QUEUE_KEY = "orchestrator:tasks:test-m06-wiring"
 
 def _infra_available() -> bool:
     """探测 PG/Redis 可达性；不可达则 skip。"""
+    if not pg_available(PG_DSN):
+        return False
     try:
-        with psycopg.connect(PG_DSN, connect_timeout=2):
-            pass
         redis.from_url(REDIS_URL, socket_connect_timeout=2).ping()
     except Exception:  # noqa: BLE001 - 连通探测吞任意连接错以决定 skip
         return False
@@ -51,13 +51,12 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(autouse=True)
 def clean_infra() -> None:
     """每例前清空会话/用户/审计表与任务队列。"""
-    with psycopg.connect(PG_DSN) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "TRUNCATE TABLE users, sessions, checkpoint, audit_event, "
-                "attachments, guard_hit CASCADE"
-            )
-        conn.commit()
+    with pg_connection(PG_DSN) as conn:
+        pg_execute(
+            conn,
+            "TRUNCATE TABLE users, sessions, checkpoint, audit_event, "
+            "attachments, guard_hit CASCADE",
+        )
     client = redis.from_url(REDIS_URL)
     client.delete(QUEUE_KEY)
     # 清空本测试族写入的校验事件流（seq 计数器 + 事件流），避免跨轮次累积
@@ -178,9 +177,8 @@ def test_pg_stores_injected_and_written() -> None:
     from services.guardrails.pg_stores import PgIntentRouteLogStore
 
     # 清空三表（测试隔离）
-    with psycopg.connect(PG_DSN) as conn:
-        conn.execute("TRUNCATE TABLE intent_route_log, capability_audit_log")
-        conn.commit()
+    with pg_connection(PG_DSN) as conn:
+        pg_execute(conn, "TRUNCATE TABLE intent_route_log, capability_audit_log")
 
     validator = build_validator(
         PgAttachmentStore(PG_DSN).get,

@@ -839,7 +839,7 @@ infra/dev/seed/ # 种子不进业务镜像（镜像一次构建原则）
 | SSE（服务端） | 流式事件（M02 §4.5；`EventSource` / `fetch ReadableStream` 对端） | M04 / M07 / M15 |
 | httpx | 模型直连 chat-completions 兼容端点（M03 §2.1 `model/provider.py`、M20 ProviderAdapter） | M03 / M07 / M20 |
 | tiktoken | **纯 token 计数工具库**（M03/M07/M10 保留清单；禁用其编排生态） | M03 / M07 / M10 |
-| asyncpg + SQLAlchemy(core, alembic 用) | PG 驱动；连接串 `postgresql+asyncpg://`（M01 §4.3 env 契约） | 全部服务 |
+| SQLAlchemy 2.x ORM + pg8000（同步驱动，运行时与 Alembic 共用） | 业务 SQL 全走 ORM；env 仍用 `postgresql+asyncpg://`（M01 §4.3 契约），`db.sync_dsn()` 统一转 `postgresql+pg8000://` | 全部服务 |
 | Alembic | 迁移基线（M01 §6.5） | control-plane |
 | Pillow / libvips | 图片只读解码（M05 §2.1 R8） | M05 |
 | ffmpeg | 视频关键帧 + 元信息（M05 §2.1；受限子进程） | M05 |

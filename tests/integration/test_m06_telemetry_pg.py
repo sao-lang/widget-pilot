@@ -10,11 +10,9 @@
 from __future__ import annotations
 
 from collections import Counter
-from typing import Any, Final, LiteralString, cast
+from typing import Final, LiteralString
 
-import psycopg
 import pytest
-from psycopg.rows import DictRow, dict_row
 
 from services.guardrails.pg_stores import (
     PgCapabilityAuditLogStore,
@@ -22,6 +20,12 @@ from services.guardrails.pg_stores import (
 )
 from services.guardrails.telemetry import CapabilityAuditLogRow, IntentRouteLogRow
 from services.guardrails.types import HitDecision, RouteLayer
+from tests.support.pg import (
+    pg_available,
+    pg_connection,
+    pg_execute,
+    pg_fetchone,
+)
 
 PG_DSN: Final[str] = "postgresql://widgetpilot:widgetpilot_dev@127.0.0.1:5432/widgetpilot"
 
@@ -69,12 +73,7 @@ _SCHEMA: Final[tuple[str, ...]] = (
 
 def _infra_available() -> bool:
     """探测 PG 是否可达；不可达则跳过（不冒充通过）。"""
-    try:
-        with psycopg.connect(PG_DSN, connect_timeout=2):
-            pass
-    except Exception:  # noqa: BLE001 - 连通性探测必须吞掉任意连接错误以决定 skip
-        return False
-    return True
+    return pg_available(PG_DSN)
 
 
 pytestmark = pytest.mark.skipif(
@@ -86,35 +85,24 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(scope="module", autouse=True)
 def prepare_tables() -> None:
     """模块开始前建三张表 + 索引（幂等，不破坏现有库）。"""
-    with psycopg.connect(PG_DSN) as conn:
-        with conn.cursor() as cur:
-            for ddl in _SCHEMA:
-                cur.execute(ddl)
-        conn.commit()
+    with pg_connection(PG_DSN) as conn:
+        for ddl in _SCHEMA:
+            pg_execute(conn, ddl)
 
 
 @pytest.fixture(autouse=True)
 def clean_tables() -> None:
     """每例前清空三张表（集成测试隔离）。"""
-    with psycopg.connect(PG_DSN) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"TRUNCATE TABLE {_TABLE_INTENT_ROUTE}, {_TABLE_CAPABILITY_AUDIT}"
-            )
-        conn.commit()
+    with pg_connection(PG_DSN) as conn:
+        pg_execute(conn, f"TRUNCATE TABLE {_TABLE_INTENT_ROUTE}, {_TABLE_CAPABILITY_AUDIT}")
 
 
 def _db_count(table: LiteralString) -> int:
     """直接查库行数，作为「真的落库」的独立证据（不经过 Store）。"""
-    with cast(
-        psycopg.Connection[DictRow],
-        # psycopg 反射边界豁免：dict_row 的精确类型随 psycopg 版本变化，
-        # 此处仅作为 row_factory 透传，保留 cast(Any, ...) 不新增 ignore。
-        psycopg.connect(PG_DSN, row_factory=cast(Any, dict_row)),
-    ) as conn:
-        row = conn.execute(f"SELECT count(*) AS n FROM {table}").fetchone()
+    with pg_connection(PG_DSN) as conn:
+        row = pg_fetchone(conn, f"SELECT count(*) AS n FROM {table}")
     assert row is not None
-    return int(row["n"])
+    return int(row._mapping["n"])
 
 
 class TestPgIntentRouteLogStore:

@@ -7,7 +7,6 @@ v1.5 ORM 化：手写 SQL → SQLAlchemy ORM（models.User + db.session_scope）
 
 from __future__ import annotations
 
-import psycopg
 from sqlalchemy import insert, select
 from sqlalchemy.exc import IntegrityError
 
@@ -15,7 +14,11 @@ from services.control_plane.accounts.stores import (
     DuplicateEmailError,
     UserRow,
 )
-from services.control_plane.db import make_session_factory, session_scope
+from services.control_plane.db import (
+    is_unique_violation,
+    make_session_factory,
+    session_scope,
+)
 from services.control_plane.models import User
 
 
@@ -26,7 +29,7 @@ class PgUserStore:
         """注入 PG DSN，构造该实例绑定的 sessionmaker。
 
         Args:
-            dsn: PostgreSQL 连接串（asyncpg 前缀内部转 psycopg 同步）。
+            dsn: PostgreSQL 连接串（任意驱动前缀内部统一转 pg8000 同步）。
         """
         self._factory = make_session_factory(dsn)
 
@@ -57,7 +60,7 @@ class PgUserStore:
             # 行为等价：原实现把所有 UniqueViolation（email 与主键）统一映射为
             # DuplicateEmailError；此处不做约束名硬编码（schema 改名即失效），
             # 完全复刻旧语义。用户不存在/密码错误的折叠在 service 层，与此无关。
-            if isinstance(exc.orig, psycopg.errors.UniqueViolation):
+            if is_unique_violation(exc.orig):
                 raise DuplicateEmailError(row.email) from exc
             raise
 

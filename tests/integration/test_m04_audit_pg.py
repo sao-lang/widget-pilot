@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import concurrent.futures
 
-import psycopg
 import pytest
 
 from services.control_plane.accounts.constants import LEASE_TTL_S  # noqa: F401 - 固化常量守卫
@@ -19,18 +18,14 @@ from services.control_plane.audit.ledger import AuditActions
 from services.control_plane.audit.pg_ledger import PgAuditLedger
 from services.control_plane.sessions.pg_stores import PgSessionStore
 from services.control_plane.sessions.service import SessionService
+from tests.support.pg import pg_available, pg_connection, pg_execute
 
 PG_DSN = "postgresql://widgetpilot:widgetpilot_dev@127.0.0.1:5432/widgetpilot"
 
 
 def _infra_available() -> bool:
     """探测 PG 是否可达；不可达则跳过（不冒充通过）。"""
-    try:
-        with psycopg.connect(PG_DSN, connect_timeout=2):
-            pass
-    except Exception:  # noqa: BLE001 - 连通性探测必须吞掉任意连接错误以决定 skip
-        return False
-    return True
+    return pg_available(PG_DSN)
 
 
 pytestmark = pytest.mark.skipif(
@@ -42,10 +37,8 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(autouse=True)
 def clean_audit() -> None:
     """每例前清空审计与会话表（集成测试隔离）。"""
-    with psycopg.connect(PG_DSN) as conn:
-        with conn.cursor() as cur:
-            cur.execute("TRUNCATE TABLE audit_event, sessions CASCADE")
-        conn.commit()
+    with pg_connection(PG_DSN) as conn:
+        pg_execute(conn, "TRUNCATE TABLE audit_event, sessions CASCADE")
 
 
 class TestPgAuditLedger:
@@ -77,10 +70,8 @@ class TestPgAuditLedger:
         """直接改库内 decision 字段后 chain_valid 返回 False（S6 防篡改）。"""
         ledger = PgAuditLedger(PG_DSN)
         ledger.append("u1", "s1", AuditActions.RESUME, "OK", {}, "t1")
-        with psycopg.connect(PG_DSN) as conn:
-            with conn.cursor() as cur:
-                cur.execute("UPDATE audit_event SET decision = 'TAMPERED'")
-            conn.commit()
+        with pg_connection(PG_DSN) as conn:
+            pg_execute(conn, "UPDATE audit_event SET decision = 'TAMPERED'")
         assert ledger.chain_valid() is False
 
     def test_by_session_isolates_tenants(self) -> None:
