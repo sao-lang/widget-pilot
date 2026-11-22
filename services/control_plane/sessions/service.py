@@ -337,6 +337,9 @@ class SessionService:
             raise ConflictError("only RUNNING can complete")
         before_state = row.state
         row.state = SessionState.COMPLETED
+        # ADR-009 完整版 / B4 缺口修复：真正把产物引用落到 SessionRow，
+        # 供下一轮迭代读取上一版 bundle（旧版不删，task_turn 逐轮留痕）。
+        row.bundle_ref = bundle_ref
         self._commit(row, before_state)
         return row
 

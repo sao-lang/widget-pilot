@@ -173,10 +173,50 @@ async def main() -> None:
         attachment_store.get, redis_url, dsn=dsn,
         preferred_grids_get=_preferred_grids_get,
     )
+    # ADR-006/007/009：多任务/多 Agent/多轮真实 PG 存储端口（生产必注入，无内存桩）。
+    from services.orchestrator.tasks.model_ports import (
+        GatewayGenerator,
+        GatewayPlanLLM,
+        GatewayReviewer,
+    )
+    from services.orchestrator.tasks.pg_stores import (
+        PgAgentMessageStore,
+        PgAgentWorkspace,
+        PgGenerationTaskStore,
+        PgTaskTurnStore,
+    )
+    from services.orchestrator.tasks.roles import run_role_loop
+    from services.orchestrator.tasks.router import Router
+
+    task_store = PgGenerationTaskStore(dsn)
+    task_turn_store = PgTaskTurnStore(dsn)
+    msg_store = PgAgentMessageStore(dsn)
+    workspace = PgAgentWorkspace(dsn)
+    router = Router(msg_store, workspace)
+
+    from services.orchestrator.tasks.events import RedisSeqAllocator, TypedEventEmitter
+
+    seq_allocator = RedisSeqAllocator(redis_url)
+
+    def _role_runner(session_id: str, task_id: str, description: str) -> tuple[bool, str, str]:
+        """N>1 子任务的 Generator/Reviewer 角色循环（生产真实模型端口）。"""
+        emitter = TypedEventEmitter(deps.event_bus, seq_allocator, session_id, f"role-{task_id}", task_id)
+        outcome = run_role_loop(
+            session_id=session_id, task_id=task_id, description=description,
+            trace_id=task_id, generator=GatewayGenerator(deps.model),
+            reviewer=GatewayReviewer(deps.model), router=router,
+            events=emitter,
+        )
+        return outcome.passed, outcome.artifact_ref, outcome.reason_code
+
     dispatcher = Dispatcher(
         queue=queue, deps=deps, sessions=sessions, validator=validator,
         input_enricher=_enrich_input, cost_sink=_cost_sink,
         fact_summary_store=PgFactSummaryStore(dsn),  # ADR-009：多轮事实真实 PG 存储
+        task_store=task_store,
+        plan_llm=GatewayPlanLLM(deps.model),
+        role_runner=_role_runner,
+        task_turn_store=task_turn_store,
     )
 
     print(

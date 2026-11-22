@@ -53,6 +53,8 @@ from services.control_plane.sessions.stores import SessionRow, SessionStore
 from services.guardrails.grid_resolver import resolve_grid
 from services.orchestrator.memory.ports import PreferenceStorePort
 from services.orchestrator.memory.types import PreferenceField, PreferenceSource
+from services.orchestrator.tasks.fanout import needs_planning
+from services.orchestrator.tasks.ports import TaskStorePort, TaskTurnStorePort
 
 if TYPE_CHECKING:
     # task_enqueuer 的生产实现是 RedisTaskQueue.enqueue(task: Task) -> str；
@@ -116,7 +118,7 @@ class MessageReq(BaseModel):
     grid: str | None = None
     attachment_ids: list[str] = []
     target_task_id: str | None = None
-    """ADR-009 保留字段：指定修改哪个 widget；单任务模式忽略，待 ADR-006 落地消费。"""
+    """ADR-009：指定修改哪个 widget；多任务时缺省触发 ASK_USER 消歧（O4 拍板）。"""
 
 
 class ClarificationReq(BaseModel):
@@ -208,6 +210,8 @@ def create_app(
     audit: AuditLedgerPort,
     task_enqueuer: Callable[[Task], str],
     preference_store: PreferenceStorePort | None = None,
+    task_store: TaskStorePort | None = None,
+    task_turn_store: TaskTurnStorePort | None = None,
 ) -> FastAPI:
     """构造 M04 API app（所有真实依赖必须显式注入，源码不保留测试桩）。
 
@@ -220,6 +224,9 @@ def create_app(
         audit: 审计账本（生产为 PgAuditLedger）。
         task_enqueuer: 任务入队回调（生产为 RedisTaskQueue.enqueue）。
         preference_store: M07 偏好存储；None 时不挂载偏好路由（部署形态，非兼容桩）。
+        task_store: ADR-006 generation_task 存储（生产 PgGenerationTaskStore）；
+            None 时 tasks[] 摘要省略（单任务模式，非兼容桩）。
+        task_turn_store: ADR-009 task_turn 存储（生产 PgTaskTurnStore）。
     """
     app = FastAPI(title="WidgetPilot control-plane M04", docs_url=None, redoc_url=None)
     auth = AuthService(user_store, jwt_secret)
@@ -316,7 +323,53 @@ def create_app(
             raise HTTPException(status.HTTP_403_FORBIDDEN, _CODE_FORBIDDEN) from exc
         except SessionError as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, _CODE_INPUT_INVALID) from exc
-        return _ok(_session_view(row))
+        view = _session_view(row)
+        # ADR-006/009：会话内任务摘要（多任务视图恢复用；task_store 未注入时省略）。
+        if task_store is not None:
+            try:
+                rows = task_store.list_by_session(session_id)
+                view["tasks"] = [
+                    {
+                        "task_id": getattr(r, "id", ""),
+                        "task_index": getattr(r, "task_index", 0),
+                        "task_total": getattr(r, "task_total", 0),
+                        "state": str(getattr(r, "state", "")),
+                        "result_ref": getattr(r, "result_ref", None),
+                        "current_bundle_ref": getattr(r, "current_bundle_ref", None),
+                        "last_turn_index": getattr(r, "last_turn_index", 0),
+                        "role": getattr(r, "role", None),
+                        "turn": getattr(r, "turn", 0),
+                    }
+                    for r in rows
+                ]
+            except Exception as exc:  # noqa: BLE001 - 任务摘要是观测面，读失败省略不阻断会话快照
+                logger.warning("task summary read failed: %s", exc)
+        return _ok(view)
+
+    @app.get("/api/tasks/{task_id}/turns")
+    def list_task_turns(task_id: str, user: UserRow = CurrentUser) -> ApiEnvelope:
+        """ADR-009 任务迭代版本历史（本人可见；task_turn_store 未注入时 404）。"""
+        if task_turn_store is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, _CODE_INPUT_INVALID)
+        turns = task_turn_store.list_by_task(task_id)
+        if not turns:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, _CODE_INPUT_INVALID)
+        return _ok(
+            {
+                "task_id": task_id,
+                "turns": [
+                    {
+                        "turn_index": getattr(t, "turn_index", 0),
+                        "run_id": getattr(t, "run_id", None),
+                        "user_intent": getattr(t, "user_intent", ""),
+                        "result_bundle_ref": getattr(t, "result_bundle_ref", None),
+                        "fact_summary_ref": getattr(t, "fact_summary_ref", None),
+                        "state": str(getattr(t, "state", "")),
+                    }
+                    for t in turns
+                ],
+            }
+        )
 
     @app.post(
         "/api/sessions/{session_id}/messages", status_code=status.HTTP_202_ACCEPTED
@@ -327,6 +380,26 @@ def create_app(
         user: UserRow = CurrentUser,
     ) -> ApiEnvelope:
         """提交描述：DRAFT→RUNNING，202 已受理（§5.5 异步语义）。"""
+        # ADR-009 O4：多任务会话无 target_task_id → ASK_USER 消歧，不擅自选最近任务。
+        if task_store is not None and not req.target_task_id:
+            try:
+                existing = task_store.list_by_session(session_id)
+                if len(existing) > 1:
+                    sessions.mark_awaiting_input(
+                        session_id, user.id, "CLARIFICATION_REQUIRED", "task-disambiguation"
+                    )
+                    return _ok(
+                        {
+                            "state": "AWAITING_INPUT",
+                            "reason_code": "CLARIFICATION_REQUIRED",
+                            "question": "会话内有多个任务，请用 target_task_id 指定要修改的任务",
+                            "tasks": [getattr(t, "id", "") for t in existing],
+                        }
+                    )
+            except ForbiddenError as exc:
+                raise HTTPException(status.HTTP_403_FORBIDDEN, _CODE_FORBIDDEN) from exc
+            except Exception as exc:  # noqa: BLE001 - 消歧是增强路径，读失败沿用单任务链路
+                logger.warning("task disambiguation read failed: %s", exc)
         try:
             row = sessions.submit_message(
                 session_id, user.id, req.description, req.attachment_ids
@@ -348,8 +421,12 @@ def create_app(
                 # C1/A1（v1.8）：附件 id 随任务下传，dispatcher 过校验链时
                 # 由 guardrail_adapter 解析成 AttachmentView（此前是死参数）。
                 "attachment_ids": req.attachment_ids,
-                # ADR-009 保留字段：单任务模式忽略，ADR-006 落地后按 task_id 路由。
+                # ADR-009：多任务消歧 / 迭代目标 task_id（单任务为空）。
                 "target_task_id": req.target_task_id or "",
+                # ADR-006：保守触发——仅多 widget 信号请求置 planning=1 走约束式规划器；
+                # 单 widget 保持原 run() 直路零回归。触发只决定是否调规划器，N/描述/附件
+                # 仍全由真实 PlanLLM 裁定（见 services/orchestrator/tasks/fanout.py）。
+                "planning": "1" if needs_planning(req.description) else "0",
             }
         )
         return _ok({"runId": row.run_id, "state": row.state.value})
@@ -763,4 +840,5 @@ def _session_view(row: SessionRow) -> JsonObject:
         "checkpoint_rev": row.checkpoint_rev,
         "reason_code": row.reason_code,
         "evidence_ref": row.evidence_ref,
+        "bundle_ref": row.bundle_ref,
     }

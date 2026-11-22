@@ -34,6 +34,13 @@ from services.orchestrator.memory.fact_summary import (
     render_fact_summary,
 )
 from services.orchestrator.memory.ports import FactSummaryStorePort
+from services.orchestrator.tasks.ports import (
+    PlanLLM,
+    RoleRunner,
+    TaskStorePort,
+    TaskTurnStorePort,
+)
+from services.orchestrator.tasks.states import TaskState
 
 logger = logging.getLogger(__name__)
 """dispatcher 模块日志器（事实摘要写失败只告警不阻断主流程）。"""
@@ -71,6 +78,13 @@ _FIELD_CLARIFIED_GRID: Final[str] = "clarified_grid"
 _FIELD_RESUME: Final[str] = "resume"
 _FIELD_CLARIFICATION_REPLY: Final[str] = "clarification_reply"
 _FIELD_USER: Final[str] = "user_id"
+_FIELD_PLANNING: Final[str] = "planning"
+"""ADR-006：planning=1 表示规划任务（先 V1 门禁再规划，非普通生成任务）。"""
+_FIELD_TASK_ID: Final[str] = "task_id"
+_FIELD_PARENT_RUN: Final[str] = "parent_run_id"
+_FIELD_TASK_INDEX: Final[str] = "task_index"
+_FIELD_TASK_TOTAL: Final[str] = "task_total"
+_FIELD_TARGET_TASK: Final[str] = "target_task_id"
 _FIELD_RETRIES: Final[str] = "retries"
 """重试计数（无下划线前缀 = 随 Stream 持久化，跨 XAUTOCLAIM 往返保持；review 复审 B2）。"""
 _FIELD_MSG_ID: Final[str] = "_msg_id"
@@ -336,6 +350,11 @@ class Dispatcher:
         input_enricher: Callable[[Input], Input] | None = None,
         cost_sink: Callable[[State], None] | None = None,
         fact_summary_store: FactSummaryStorePort | None = None,
+        *,
+        task_store: TaskStorePort | None = None,
+        plan_llm: PlanLLM | None = None,
+        role_runner: RoleRunner | None = None,
+        task_turn_store: TaskTurnStorePort | None = None,
     ) -> None:
         """注入任务队列、执行依赖、会话服务与校验链（状态回写入口）。
 
@@ -350,6 +369,12 @@ class Dispatcher:
                 None 时不落账（run 的注入点，非测试兼容桩）。
             fact_summary_store: ADR-009 会话事实摘要存储（生产 PgFactSummaryStore）；
                 None 时不注入/不生成事实（无存储即无事实，非测试兼容桩）。
+            task_store: ADR-006 generation_task 存储（生产 PgGenerationTaskStore）；
+                多任务落库与 fan-in 查询。None 时多任务路径不可用（fail-fast）。
+            plan_llm: ADR-006 约束式规划器真实端口；None 时多任务规划 fail-fast。
+            role_runner: ADR-007 角色循环入口 (session, task, desc) -> (ok, ref, reason)；
+                None 时子任务走现有 run() 内核（单任务零回归）。
+            task_turn_store: ADR-009 task_turn 存储（生产 PgTaskTurnStore）。
         """
         self._queue = queue
         self._deps = deps
@@ -358,6 +383,15 @@ class Dispatcher:
         self._input_enricher = input_enricher
         self._cost_sink = cost_sink
         self._fact_summary_store = fact_summary_store
+        self._task_store = task_store
+        self._plan_llm = plan_llm
+        self._role_runner = role_runner
+        self._task_turn_store = task_turn_store
+        # Coordinator fan-in 事件的原子 seq 分配器（由 Redis URL 构造，惰性连接）。
+        from services.orchestrator.tasks.events import RedisSeqAllocator
+
+        redis_url = getattr(queue, "_redis_url", "")
+        self._seq_allocator = RedisSeqAllocator(str(redis_url)) if redis_url else None
 
     def _write_fact(
         self, session_id: str, state: State, last_intent: str, widget_type: str
@@ -417,8 +451,14 @@ class Dispatcher:
             return
         if state.terminal.kind is TerminalKind.DONE:
             bundle_ref = state.terminal.bundle_ref
+            # 【M08 V3 强制门禁待接】当前 loop 终态只携带模型自报 bundle_ref，
+            # 无经校验的 WidgetSpec + TSX source_ref + manifest（M08 validate_and_test
+            # 的三个必需入参）。产物本体须由 M07 结构化生成回路落对象存储后，
+            # 在此处调用 services.sandbox_runnerentry.validate_and_test 并以
+            # static_check/sandbox_test 通过为完成前提；在此之前 bundle_ref 仅作
+            # 引用记录，不能视为已通过出护栏。缺口已登记 M08 模块文档 §9。
             if not bundle_ref:
-                # review B6：M08 未接入前模型自报产物不可信，转失败不假绿
+                # review B6：模型自报产物不可信，空引用直接失败不假绿
                 self._sessions.fail(
                     session_id,
                     _NO_BUNDLE_REASON,
@@ -502,6 +542,217 @@ class Dispatcher:
             )
         return result  # 已回写终态/挂起，调用方据此跳过 run()
 
+    def _plan_and_fanout(
+        self, session_id: str, run_id: str, user_id: str, task: Task
+    ) -> bool:
+        """ADR-006 V1→规划→V2→fan-out；返回 True 表示已处理（调用方跳过 run()）。
+
+        N=1 或单 widget 信号 → 走现有 run()（返回 False，零回归）；
+        N>1 → 落 generation_task + 入队子任务；歧义/校验失败 → AWAITING_INPUT。
+        生产无 plan_llm/task_store 时多任务请求 fail-fast（不静默降级规则规划）。
+        """
+        from services.orchestrator.tasks.fanout import (
+            needs_planning,
+            run_fanout_planning,
+        )
+        from services.orchestrator.tasks.planner import extract_facts
+
+        description = _task_str(task.get(_FIELD_DESC))
+        if not needs_planning(description):
+            return False  # 单 widget 信号：走现有 run() 直路（§6.7 零回归）
+
+        if self._plan_llm is None or self._task_store is None:
+            raise RuntimeError(
+                "multi-widget planning requires PlanLLM + GenerationTaskStore ports "
+                "(production must inject real ports; no rule-based fallback)"
+            )
+        facts = extract_facts(
+            session_id,
+            run_id,
+            description,
+            attachments=(),  # 附件事实由 worker 的 enrichment/port 注入后可扩展
+            confirmed_grid=None,
+            budget_remaining=0.0,
+            max_tasks=3,
+            trace_id=run_id,
+        )
+        from packages.contracts.enums import GridSpec
+
+        grid_raw = _task_str(task.get(_FIELD_GRID))
+        if grid_raw:
+            try:
+                facts = extract_facts(
+                    session_id, run_id, description,
+                    confirmed_grid=GridSpec(grid_raw), trace_id=run_id,
+                )
+            except ValueError:
+                pass
+        result = run_fanout_planning(facts, self._plan_llm)
+        if result.errors or result.ambiguous_reason:
+            reason = result.reason_code or ReasonCode.CLARIFICATION_REQUIRED.value
+            # S5（review）：V2 硬拒绝码（幻觉附件 id / 注入 / 契约不符）与 V1 同口径
+            # 走 fail（整份拒绝、不落 generation_task）；仅歧义/规格缺失挂起。
+            hard_reject = {
+                ReasonCode.CONTRACT_MISMATCH.value,
+                ReasonCode.GUARD_INPUT_HIT.value,
+                ReasonCode.BUDGET_EXHAUSTED.value,
+            }
+            if reason in hard_reject:
+                self._sessions.fail(
+                    session_id, reason, f"plan-v2/{session_id}/{run_id}"
+                )
+            else:
+                self._sessions.mark_awaiting_input(session_id, user_id, reason, "")
+            return True
+        if len(result.tasks) == 1:
+            return False  # N=1：沿用现有单任务链路，不启用角色层
+
+        from uuid import uuid4
+
+        from services.orchestrator.tasks.pg_stores import GenerationTaskData
+
+        # B2（review）：每个子任务分配独立 run_id —— generation_task.run_id UNIQUE，
+        # 共用父 run_id 会让第 2 个子任务撞约束；同时租约/checkpoint/cost_ledger
+        # 都按 run_id 隔离，必须一任务一 run。
+        child_runs: tuple[str, ...] = tuple(str(uuid4()) for _ in result.tasks)
+        rows: tuple[GenerationTaskData, ...] = tuple(
+            GenerationTaskData(
+                id=t.task_id,
+                session_id=session_id,
+                parent_run_id=run_id,
+                run_id=child_runs[i],
+                original_description=description,
+                description=t.description,
+                task_index=t.task_index,
+                task_total=t.task_total,
+                state=TaskState.QUEUED.value,
+                grid=t.grid.value if t.grid else None,
+                attachment_ids=t.attachment_ids,
+                plan_trace_ref=result.plan_trace_ref,
+            )
+            for i, t in enumerate(result.tasks)
+        )
+        self._task_store.create_many(rows)
+        for t, child_run in zip(result.tasks, child_runs):
+            self._queue.enqueue(
+                {
+                    _FIELD_SESSION: session_id,
+                    _FIELD_USER: user_id,
+                    _FIELD_RUN: child_run,
+                    _FIELD_TASK_ID: t.task_id,
+                    _FIELD_PARENT_RUN: run_id,
+                    _FIELD_TASK_INDEX: str(t.task_index),
+                    _FIELD_TASK_TOTAL: str(t.task_total),
+                    _FIELD_DESC: t.description,
+                    _FIELD_GRID: t.grid.value if t.grid else "",
+                    _FIELD_ATTACHMENTS: list(t.attachment_ids),
+                    _FIELD_PLANNING: "0",
+                }
+            )
+        return True
+
+    def _write_task_turn(
+        self, task_id: str, session_id: str, run_id: str, task: Task, state: State
+    ) -> None:
+        """ADR-009：迭代修改写一条 task_turn（uuid5 幂等，PG 失败由 store fail-closed）。"""
+        import uuid
+        from uuid import uuid5
+
+        store = self._task_store
+        turn_store = self._task_turn_store
+        if store is None or turn_store is None:
+            return
+        # S6（review）：advisory 锁原子分配，避免并发同任务迭代撞 turn_index
+        turn_index = store.allocate_turn(task_id)
+        result_ref = (
+            state.terminal.bundle_ref
+            if state.terminal and state.terminal.kind is TerminalKind.DONE
+            else None
+        )
+        from services.orchestrator.tasks.pg_stores import TaskTurnData
+
+        turn = TaskTurnData(
+            task_id=task_id,
+            turn_index=turn_index,
+            parent_run_id=run_id,
+            run_id=run_id,
+            user_intent=_task_str(task.get(_FIELD_DESC)),
+            result_bundle_ref=result_ref or "",
+            state=TaskState.DONE.value if result_ref else TaskState.FAILED.value,
+            id=str(uuid5(uuid.NAMESPACE_URL, f"wp:turn:{task_id}:{turn_index}")),
+        )
+        turn_store.append(turn)
+        store.update_state(
+            task_id,
+            TaskState.DONE.value if result_ref else TaskState.FAILED.value,
+            current_bundle_ref=result_ref,
+            last_turn_index=turn_index,
+        )
+
+    def _fan_in_if_complete(
+        self, session_id: str, user_id: str, parent_run_id: str
+    ) -> bool:
+        """ADR-006/007 Coordinator fan-in：全部子任务终态时幂等裁决会话终态。
+
+        子任务不各自写会话终态（否则第 2 个 complete 撞 only-RUNNING 冲突）。
+        这里查 generation_task 全量，未全终态返回 False；全终态调用确定性
+        fan_in，单条会话级 done/error + 部分失败 notice，并回写一次会话状态。
+        """
+        store = self._task_store
+        if store is None:
+            return False
+        rows = store.list_by_session(session_id)
+        children = [r for r in rows if getattr(r, "parent_run_id", "") == parent_run_id]
+        if not children:
+            return False
+        from services.orchestrator.tasks.coordinator import (
+            TaskResult,
+            emit_fan_in,
+            fan_in,
+        )
+        from services.orchestrator.tasks.events import TypedEventEmitter
+
+        results = tuple(
+            TaskResult(
+                task_id=str(getattr(r, "id", "")),
+                state=TaskState(str(getattr(r, "state", "PENDING"))),
+                result_ref=str(r.result_ref or ""),
+                reason_code=str(r.reason_code or ""),
+                task_index=int(getattr(r, "task_index", 0) or 0),
+            )
+            for r in children
+        )
+        verdict = fan_in(results, expected_total=len(children))
+        if not verdict.terminal:
+            return False
+        # 幂等：只有 RUNNING 会话可写终态；重复 fan-in（重投）时 complete 抛
+        # ConflictError，这里先读状态跳过，保证"唯一会话级 done"。
+        row = self._sessions.get(session_id)
+        if row.state not in (SessionState.RUNNING, SessionState.AWAITING_INPUT):
+            return True
+        if self._seq_allocator is None:
+            raise RuntimeError(
+                "Coordinator fan-in requires Redis seq allocator "
+                "(queue must expose redis URL; no in-memory fallback)"
+            )
+        emitter = TypedEventEmitter(
+            self._deps.event_bus,
+            self._seq_allocator,
+            session_id,
+            parent_run_id,
+        )
+        emit_fan_in(emitter, verdict, session_id)
+        if verdict.state == "COMPLETED":
+            bundles = [r.result_ref for r in results if r.state is TaskState.DONE]
+            self._sessions.complete(session_id, bundles[0] if bundles else "")
+        else:
+            self._sessions.fail(
+                session_id,
+                verdict.reason_code or ReasonCode.RETRY_EXHAUSTED.value,
+                f"coordinator/{session_id}/{parent_run_id}",
+            )
+        return True
+
     def process_one(self) -> int:
         """消费并处理一条任务；无任务返回 0。
 
@@ -516,8 +767,15 @@ class Dispatcher:
         run_id = _task_str(task.get(_FIELD_RUN))
         user_id = _task_str(task.get(_FIELD_USER))
         try:
-            # A1：校验链先过；命中/挂起时已由 _check_guardrail 回写状态，跳过模型。
+            # A1：校验链先过（ADR-006 V1 安全门禁：规划任务也先过，命中不进模型）。
             validation = self._check_guardrail(session_id, run_id, user_id, task)
+            if validation is not None and not validation.ok:
+                return 1  # 硬拒绝/挂起已回写，不进规划也不进模型
+            if task.get(_FIELD_PLANNING) == "1" and self._plan_and_fanout(
+                session_id, run_id, user_id, task
+            ):
+                return 1  # N>1 已扇出 / 歧义已挂起（父任务 ACK）
+
             if validation is None or validation.ok:
                 # B2（v1.6）：把 M06 放行结论全字段传进 run()，不重复校验、不丢档位建议。
                 # B3：从 SessionRow 读用户澄清回答，回注 State.clarification_answer
@@ -553,18 +811,71 @@ class Dispatcher:
                 # v1.6：生产由 worker 注入真实记忆检索端口（B1/B6/B8），测试不注入则省略数据槽。
                 if self._input_enricher is not None:
                     run_input = self._input_enricher(run_input)
+                # ADR-006：子任务带 task_id → 更新 generation_task 为 RUNNING。
+                task_id = _task_str(task.get(_FIELD_TASK_ID))
+                if task_id and self._task_store is not None:
+                    self._task_store.update_state(
+                        task_id, TaskState.RUNNING.value, run_id=run_id
+                    )
+                # ADR-007：N>1 子任务在 run() 内核之上跑角色协作（生产注入真实端口）。
+                role_ref = ""
+                role_reason = ""
+                if task_id and self._role_runner is not None:
+                    ok, role_ref, role_reason = self._role_runner(
+                        session_id, task_id, _task_str(task.get(_FIELD_DESC))
+                    )
+                    if not ok:
+                        # S4（review）：角色失败即短路，不再 run() / _write_back，
+                        # 否则对已 FAILED 会话 complete 抛 ConflictError → 死信。
+                        if task_id and self._task_store is not None:
+                            self._task_store.update_state(
+                                task_id,
+                                TaskState.FAILED.value,
+                                reason_code=role_reason or ReasonCode.RETRY_EXHAUSTED.value,
+                            )
+                        parent = _task_str(task.get(_FIELD_PARENT_RUN))
+                        if parent:
+                            self._fan_in_if_complete(session_id, user_id, parent)
+                        else:
+                            self._sessions.fail(
+                                session_id,
+                                role_reason or ReasonCode.RETRY_EXHAUSTED.value,
+                                f"agent-task/{session_id}/{task_id}/{run_id}",
+                            )
+                        return 1
                 state = run(
                     session_id, run_id, run_input, self._deps,
                     cost_sink=self._cost_sink,
                 )
-                self._write_back(
-                    session_id, user_id, state,
-                    last_intent=_task_str(task.get(_FIELD_DESC)),
-                    widget_type=(
-                        validation.widget_type.value
-                        if validation and validation.widget_type else "custom"
-                    ),
-                )
+                # ADR-009：迭代任务写 task_turn（每轮独立 run_id，旧版本不删）。
+                target_task_id = _task_str(task.get(_FIELD_TARGET_TASK))
+                if target_task_id and self._task_turn_store is not None:
+                    self._write_task_turn(target_task_id, session_id, run_id, task, state)
+                if task_id and self._task_store is not None:
+                    terminal = state.terminal
+                    done = terminal is not None and terminal.kind is TerminalKind.DONE
+                    final = TaskState.DONE.value if done else TaskState.FAILED.value
+                    self._task_store.update_state(
+                        task_id,
+                        final,
+                        result_ref=role_ref
+                        or (terminal.bundle_ref if terminal is not None and done else None),
+                        reason_code=role_reason or None,
+                    )
+                parent = _task_str(task.get(_FIELD_PARENT_RUN))
+                if task_id and parent:
+                    # B3（review）：子任务不各自写会话终态，交 Coordinator fan-in
+                    # 在所有子任务终态后幂等裁决（唯一 done + 部分失败 notice）。
+                    self._fan_in_if_complete(session_id, user_id, parent)
+                else:
+                    self._write_back(
+                        session_id, user_id, state,
+                        last_intent=_task_str(task.get(_FIELD_DESC)),
+                        widget_type=(
+                            validation.widget_type.value
+                            if validation and validation.widget_type else "custom"
+                        ),
+                    )
         except Exception:
             # review B2：失败不 ACK，留 PEL 由 xautoclaim 重投；超限写死信
             retries = int(_task_str(task.get(_FIELD_RETRIES, "0")) or "0")

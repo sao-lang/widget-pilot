@@ -46,6 +46,8 @@ class SessionRow:
     """FAILED 的原因码（§4.4：失败必带 code，前端据此展示具体原因）。"""
     evidence_ref: str | None = None
     """FAILED 的证据引用（§4.4：禁止只返回「失败」，必带证据）。"""
+    bundle_ref: str | None = None
+    """当前轮产物 bundle 引用（ADR-009 完整版，迁移 0017；可选保持兼容）。"""
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     """创建时间（UTC）。"""
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))

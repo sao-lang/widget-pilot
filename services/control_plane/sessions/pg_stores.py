@@ -50,6 +50,7 @@ class PgSessionStore:
             run_id=row.run_id,
             reason_code=row.reason_code,
             evidence_ref=row.evidence_ref,
+            bundle_ref=row.bundle_ref,  # ADR-009 完整版 / B4：产物引用落库
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
@@ -101,6 +102,7 @@ class PgSessionStore:
                 run_id=row.run_id,
                 reason_code=row.reason_code,
                 evidence_ref=row.evidence_ref,
+                bundle_ref=row.bundle_ref,  # ADR-009 完整版 / B4：产物引用落库
                 updated_at=row.updated_at,
             )
         )

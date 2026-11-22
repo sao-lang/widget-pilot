@@ -193,17 +193,31 @@ def _memory_message(slots: SlotConfig) -> Message | None:
     return Message("system", MEMORY_SLOT_PREFIX + text)
 
 
-def _conclusion_message(state: State, fact_summary: str = "") -> Message:
+def _conclusion_message(state: State, fact_summary: str = "", max_tokens: int = 8000) -> Message:
     """构造会话结论槽（含 excluded_approaches，压缩时必须保留）。
 
     ADR-009：FactSummary 只在尾部追加，不改 1–5 槽与前段字节（caching 前缀）。
+    尾部按 max_tokens 有界裁剪（字符近似 token），超过预算时保留最近的完整行——
+    前缀字节永不变（只裁新增段），守住 caching 不变量。
     """
     conclusions = state.spec.model_dump()
     if state.excluded_approaches:
         conclusions["excluded_approaches"] = list(state.excluded_approaches)
     body = json.dumps(conclusions, ensure_ascii=False, default=str)
     if fact_summary:
-        body += "\n" + fact_summary
+        # 有界裁剪：按行从尾部保留，预算内才追加；prefix（spec JSON）从不改。
+        budget = max(1, max_tokens)
+        lines = fact_summary.splitlines()
+        kept: list[str] = []
+        used = 0
+        for line in reversed(lines):
+            cost = len(line) + 1
+            if used + cost > budget:
+                break
+            kept.append(line)
+            used += cost
+        bounded = "\n".join(reversed(kept)) if kept else fact_summary[:budget]
+        body += "\n" + bounded
     return Message("user", CONCLUSION_PREFIX + body)
 
 
@@ -226,5 +240,5 @@ def assemble(state: State, slots: SlotConfig) -> list[Message]:
         _memory_message(slots),
     )
     messages.extend(slot for slot in optional if slot is not None)
-    messages.append(_conclusion_message(state, slots.fact_summary))
+    messages.append(_conclusion_message(state, slots.fact_summary, slots.max_tokens))
     return messages

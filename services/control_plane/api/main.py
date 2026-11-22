@@ -27,23 +27,12 @@ from services.control_plane.sessions.sse import RedisEventSource
 from services.orchestrator.adapters import RedisEventBus, make_event_decoder
 from services.orchestrator.dispatcher import TASK_QUEUE_KEY, RedisTaskQueue
 from services.orchestrator.memory.pg_stores import PgPreferenceStore
+from services.orchestrator.tasks.pg_stores import PgGenerationTaskStore, PgTaskTurnStore
 
 # 环境变量名（结构性字面量集中一处）
 _ENV_JWT_SECRET = "JWT_SECRET"
 _ENV_DATABASE_URL = "DATABASE_URL"
 _ENV_REDIS_URL = "REDIS_URL"
-# asyncpg URL → psycopg 同步 URL（存储层用同步连接）
-_ASYNCPG_PREFIX = "postgresql+asyncpg://"
-_SYNC_PREFIX = "postgresql://"
-
-
-def _sync_dsn(url: str) -> str:
-    """把 asyncpg DSN 转为 psycopg 同步 DSN（存储层用同步连接）。"""
-    if url.startswith(_ASYNCPG_PREFIX):
-        return url.replace(_ASYNCPG_PREFIX, _SYNC_PREFIX, 1)
-    return url
-
-
 def create_prod_app() -> FastAPI:
     """构造生产 app：健康探针 + M04 路由 + 真实 PG 存储。
 
@@ -58,7 +47,7 @@ def create_prod_app() -> FastAPI:
     if not database_url:
         raise RuntimeError(f"{_ENV_DATABASE_URL} must be set")
 
-    dsn = _sync_dsn(database_url)
+    dsn = database_url  # 各存储统一经 services.control_plane.db.sync_dsn 归一化
     redis_url = os.getenv(_ENV_REDIS_URL, "redis://redis:6379/0")
     # SSE 生产事件源：Redis Streams → SSEEvent（§4.1 events 端点真实扇出）
     bus = RedisEventBus(redis_url, SSE_WINDOW_N, make_event_decoder())
@@ -83,6 +72,9 @@ def create_prod_app() -> FastAPI:
         audit=PgAuditLedger(dsn),  # A18：审计落 PG，跨实例可重放（B2 生产接线）
         task_enqueuer=task_queue.enqueue,  # B1b：提交描述真实入队，驱动编排
         preference_store=PgPreferenceStore(dsn),  # M07 B6：偏好 REST 生产真实 PG
+        # ADR-006/009：任务摘要 + 多任务消歧 + 版本历史（生产真实 PG）。
+        task_store=PgGenerationTaskStore(dsn),
+        task_turn_store=PgTaskTurnStore(dsn),
     )
     health = create_health_app("control-plane", 8000)
 
