@@ -118,6 +118,7 @@ def test_full_chain_passes_in_fixed_stage_order() -> None:
         "RUNTIME_ASSERT",
         "CAPABILITY_ASSERT",
         "INTERACTION_ASSERT",
+        "DEVICE_API_ASSERT",
         "EVIDENCE_WRITE",
         "PASSED",
     )
@@ -229,6 +230,7 @@ def test_a16_stage_sequence_has_no_gaps() -> None:
         "RUNTIME_ASSERT",
         "CAPABILITY_ASSERT",
         "INTERACTION_ASSERT",
+        "DEVICE_API_ASSERT",
         "EVIDENCE_WRITE",
         "PASSED",
     )

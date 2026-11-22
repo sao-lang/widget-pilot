@@ -33,6 +33,11 @@ from services.guardrails.output_ports import (
     sha256_hex,
 )
 from services.guardrails.static_scan import parse_tsx
+from services.orchestrator.device_sim.detector import (
+    DeviceCall,
+    detect_violations,
+    load_limits,
+)
 from services.sandbox_runner.assertions import (
     assert_capabilities_via_bridge,
     assert_interactions,
@@ -142,10 +147,18 @@ def run_sandbox(
     except (ValueError, OSError, UnicodeDecodeError) as exc:
         raise SandboxUnavailableError("source reference unreadable") from exc
 
+    # ADR-010：把设备 API 契约随 payload 注入沙箱（容器只读根读不到契约文件），
+    # 保证"沙箱 mock 的限流值"与"Python 侧检测器的限流值"同源于 device-apis.json，
+    # 消除 runner.js 内嵌副本的漂移风险。
+    device_cfg = load_limits()
     payload = {
         "source": source,
         "manifest": {"grid": grid, "capabilities": sorted(declared)},
         "limits": {"render_timeout_ms": max(1, render_timeout)},
+        "device_contract": {
+            "api_limits": device_cfg.api_limits,
+            "thresholds": device_cfg.thresholds,
+        },
     }
     payload_bytes = canonical_json(payload).encode("utf-8")
 
@@ -199,9 +212,15 @@ def run_sandbox(
                 name = str(item.get("name", "unknown"))
                 case_specs.append((name, item.get("passed") is True))
 
+            # ADR-010 §2.3：设备 API 调用序列门禁（限流/渲染风暴/重试/大任务/危险 API）。
+            # device_calls 缺省为空数组 → 零回归（无设备调用的 widget 不受影响）。
+            stages.append("DEVICE_API_ASSERT")
+            device_ok = _device_calls_safe(report.get("device_calls", ()))
+            case_specs.append(("device_api_safe", device_ok))
+
             if not capability_ok:
                 reason = ReasonCode.CAPABILITY_DENIED
-            elif not (size_ok and runtime_ok and interactions_ok):
+            elif not (size_ok and runtime_ok and interactions_ok and device_ok):
                 reason = ReasonCode.SANDBOX_TEST_FAILED
 
         log = str(report.get("logs", "")).encode("utf-8")
@@ -451,6 +470,26 @@ def _write_degrade_record(prefix: str, detail: str, store: EvidenceStorePort) ->
 def _hard_timeout_s(limits: Mapping[str, JsonValue]) -> int:
     value = _as_int(limits.get("sandbox_hard_timeout_ms", _DEFAULT_LIMITS["sandbox_hard_timeout_ms"]))
     return max(1, min(SANDBOX_HARD_TIMEOUT_S, value // 1000))
+
+
+
+def _device_calls_safe(raw: object) -> bool:
+    """ADR-010：上报的 device_calls 无违规即安全（空序列零回归）。"""
+    if not isinstance(raw, (list, tuple)):
+        return False  # 形状错误 fail-closed
+    calls: list[DeviceCall] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            return False
+        api = item.get("api")
+        if not isinstance(api, str):
+            return False
+        t = max(0, _as_int(item.get("t_ms")))
+        code = str(item.get("code", "OK"))
+        args = _as_object(item.get("args", {}))
+        duration = max(0, _as_int(item.get("duration_ms")))
+        calls.append(DeviceCall(api=api, t_ms=t, code=code, args=args, duration_ms=duration))
+    return not detect_violations(tuple(calls))
 
 
 def _as_int(value: object) -> int:

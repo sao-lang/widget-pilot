@@ -1,0 +1,27 @@
+{
+  "$schema": "device-apis v1 (ADR-010 §2.2 单一事实来源)",
+  "version": "1.0",
+  "source_note": "约束值参考 Android AppWidget/Glance 官方文档（2026-11-22 检索）：updatePeriodMillis≥30min、广播 10s ANR、Glance 建议每小时≤1次、RemoteViews 位图内存 6*w*h。",
+  "api_limits": {
+    "device.getLocation": { "min_interval_ms": 30000, "doze_deferred": true },
+    "device.getBattery": { "min_interval_ms": 60000, "doze_deferred": false },
+    "device.getNetworkStatus": { "min_interval_ms": 15000, "doze_deferred": true },
+    "device.sendNotification": { "max_per_hour": 5, "doze_deferred": false },
+    "device.scheduleRefresh": { "min_interval_ms": 1800000, "doze_deferred": false },
+    "device.storage.write": { "max_per_second": 10, "doze_deferred": false }
+  },
+  "thresholds": {
+    "full_render_per_minute": 10,
+    "retry_window_calls": 3,
+    "anr_task_ms": 10000,
+    "bitmap_memory_factor": 6
+  },
+  "result_codes": ["OK", "RATE_LIMITED", "DOZE_DEFERRED", "QUOTA_EXCEEDED", "DENIED"],
+  "danger_categories": {
+    "dangerous_api": "调用未声明或动态构造的设备 API",
+    "high_frequency": "高频调用受限 API",
+    "render_storm": "频繁全量渲染",
+    "retry_storm": "限流后短时间内重试",
+    "long_task": "超 ANR 阈值的同步大任务"
+  }
+}
