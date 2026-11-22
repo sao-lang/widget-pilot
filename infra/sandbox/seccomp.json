@@ -1,0 +1,36 @@
+{
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "archMap": [],
+  "syscalls": [
+    {
+      "names": [
+        "ptrace",
+        "process_vm_readv",
+        "process_vm_writev",
+        "bpf",
+        "userfaultfd",
+        "mount",
+        "umount",
+        "umount2",
+        "setns",
+        "unshare",
+        "reboot",
+        "kexec_load",
+        "open_by_handle_at",
+        "init_module",
+        "finit_module",
+        "delete_module",
+        "create_module",
+        "iopl",
+        "ioperm",
+        "chroot",
+        "pivot_root",
+        "personality",
+        "acct",
+        "quotactl"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    }
+  ]
+}

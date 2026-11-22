@@ -1,0 +1,12 @@
+{
+  "name": "wp-sandbox-runner",
+  "version": "1.0.0",
+  "private": true,
+  "description": "M08 one-shot sandbox runner (esbuild + jsdom + React)",
+  "dependencies": {
+    "esbuild": "^0.25.12",
+    "jsdom": "^26.1.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  }
+}
