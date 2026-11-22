@@ -795,6 +795,8 @@ export interface operations {
                     description: string;
                     attachment_ids?: string[];
                     grid?: components["schemas"]["GridSpec"];
+                    /** @description ADR-009 保留字段：指定修改哪个 widget；单任务模式忽略，ADR-006 落地后消费。 */
+                    target_task_id?: string | null;
                 };
             };
         };

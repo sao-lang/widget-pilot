@@ -643,6 +643,8 @@ class Input:
     """第 4 槽附件洞察端口（M05）；None 时装配省略该槽。"""
     context_user_id: str = ""
     """记忆/程序记忆读取的租户键（配合上面两个端口）。"""
+    fact_summary: str = ""
+    """ADR-009 会话历史事实渲染文本；结论槽尾部追加，空串不追加。"""
 
 
 @dataclass
@@ -942,6 +944,8 @@ class SlotConfig:
     """当前控件类型，传给程序记忆端口做采纳记录匹配。"""
     attachment_refs: tuple[str, ...] = ()
     """附件引用键列表，传给附件洞察端口；默认无附件。"""
+    fact_summary: str = ""
+    """ADR-009 会话历史事实摘要渲染文本；结论槽尾部追加，空串不追加。"""
 
 
 @dataclass

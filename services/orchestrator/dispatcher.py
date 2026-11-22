@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable
 from typing import Final, cast
 
@@ -28,6 +29,14 @@ from packages.contracts.enums import ReasonCode, SessionState
 from packages.contracts.types import TaskFields
 from services.control_plane.sessions.service import SessionService
 from services.guardrails.types import ValidationResult
+from services.orchestrator.memory.fact_summary import (
+    build_fact_summary,
+    render_fact_summary,
+)
+from services.orchestrator.memory.ports import FactSummaryStorePort
+
+logger = logging.getLogger(__name__)
+"""dispatcher 模块日志器（事实摘要写失败只告警不阻断主流程）。"""
 
 
 def _l0_catalog() -> tuple[JsonObject, ...]:
@@ -109,6 +118,30 @@ def _task_attachments(task: Task) -> list[str]:
     if isinstance(raw, list):
         return [str(item) for item in raw]
     return [str(raw)] if raw else []
+
+
+def _read_fact_summary_with_index(
+    store: FactSummaryStorePort | None, session_id: str
+) -> tuple[int, str]:
+    """ADR-009：读会话事实（turn_index + 文本）；读失败返回 (0, "") 容错。
+
+    事实是建议不是门禁：PG 读故障只省略该段，不冒泡成任务失败
+    （否则走不 ACK→重投→死信，违反契约 Invariant「读取失败容错」）。
+    """
+    if store is None:
+        return 0, ""
+    try:
+        return store.latest(session_id)
+    except Exception as exc:  # noqa: BLE001 - 事实读取失败只省略，不影响主生成链
+        logger.warning("fact summary read failed; omit segment: %s", exc)
+        return 0, ""
+
+
+def _read_fact_summary(
+    store: FactSummaryStorePort | None, session_id: str
+) -> str:
+    """只取渲染文本（装配用）；读失败为空串。"""
+    return _read_fact_summary_with_index(store, session_id)[1]
 
 
 def _decode_message(msg_id: str | bytes, fields: dict[bytes | str, bytes | str]) -> Task:
@@ -302,6 +335,7 @@ class Dispatcher:
         validator: ValidatorFn,
         input_enricher: Callable[[Input], Input] | None = None,
         cost_sink: Callable[[State], None] | None = None,
+        fact_summary_store: FactSummaryStorePort | None = None,
     ) -> None:
         """注入任务队列、执行依赖、会话服务与校验链（状态回写入口）。
 
@@ -314,6 +348,8 @@ class Dispatcher:
                 Preference/Procedure 端口）；None 时 Input 不带数据端口，装配省略对应槽。
             cost_sink: B7 终态成本落账回调（生产由 worker 绑定真实 PG）；
                 None 时不落账（run 的注入点，非测试兼容桩）。
+            fact_summary_store: ADR-009 会话事实摘要存储（生产 PgFactSummaryStore）；
+                None 时不注入/不生成事实（无存储即无事实，非测试兼容桩）。
         """
         self._queue = queue
         self._deps = deps
@@ -321,14 +357,56 @@ class Dispatcher:
         self._validator = validator
         self._input_enricher = input_enricher
         self._cost_sink = cost_sink
+        self._fact_summary_store = fact_summary_store
 
-    def _write_back(self, session_id: str, user_id: str, state: State) -> None:
+    def _write_fact(
+        self, session_id: str, state: State, last_intent: str, widget_type: str
+    ) -> None:
+        """ADR-009：DONE 终态生成并落一条 FactSummary（零 LLM，幂等）。"""
+        if self._fact_summary_store is None:
+            return
+        # 读上一轮 turn 也走容错（读失败按 turn 1 尽力写，不阻断已完成的会话）
+        prev_turn, _ = _read_fact_summary_with_index(self._fact_summary_store, session_id)
+        fact = build_fact_summary(
+            session_id, state,
+            turn_index=prev_turn + 1,
+            last_intent=last_intent,
+            widget_type=widget_type,
+        )
+        self._fact_summary_store.append(
+            session_id, fact.turn_index,
+            {
+                "session_id": fact.session_id,
+                "turn_index": fact.turn_index,
+                "tasks": [
+                    {
+                        "widget_type": t.widget_type, "grid": t.grid,
+                        "palette": t.palette, "key_features": list(t.key_features),
+                        "last_intent": t.last_intent, "turn_count": t.turn_count,
+                    }
+                    for t in fact.tasks
+                ],
+            },
+            render_fact_summary(fact),
+        )
+
+    def _write_back(
+        self,
+        session_id: str,
+        user_id: str,
+        state: State,
+        *,
+        last_intent: str = "",
+        widget_type: str = "custom",
+    ) -> None:
         """把 run() 终态映射回 SessionService（§5.2 状态迁移集中一处）。
 
         Args:
             session_id: 会话标识。
             user_id: 会话 owner（租户校验用，不再传空——review B1）。
             state: run() 返回的最终 State。
+            last_intent: 本轮用户描述（ADR-009 FactSummary 用）。
+            widget_type: 本轮归一化控件类型（FactSummary 用）。
         """
         if state.terminal is None:
             # 无终态但进入挂起（ask_user / AWAIT_INPUT）→ 等用户输入
@@ -348,6 +426,13 @@ class Dispatcher:
                 )
             else:
                 self._sessions.complete(session_id, bundle_ref)
+                # ADR-009：仅成功且有产物时生成事实；失败 turn 不生成新事实。
+                # 写失败只丢事实证据（store 层 fail-closed 抛异常），不回滚已完成的
+                # 会话状态、不阻断 ACK——事实是建议不是门禁。
+                try:
+                    self._write_fact(session_id, state, last_intent, widget_type)
+                except Exception as exc:  # noqa: BLE001 - 事实写失败只丢证据
+                    logger.warning("fact summary write failed; continue: %s", exc)
         else:
             # FAILED / HANDOFF：原因码 + 证据引用缺一不可（A14）
             reason = state.terminal.reason_code or "HUMAN_REQUIRED"
@@ -461,6 +546,9 @@ class Dispatcher:
                     ),
                     clarification_answer=clarification_answer,
                     context_user_id=user_id,  # v1.6：记忆端口读取的租户键
+                    fact_summary=_read_fact_summary(
+                        self._fact_summary_store, session_id
+                    ),  # ADR-009：读失败容错为空串（省略该段，不阻断任务）
                 )
                 # v1.6：生产由 worker 注入真实记忆检索端口（B1/B6/B8），测试不注入则省略数据槽。
                 if self._input_enricher is not None:
@@ -469,7 +557,14 @@ class Dispatcher:
                     session_id, run_id, run_input, self._deps,
                     cost_sink=self._cost_sink,
                 )
-                self._write_back(session_id, user_id, state)
+                self._write_back(
+                    session_id, user_id, state,
+                    last_intent=_task_str(task.get(_FIELD_DESC)),
+                    widget_type=(
+                        validation.widget_type.value
+                        if validation and validation.widget_type else "custom"
+                    ),
+                )
         except Exception:
             # review B2：失败不 ACK，留 PEL 由 xautoclaim 重投；超限写死信
             retries = int(_task_str(task.get(_FIELD_RETRIES, "0")) or "0")

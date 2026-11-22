@@ -115,6 +115,8 @@ class MessageReq(BaseModel):
     description: str
     grid: str | None = None
     attachment_ids: list[str] = []
+    target_task_id: str | None = None
+    """ADR-009 保留字段：指定修改哪个 widget；单任务模式忽略，待 ADR-006 落地消费。"""
 
 
 class ClarificationReq(BaseModel):
@@ -346,6 +348,8 @@ def create_app(
                 # C1/A1（v1.8）：附件 id 随任务下传，dispatcher 过校验链时
                 # 由 guardrail_adapter 解析成 AttachmentView（此前是死参数）。
                 "attachment_ids": req.attachment_ids,
+                # ADR-009 保留字段：单任务模式忽略，ADR-006 落地后按 task_id 路由。
+                "target_task_id": req.target_task_id or "",
             }
         )
         return _ok({"runId": row.run_id, "state": row.state.value})

@@ -207,6 +207,7 @@ def run(session_id: str, run_id: str, user_input: Input | str, deps: Deps, cost_
             user_id=user_input.context_user_id,
             widget_type=user_input.widget_type or "",
             attachment_refs=tuple(user_input.attachments),
+            fact_summary=user_input.fact_summary,
         )
     else:
         text, grid = user_input, None

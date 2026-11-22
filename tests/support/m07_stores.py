@@ -22,7 +22,7 @@ from services.orchestrator.memory.types import (
     utc_now_iso,
 )
 
-__all__ = ["InMemoryPreferenceStore", "InMemoryProcedureStore"]
+__all__ = ["InMemoryFactSummaryStore", "InMemoryPreferenceStore", "InMemoryProcedureStore"]
 
 
 class InMemoryPreferenceStore:
@@ -190,4 +190,29 @@ class InMemoryProcedureStore:
             old,
             adopt_count=max(old.adopt_count - 1, 0),
             version=old.version + 1,
+        )
+
+
+class InMemoryFactSummaryStore:
+    """ADR-009 事实摘要内存替身（仅测试注入；生产用 PgFactSummaryStore）。"""
+
+    def __init__(self) -> None:
+        """初始化空事实表（session_id → {turn_index: (payload, rendered)}）。"""
+        self.rows: dict[str, dict[int, tuple[JsonValue, str]]] = {}
+
+    def latest(self, session_id: str) -> tuple[int, str]:
+        """返回最新 (turn_index, rendered)；无记录 (0, "")。"""
+        turns = self.rows.get(session_id, {})
+        if not turns:
+            return 0, ""
+        idx = max(turns)
+        return idx, turns[idx][1]
+
+    def append(
+        self, session_id: str, turn_index: int,
+        payload: JsonValue, rendered: str,
+    ) -> None:
+        """追加一条事实（同键幂等覆盖，与 PG ON CONFLICT DO NOTHING 对齐）。"""
+        self.rows.setdefault(session_id, {}).setdefault(
+            turn_index, (payload, rendered)
         )

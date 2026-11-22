@@ -5,7 +5,7 @@ purity-exempt-file: 本文件全部为 @runtime_checkable Protocol 接口签名�
 
 生产实现：``PreferenceStore`` / ``ProcedureStore`` 由 PG 落地（``pg_stores.py``）；
 四个装配端口由 M07 装配层从各模块真实数据读取。测试通过显式注入 mock 满足协议。
-**任一需注入端口为 None 即 fail-fast，禁止硬编码占位串冒充真实数据**（I-M3 / v1.6 装配纪律）。
+**端口未注入时对应槽省略，禁止硬编码占位串冒充真实数据；生产关键端口缺失 fail-fast**（ADR-002 / v1.6 装配纪律修订）。
 
 端口只定义鸭子协议，不 import 任何具体实现，避免循环依赖。协议方法体统一用 ``...``
 并在 docstring 写明 ``Args`` / ``Returns``（意图注释，供静态扫描识别为非占位）。
@@ -194,5 +194,41 @@ class AttachmentInsightPort(Protocol):
 
         Returns:
             洞察文本列表；无附件或无洞察时为空列表。
+        """
+        ...
+
+
+@runtime_checkable
+class FactSummaryStorePort(Protocol):
+    """ADR-009 会话事实摘要持久化端口（真实实现 = PG；测试显式注入替身）。"""
+
+    def latest(self, session_id: str) -> tuple[int, str]:
+        """读取会话最新事实摘要（turn_index + 渲染文本）。
+
+        Args:
+            session_id: 会话标识（租户锚点）。
+
+        Returns:
+            (turn_index, rendered)；无记录时 (0, "") 表示无事实。
+        """
+        ...
+
+    def append(
+        self,
+        session_id: str,
+        turn_index: int,
+        payload: JsonValue,
+        rendered: str,
+    ) -> None:
+        """追加一条事实摘要（session+turn 唯一；PG 失败抛异常 fail-closed）。
+
+        Args:
+            session_id: 会话标识。
+            turn_index: 迭代序号（1-based）。
+            payload: FactSummary 的 JSON 可序列化形态（白名单字段）。
+            rendered: 供结论槽追加的渲染文本。
+
+        Returns:
+            None（写失败以异常上报，不返回 False）。
         """
         ...

@@ -193,12 +193,17 @@ def _memory_message(slots: SlotConfig) -> Message | None:
     return Message("system", MEMORY_SLOT_PREFIX + text)
 
 
-def _conclusion_message(state: State) -> Message:
-    """构造会话结论槽（含 excluded_approaches，压缩时必须保留）。"""
+def _conclusion_message(state: State, fact_summary: str = "") -> Message:
+    """构造会话结论槽（含 excluded_approaches，压缩时必须保留）。
+
+    ADR-009：FactSummary 只在尾部追加，不改 1–5 槽与前段字节（caching 前缀）。
+    """
     conclusions = state.spec.model_dump()
     if state.excluded_approaches:
         conclusions["excluded_approaches"] = list(state.excluded_approaches)
     body = json.dumps(conclusions, ensure_ascii=False, default=str)
+    if fact_summary:
+        body += "\n" + fact_summary
     return Message("user", CONCLUSION_PREFIX + body)
 
 
@@ -221,5 +226,5 @@ def assemble(state: State, slots: SlotConfig) -> list[Message]:
         _memory_message(slots),
     )
     messages.extend(slot for slot in optional if slot is not None)
-    messages.append(_conclusion_message(state))
+    messages.append(_conclusion_message(state, slots.fact_summary))
     return messages

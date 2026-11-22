@@ -151,6 +151,10 @@ paths:
                 description: { type: string }
                 attachment_ids: { type: array, items: { type: string } }
                 grid: { $ref: "#/components/schemas/GridSpec" }
+                target_task_id:
+                  type: string
+                  nullable: true
+                  description: ADR-009 保留字段：指定修改哪个 widget；单任务模式忽略，ADR-006 落地后消费。
       responses:
         "202":
           description: 异步任务已受理（不把 202 当成功语义外泄，前端按事件流驱动）

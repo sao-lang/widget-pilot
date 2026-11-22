@@ -107,6 +107,7 @@ async def main() -> None:
         ProcedureHintAdapter,
         high_confidence_grids,
     )
+    from services.orchestrator.memory.fact_summary_store import PgFactSummaryStore
     from services.orchestrator.memory.pg_stores import (
         PgPreferenceStore,
         PgProcedureStore,
@@ -175,6 +176,7 @@ async def main() -> None:
     dispatcher = Dispatcher(
         queue=queue, deps=deps, sessions=sessions, validator=validator,
         input_enricher=_enrich_input, cost_sink=_cost_sink,
+        fact_summary_store=PgFactSummaryStore(dsn),  # ADR-009：多轮事实真实 PG 存储
     )
 
     print(

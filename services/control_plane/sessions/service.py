@@ -137,7 +137,10 @@ class SessionService:
         description: str,
         attachment_ids: list[str],
     ) -> SessionRow:
-        """提交描述：DRAFT→RUNNING，分配 runId（§5.2）。B1：先租户校验。
+        """提交描述：DRAFT|COMPLETED→RUNNING，分配 runId（§5.2/ADR-009）。B1：先租户校验。
+
+        ADR-009 v0.2：COMPLETED 不再是不可逆终态——同一会话可再提交控件修改消息，
+        分配新 run_id（parent_run_id 语义），旧轮次事实由 FactSummary 承接。
 
         Args:
             session_id: 会话标识。
@@ -150,13 +153,13 @@ class SessionService:
 
         Raises:
             ForbiddenError: 非会话 owner。
-            ConflictError: 会话非 DRAFT 态。
+            ConflictError: 会话非 DRAFT/COMPLETED 态。
             SessionError: description 为空。
         """
         row = self.get(session_id)
         self._assert_owner(user_id, row)
-        if row.state is not SessionState.DRAFT:
-            raise ConflictError("session not in DRAFT state")
+        if row.state not in (SessionState.DRAFT, SessionState.COMPLETED):
+            raise ConflictError("session not in DRAFT/COMPLETED state")
         if not description:
             raise SessionError("description required")
         before_state = row.state
