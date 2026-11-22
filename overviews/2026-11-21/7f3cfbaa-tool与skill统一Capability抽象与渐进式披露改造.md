@@ -3,7 +3,7 @@
 ## L0 索引卡（续接时先读这一段，≤12 行）
 - 场景 / 路径：本轮【6 依新设计改码】/ full（ADR-004 全级联去类型化，已交付）；历史链【12 提交 → 11/3 写方案+同步文档 → 9 拷问设计 → 5/6 写代码】已完成
 - 当前闸门：S4 全绿（pytest 409 passed / 49 skipped / exit 0；ruff/pyright/contracts/contract_check/ledger/removal/source_purity/review_gate 全退出 0）；独立复审 Round 2 Blocker=0；verify.py 因 src/ 布局与缺 mypy/pydocstyle exit 1（环境阻断，已用项目原生命令替代）
-- 交付产物：`docs/adr/ADR-004`（全级联去类型化，已实现；`intent_hints.py` 已在 ADR-005 删除）、`docs/adr/ADR-005`（进护栏强化）、`change-contract.md`、`constants.py` 语义族、`sensitive.py`/`validators.py`（新增）、`test_m06_*_hardened/decoupled.py`（新增）、M06/设计方案/00 文档同步
+- 交付产物：`docs/adr/ADR-004`（全级联去类型化，已实现；`intent_hints.py` 已在 ADR-005 删除）、`docs/adr/ADR-005`（进护栏强化）、`docs/change-contracts/change-contract-m06-intent-guard.md`、`constants.py` 语义族、`sensitive.py`/`validators.py`（新增）、`test_m06_*_hardened/decoupled.py`（新增）、M06/设计方案/00 文档同步
 - 未完成项：① 设备 API/续航/沙箱校验未实现（M08 隔离缺失）② verify.py 通用脚本不适配本项目 src 布局（已登记环境阻断）③ 无
 - 下一步：用户确认后提交；设备/沙箱阶段另立 ADR，不在本次范围
 - 用户硬约束：级联路由整体去类型化、widget 只作 hint；不改 IntentCategory/ReasonCode/事件 schema/SDK 契约
@@ -131,7 +131,7 @@
 - S1 声明：场景 3 / 文档路径 / full / 置信 0.85；子代理=派（3 路独立调研：场景全景 / 代码与测试约束 / 文档落点）；省掉=env_probe、TDD/verify/source_purity（无改码）、git commit、impact_analysis（不改公共契约）。假设 A1–A5 写入 ADR §10 供否决。
 - 三路调研关键结论：① 11 类 widget 场景（信息/时间日程/效率/健康/设备控制/媒体/生活/金融/系统/AI生成/通讯）与 8 个正向语义族，数据词只能加权不能设门槛；② 三条硬样本 + 长尾 `"给我整一个能显示日期的小玩意"` 走 L2/L3 是回归地雷，`patterns/intent.py:11` 是第二份负向 regex，`change_gate` 无词表指纹；③ 按 ADR-003 风格新增 ADR-004 并同步四处文档。
 - 决策：正向 =（生成/放置/展示动作 AND 宿主/控件对象）或（数据词 × 宿主共现）；负向 = 查询/告知/创作/设备直操/教程/开发语境/裸数据/状态描述 8 族联合条件；保留双循环、正向优先、I14 与 step0 留证链。P1 词表改造 / P2 hints 去类型化 / P3 设备与沙箱（待 M08 隔离）分阶段。
-- 产物与行号证据：`docs/adr/ADR-004-意图识别去类型化与补充场景.md:1`（§1–§14、§9 样例之外覆盖、§10 A1–A5、§13 变更记录）；`change-contract.md:1`（六段，contract_check.py 退出 0 / Acceptance=5）；`设计方案.md:6`（v1.9）、`:15`（v1.9 变更说明）、`:210`（X6 口径）；`docs/modules/M06-输入校验护栏与路由域.md:5`（ADR-004 覆盖声明）；`docs/M06-代码阅读指南.md:6/:78/:134`；`docs/modules/00-总览与模块地图.md:5/:52`（ADR 索引）。
+- 产物与行号证据：`docs/adr/ADR-004-意图识别去类型化与补充场景.md:1`（§1–§14、§9 样例之外覆盖、§10 A1–A5、§13 变更记录）；`docs/change-contracts/change-contract-m06-intent-guard.md:1`（六段，contract_check.py 退出 0 / Acceptance=5）；`设计方案.md:6`（v1.9）、`:15`（v1.9 变更说明）、`:210`（X6 口径）；`docs/modules/M06-输入校验护栏与路由域.md:5`（ADR-004 覆盖声明）；`docs/M06-代码阅读指南.md:6/:78/:134`；`docs/modules/00-总览与模块地图.md:5/:52`（ADR 索引）。
 - 边界证据：`git status --short` 仅 4 份既有文档改动 + 2 个新增文档，无 `.py`/契约/测试改动。
 - 已知未处理：`docs/modules/00-总览与模块地图.md:79` 仍有"按 widget_type+grid 确定性预取"旧口径（ADR-003 遗留不一致，非本轮引入，留给后续文档清理场景）。
 - 下一步闸门：用户确认/否决 A1–A5 → 确认后进 P1 改码；未确认前禁止改 `constants.py`。
