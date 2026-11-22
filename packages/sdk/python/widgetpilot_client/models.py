@@ -18,6 +18,11 @@ class AgentEvent(BaseModel):
     phase: str
     payload: JsonValue
     traceId: str
+    taskId: str | None = None
+    taskIndex: int | None = None
+    role: str | None = None
+    turn: int | None = None
+    agentId: str | None = None
 
 
 class WidgetSpec(BaseModel):

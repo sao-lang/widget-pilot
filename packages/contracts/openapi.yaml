@@ -154,7 +154,7 @@ paths:
                 target_task_id:
                   type: string
                   nullable: true
-                  description: ADR-009 保留字段：指定修改哪个 widget；单任务模式忽略，ADR-006 落地后消费。
+                  description: ADR-009：指定修改哪个 widget；多任务时缺省触发 ASK_USER 消歧。
       responses:
         "202":
           description: 异步任务已受理（不把 202 当成功语义外泄，前端按事件流驱动）
@@ -190,6 +190,30 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/ApiOk" }
         "409": { $ref: "#/components/responses/Conflict" }
+  /api/sessions/{session_id}/tasks:
+    get:
+      tags: [sessions]
+      summary: 会话内任务列表（ADR-006/009 generation_task 摘要）
+      operationId: listSessionTasks
+      parameters: [{ $ref: "#/components/parameters/SessionId" }]
+      responses:
+        "200": { $ref: "#/components/responses/SessionOk" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/tasks/{task_id}/turns:
+    get:
+      tags: [sessions]
+      summary: 任务迭代版本历史（ADR-009 task_turn）
+      operationId: listTaskTurns
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/TaskTurnsOk" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /api/sessions/{session_id}/attachment-roles:
     patch:
       tags: [sessions]
@@ -642,6 +666,46 @@ components:
                       grid: { $ref: "#/components/schemas/GridSpec" }
                       resume_hint: { type: string }
                       bundle_refs: { type: array, items: { type: string } }
+                      target_task_id: { type: string, nullable: true }
+                      tasks:
+                        type: array
+                        description: ADR-006/009 会话内任务摘要（generation_task）
+                        items:
+                          type: object
+                          properties:
+                            task_id: { type: string }
+                            task_index: { type: integer }
+                            task_total: { type: integer }
+                            state: { type: string }
+                            result_ref: { type: string, nullable: true }
+                            current_bundle_ref: { type: string, nullable: true }
+                            last_turn_index: { type: integer }
+                            role: { type: string, nullable: true }
+                            turn: { type: integer, nullable: true }
+    TaskTurnsOk:
+      description: 任务迭代版本历史（ADR-009 task_turn）
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/ApiResponse"
+              - type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      task_id: { type: string }
+                      turns:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            turn_index: { type: integer }
+                            run_id: { type: string }
+                            user_intent: { type: string }
+                            result_bundle_ref: { type: string, nullable: true }
+                            fact_summary_ref: { type: string, nullable: true }
+                            state: { type: string }
     SessionListOk:
       description: 会话列表
       content:

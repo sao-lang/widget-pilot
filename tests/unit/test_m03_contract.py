@@ -1,4 +1,4 @@
-"""M03 契约测试：T14 事件 schema（18 种 kind）/ T15 错误码分类（17 码不重不漏）。"""
+"""M03 契约测试：T14 事件 schema（21 种 kind）/ T15 错误码分类（17 码不重不漏）。"""
 from __future__ import annotations
 
 import json
@@ -16,9 +16,10 @@ from packages.contracts.enums import AgentEventKind, ReasonCode
 SCHEMA = "packages/contracts/events.schema.json"
 
 
-# ---- T14：18 种 AgentEventKind 事件全部通过 schema 校验 ----
+# ---- T14：21 种 AgentEventKind 事件全部通过 schema 校验 ----
 def test_T14_all_event_kinds_validate():
-    assert len(AgentEventKind) == 17  # skill 事件已随技能预取删除（ADR-003）
+    # ADR-003 删 skill（17）；ADR-008 +reasoning（18）；ADR-007 +agent_message/review/delegate（21）
+    assert len(AgentEventKind) == 21
     with open(SCHEMA, encoding="utf-8") as f:
         schema = json.load(f)
     validator = validators.validator_for(schema)(schema)

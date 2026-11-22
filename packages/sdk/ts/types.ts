@@ -158,6 +158,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sessions/{session_id}/tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 会话内任务列表（ADR-006/009 generation_task 摘要） */
+        get: operations["listSessionTasks"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/tasks/{task_id}/turns": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 任务迭代版本历史（ADR-009 task_turn） */
+        get: operations["listTaskTurns"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sessions/{session_id}/attachment-roles": {
         parameters: {
             query?: never;
@@ -587,6 +621,40 @@ export interface components {
                         grid?: components["schemas"]["GridSpec"];
                         resume_hint?: string;
                         bundle_refs?: string[];
+                        target_task_id?: string | null;
+                        /** @description ADR-006/009 会话内任务摘要（generation_task） */
+                        tasks?: {
+                            task_id?: string;
+                            task_index?: number;
+                            task_total?: number;
+                            state?: string;
+                            result_ref?: string | null;
+                            current_bundle_ref?: string | null;
+                            last_turn_index?: number;
+                            role?: string | null;
+                            turn?: number | null;
+                        }[];
+                    };
+                };
+            };
+        };
+        /** @description 任务迭代版本历史（ADR-009 task_turn） */
+        TaskTurnsOk: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ApiResponse"] & {
+                    data?: {
+                        task_id?: string;
+                        turns?: {
+                            turn_index?: number;
+                            run_id?: string;
+                            user_intent?: string;
+                            result_bundle_ref?: string | null;
+                            fact_summary_ref?: string | null;
+                            state?: string;
+                        }[];
                     };
                 };
             };
@@ -795,7 +863,7 @@ export interface operations {
                     description: string;
                     attachment_ids?: string[];
                     grid?: components["schemas"]["GridSpec"];
-                    /** @description ADR-009 保留字段：指定修改哪个 widget；单任务模式忽略，ADR-006 落地后消费。 */
+                    /** @description ADR-009：指定修改哪个 widget；多任务时缺省触发 ASK_USER 消歧。 */
                     target_task_id?: string | null;
                 };
             };
@@ -856,6 +924,38 @@ export interface operations {
         responses: {
             200: components["responses"]["ApiOk"];
             409: components["responses"]["Conflict"];
+        };
+    };
+    listSessionTasks: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: components["parameters"]["SessionId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: components["responses"]["SessionOk"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listTaskTurns: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: components["responses"]["TaskTurnsOk"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
         };
     };
     patchAttachmentRoles: {

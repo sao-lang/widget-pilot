@@ -76,6 +76,10 @@ class AgentEventKind(StrEnum):
     ERROR = "error"
     DONE = "done"
     ASK_USER = "ask_user"
+    REASONING = "reasoning"
+    AGENT_MESSAGE = "agent_message"
+    REVIEW = "review"
+    DELEGATE = "delegate"
 
 class ReasonCode(StrEnum):
     INPUT_INVALID = "INPUT_INVALID"

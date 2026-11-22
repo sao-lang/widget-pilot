@@ -863,7 +863,7 @@ class Manifest:
 
 @dataclass
 class AgentEvent:
-    """§4.2 事件记录：kind 属于 AgentEventKind（18 种之一）。"""
+    """§4.2 事件记录：kind 属于 AgentEventKind（21 种之一，ADR-006/007/008 扩展）。"""
 
     seq: int
     """会话内递增序号。"""
@@ -881,10 +881,20 @@ class AgentEvent:
     """事件载荷（结构随 kind 变化，统一用 JsonValue 聚集）。"""
     trace_id: str
     """链路追踪 ID。"""
+    task_id: str | None = None
+    """ADR-006/009 任务级归因；N=1 保持 None 不出现在 JSON。"""
+    task_index: int | None = None
+    """任务序号（1-based）。"""
+    role: str | None = None
+    """ADR-007 功能角色；仅角色层事件携带。"""
+    turn: int | None = None
+    """任务内轮次 / 迭代序号。"""
+    agent_id: str | None = None
+    """一次角色实例的 uuid。"""
 
     def to_dict(self) -> JsonObject:
-        """契约字段名为 camelCase（sessionId/runId/traceId）。"""
-        return {
+        """契约字段名为 camelCase（sessionId/runId/traceId）；可选字段仅非空时序列化（N=1 零回归）。"""
+        result: JsonObject = {
             "seq": self.seq,
             "sessionId": self.session_id,
             "runId": self.run_id,
@@ -894,6 +904,17 @@ class AgentEvent:
             "payload": self.payload,
             "traceId": self.trace_id,
         }
+        if self.task_id is not None:
+            result["taskId"] = self.task_id
+        if self.task_index is not None:
+            result["taskIndex"] = self.task_index
+        if self.role is not None:
+            result["role"] = self.role
+        if self.turn is not None:
+            result["turn"] = self.turn
+        if self.agent_id is not None:
+            result["agentId"] = self.agent_id
+        return result
 
 
 @dataclass
