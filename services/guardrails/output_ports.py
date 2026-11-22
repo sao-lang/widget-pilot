@@ -96,7 +96,11 @@ class ContractCheckReport:
 
 @dataclass(slots=True, frozen=True)
 class EvidenceRefs:
-    """证据包引用（每一项都是 ``key#sha256:{hex}``）。"""
+    """证据包引用（每一项都是 ``key#sha256:{hex}``）。
+
+    snapshot_ref = DOM 序列化 html（结构证据）；snapshot_png_ref = headless
+    Chromium 真像素截图（R8/R13）。后者末尾追加且默认 None，降级路径构造兼容。
+    """
 
     log_ref: str
     report_ref: str
@@ -104,6 +108,7 @@ class EvidenceRefs:
     case_refs: tuple[str, ...]
     compiled_ref: str
     compiled_hash: str
+    snapshot_png_ref: str | None = None
 
 
 @dataclass(slots=True, frozen=True)

@@ -8,6 +8,7 @@ cgroups 限额 / seccomp / 15s 硬超时强杀；不挂 docker.sock 给容器内
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 import time
@@ -47,6 +48,10 @@ from services.sandbox_runner.ports import (
     SandboxUnavailableError,
 )
 from services.sandbox_runner.render import parse_render_stage
+from services.sandbox_runner.snapshot import (
+    ChromeSnapshotRenderer,
+    SnapshotRendererPort,
+)
 
 __all__ = [
     "SANDBOX_HARD_TIMEOUT_S",
@@ -63,6 +68,10 @@ _DEFAULT_LIMITS: dict[str, int] = {"sandbox_hard_timeout_ms": 15000, "render_tim
 _SECCONFIG_PATH = Path(__file__).resolve().parents[2] / "infra/sandbox/seccomp.json"
 _RESULT_CACHE: dict[tuple[str, ...], ValidateResult] = {}
 _CACHE_LOCK = threading.Lock()
+
+
+logger = logging.getLogger(__name__)
+"""快照 png 渲染失败告警（只丢像素证据，不阻断主校验）。"""
 
 
 def _container_name(run_id: str) -> str:
@@ -106,8 +115,14 @@ def run_sandbox(
     docker_runner: DockerRunnerPort,
     image: str = SANDBOX_IMAGE,
     prefix: str = "",
+    snapshot_renderer: SnapshotRendererPort | None = None,
 ) -> SandboxResult:
-    """一次性沙箱：固定顺序 编译→渲染→尺寸→运行时→能力→交互→证据。"""
+    """一次性沙箱：固定顺序 编译→渲染→尺寸→运行时→能力→交互→证据。
+
+    snapshot_renderer（R8/R13）：把沙箱 DOM 序列化 html 交由宿主机 headless
+    Chrome 渲染真像素 png；缺渲染器时只有 html 结构证据、png_ref=None（降级，
+    不阻断校验）。渲染在编排进程只处理已序列化 DOM，不执行 widget 逻辑。
+    """
     evidence_prefix = prefix or f"evidence/{run_id}"
     hard_timeout = _hard_timeout_s(limits)
     render_timeout = _as_int(limits.get("render_timeout_ms", _DEFAULT_LIMITS["render_timeout_ms"]))
@@ -206,11 +221,24 @@ def run_sandbox(
     finally:
         destroy_sandbox(run_id, reason.value if reason else "unavailable", docker_runner)
 
+    # R8/R13：DOM 序列化 html → 宿主机 headless Chrome 真像素 png（可选增强）。
+    # 只静态渲染已序列化 DOM，不执行 widget 逻辑；失败返回 None 不阻断。
+    snapshot_png: bytes | None = None
+    if snapshot_renderer is not None and snapshot is not None:
+        try:
+            parts = grid.split("x")
+            w = int(parts[0]) * 80 if len(parts) == 2 and parts[0].isdigit() else 320
+            h = int(parts[1]) * 80 if len(parts) == 2 and parts[1].isdigit() else 320
+            snapshot_png = snapshot_renderer.render(snapshot.decode("utf-8"), w, h)
+        except (ValueError, OSError, UnicodeDecodeError) as exc:
+            logger.warning("snapshot png render failed; html evidence kept: %s", exc)
+            snapshot_png = None
+
     stages.append("EVIDENCE_WRITE")
     try:
         refs = write_evidence(
             evidence_prefix, report, log, snapshot, case_specs,
-            compiled_ref, compiled_hash, evidence_store,
+            compiled_ref, compiled_hash, evidence_store, snapshot_png,
         )
         evidence_ok = verify_evidence_refs(evidence_store, refs)
     except (OSError, ValueError):
@@ -253,8 +281,13 @@ def validate_and_test(
     image: str = SANDBOX_IMAGE,
     limits: Mapping[str, JsonValue] | None = None,
     prefix: str = "",
+    snapshot_renderer: SnapshotRendererPort | None = None,
 ) -> ValidateResult:
-    """A→B→C 汇总；任一失败短路，沙箱不可用走降级且绝不判通过。"""
+    """A→B→C 汇总；任一失败短路，沙箱不可用走降级且绝不判通过。
+
+    snapshot_renderer 未注入时用真实 ChromeSnapshotRenderer（本机/部署有 Chrome
+    即出真像素 png；无则 render() 返回 None 降级，不阻断校验）。
+    """
     started = time.monotonic()
     key = (
         session_id, run_id, compute_spec_hash(spec), source_ref,
@@ -294,6 +327,7 @@ def validate_and_test(
             docker_runner=docker_runner or DockerCliRunner(),
             image=image,
             prefix=prefix or f"evidence/{session_id}/{run_id}",
+            snapshot_renderer=snapshot_renderer or ChromeSnapshotRenderer(),
         )
         stages.extend(sandbox.stages)
         passed = sandbox.passed

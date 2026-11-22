@@ -163,3 +163,38 @@ def test_end_to_end_sandbox_with_real_docker_and_minio(sandbox_image: str) -> No
     )
     assert result.passed is True, f"{result.reason_code}: {result.evidence_ref}"
     assert len(result.cases) >= 9
+
+
+def test_end_to_end_snapshot_png_with_real_chrome(sandbox_image: str) -> None:
+    """R8/R13 真环境：真 Docker 沙箱 + 真 Chrome 像素渲染 + 真 MinIO png 证据。
+
+    无 Chrome skip（环境守卫）；有则断言 snapshot_png_ref 带 hash、真 png magic、
+    可回读。html 结构证据仍保留。
+    """
+    from services.sandbox_runner.snapshot import PNG_MAGIC, ChromeSnapshotRenderer
+
+    renderer = ChromeSnapshotRenderer()
+    if not renderer.available:
+        pytest.skip("本机无 headless Chrome，真像素快照跳过（非回归）")
+
+    load_dotenv(_ROOT / ".env")
+    run_id = "snap-" + uuid.uuid4().hex[:8]
+    store = S3EvidenceStore()
+    result = run_sandbox(
+        run_id=run_id,
+        source_ref=_REF,
+        manifest={"grid": "2x2", "capabilities": ["date"]},
+        limits={"sandbox_hard_timeout_ms": 15000, "render_timeout_ms": 5000},
+        source_store=FakeSourceStore({_REF: _SRC.encode()}),
+        evidence_store=store,
+        docker_runner=DockerCliRunner(),
+        image=sandbox_image,
+        prefix=f"evidence/sess/{run_id}",
+        snapshot_renderer=renderer,
+    )
+    assert result.passed is True, f"{result.reason_code}: {result.evidence_ref}"
+    assert result.snapshot_ref is not None  # html 结构证据保留
+    assert result.evidence_refs.snapshot_png_ref is not None, "真像素 png 未落证"
+    png = store.get(result.evidence_refs.snapshot_png_ref)
+    assert png[:8] == PNG_MAGIC
+    assert len(png) > 100  # 真 PNG 结构：magic+IHDR+IDAT+IEND
