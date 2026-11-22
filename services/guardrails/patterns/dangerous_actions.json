@@ -1,0 +1,19 @@
+{
+  "version": "1.0",
+  "note": "ADR-010 §3 危险动作词表（确定性 L1）。危险接口名来自 device-apis.json 契约；本文件只列危险动作短语模式。可由 WIDGETPILOT_DANGEROUS_LEXICON_PATH 按类别整体覆盖（外置非法 fail-fast）。",
+  "dangerous_action_phrases": [
+    "绕过沙箱",
+    "绕过护栏",
+    "外联窃取",
+    "窃取数据",
+    "提权",
+    "越权调用",
+    "群发短信",
+    "后台常驻保活",
+    "禁止限流",
+    "解除限制"
+  ],
+  "revocation_phrases": [
+    "不进行", "不做", "取消", "去掉", "改成合法", "不调用", "不执行", "撤销"
+  ]
+}

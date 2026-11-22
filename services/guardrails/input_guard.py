@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from services.guardrails.constants import INTENT_ALLOWLIST
+from services.guardrails.dangerous_call import detect_dangerous_calls
 from services.guardrails.rule_registry import default_registry, scan
 from services.guardrails.sensitive import (
     SensitiveWordDetector,
@@ -59,7 +60,20 @@ def check_input(
             short_circuit=True,
         )
 
-    # 注入/PII/敏感词文本规则未命中，再判意图白名单（只放行控件生成）
+    # ADR-010 §3：危险接口 / 高危设备 API / 危险动作（词表 + 形状层，零模型）。
+    # 命中按 INJECTION 类型留证（未授权调用指令语义），不新增 ReasonCode。
+    danger = detect_dangerous_calls(description, extracted_texts=tuple(extracted_texts))
+    if danger.hit:
+        hit = InputGuardHit(
+            hit_type=GuardHitType.INJECTION,
+            rule_id="DANGEROUS_CALL",
+            judgement="危险接口/高危设备 API/危险动作：" + ";".join(danger.violations),
+            excerpt=description[:80],
+            decision=HitDecision.REJECT,
+        )
+        return GuardResult(passed=False, hits=(hit,), short_circuit=True)
+
+    # 注入/PII/敏感词/危险调用未命中，再判意图白名单（只放行控件生成）
     if intent not in INTENT_ALLOWLIST:
         hit = InputGuardHit(
             hit_type=GuardHitType.INTENT,
