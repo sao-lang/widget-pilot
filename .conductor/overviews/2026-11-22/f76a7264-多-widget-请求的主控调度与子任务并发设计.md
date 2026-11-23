@@ -359,3 +359,28 @@
 - 最终验收：6 份文档角色层符号全仓 grep **0 残留**（hash 链/黑板命中均为 M08 证据链、M07 记忆偏好链等合法保留语义）；系列说明统一为「02 任务存储与事件链路」；行数标注脚本核对 30 处一致、修正 4 处偏差（output_ports 193→192、validators 39→38、sensitive 96→95）。
 - 文件名（用户 2026-11-23 追加决定）：02 已从 `02-多Agent角色协作与任务存储链路.md` **重命名为** `02-任务存储与事件链路.md`，并同步 4 处引用（01 链接、contract Affected、overview 本条、工作日志）。内容早已重写为任务存储主题，文件名随之一致。
 - 本轮纯文档改动，无代码变更，未重跑 pytest（上一轮代码门禁 661 passed 仍有效）。
+
+## 追加：两项新需求的设计（2026-11-23 10:2x，ADR-008 更新 + ADR-012 提案）
+
+用户新需求：① 切会话进页面看最新思考、上滑看历史（参考 agent 应用）；② 编辑历史对话 + 会话状态回退（"好像已有迭代逻辑"）。两项均只出设计、未改码。
+
+**调研（2 个 Explore 子代理并行，只读）关键结论**：
+- 前端 `apps/web/src/` 只有 `main.tsx` + `App.tsx` 健康页骨架——无会话列表/切换、消息列表、EventSource、ChannelRegistry、reducer、虚拟列表、滚动加载（full grep 零命中）。
+- 事件只写 Redis Stream（`checkpoint:events:{session}`），按 maxlen=500 裁剪、无 TTL、不落 PG；SSE 端点仅 `runId`+`Last-Event-ID`，发完窗口+心跳即关，无 `XREAD BLOCK` tail；无历史分页 REST 端点。
+- reasoning：契约有简化 kind（`summary`+`source`，比 ADR-008 设计的 segment_id/stage/final 等少），生产零 emit。
+- 迭代逻辑（用户直觉对了一半）：ADR-009 有"对历史 task_id 追加新 turn + target_task_id 消歧 + 版本链"，但**纯前向**——历史产物"存而可查、不可恢复"，无 ROLLBACK 状态、无回退端点；M17 设计过 `POST /regenerate{from_seq}`【契约约定】但从未进 openapi/代码。
+- ADR-010 会话修正（撤销合并/改需求重跑）是"当前任务重入"，与"历史时点回退"语义不同。
+
+**产出**：
+- ADR-008 更新到 v0.3：新增 §7A「历史思考过程的进页展示与上滑加载」——PG `agent_event_history` 表（迁移 0019）+ emit 双写 fail-closed + `GET /events/history?before_seq&limit&kind` 游标分页 + 前端进页 REST 快照+SSE 续 tail、上滑 IntersectionObserver 哨兵 + scrollTop 补偿锚定；新增 S0'/S3' 阶段与 C11–C14。借鉴 Claude/WorkBuddy/Cursor 的分段折叠+游标分页模式，不借鉴 token 打字机与 AI SDK（D-5）。
+- 新建 ADR-012「编辑历史对话与会话状态回退」v0.1 提案：采用**分支模型**（不改历史/不删审计）——从选中历史 turn 分叉新 branch，恢复 bundle/fact/state 快照后以编辑描述发新一轮；新增 3 端点（`/turns/{id}/edit`、`GET branches`、`POST branches/{id}/activate`）、迁移 0020 加 branch 列、事件加 branchId；5 项待拍板 D1–D5（推荐 turn 级分叉/保留旧分支/interrupt 后分叉/task 内分支/独立 ADR）。
+- 00 总览 ADR 索引同步两条。
+
+**边界**：这是设计阶段，未改契约/代码/DB，未跑门禁（上轮 661 passed 仍有效）。两份文档都明确"待用户拍板"——尤其 ADR-012 的 5 个决策项需用户确认后再谈 S0。
+
+## S1 路由声明（2026-11-23，实现阶段）
+
+- 用户拍板：ADR-012 D1–D5 全部按推荐（turn 级分叉 / 保留旧分支 / interrupt 后分叉 / task 内分支 / 独立 ADR），ADR-008 v0.3 已批准；两份设计进入实现。
+- 路由卡：场景 6 设计驱动重构｜路径 code｜档位 **full**｜置信 0.9；判据=architecture/cross_contract/cross_module/migration/public_interface。器官链 plan→brainstorm→impact→subagent→tdd→git→ledger→review→memory，省掉=无。覆盖矩阵**必建**（FR=11≥8），门禁含 coverage_check/commitment_ledger/source_purity/review_gate 全绿。
+- 范围：ADR-008 v0.3（迁移 0019 历史事件表 + GET /events/history + 前端进页上滑展示）+ ADR-012（迁移 0020 branch 列 + 3 端点 + branchId 事件字段 + 编排 + 前端）。基线：工作区已有未提交文档改动（ADR-008/012/00 索引），代码未动、上轮 661 passed。
+- **实现阶段已取消（2026-11-23 10:32 用户明确"落实设计文档就可以了，不要 coding"）**：曾生成执行图 `execution-plan-history-edit.json` + `execution-state-history-edit.json` 并走完 S0/S1 路由，现按用户要求删除该二文件、不进 S2–S5；本轮交付仅设计文档（ADR-008 v0.3 / ADR-012 v1.0 / 00 索引）。设计已定稿、D1–D5 已拍板，实现待后续用户明确要求时另行启动。
