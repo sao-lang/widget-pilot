@@ -13,7 +13,7 @@
     "ts": { "type": "string", "format": "date-time", "description": "UTC 带时区" },
     "kind": {
       "description": "AgentEventKind；未知值容忍（向前兼容）",
-      "enum": ["run", "plan", "spec", "attachment", "routing", "code", "guard", "validation", "sandbox", "artifact", "cost", "checkpoint", "interrupted", "notice", "error", "done", "ask_user", "reasoning", "agent_message", "review", "delegate"]
+      "enum": ["run", "plan", "spec", "attachment", "routing", "code", "guard", "validation", "sandbox", "artifact", "cost", "checkpoint", "interrupted", "notice", "error", "done", "ask_user", "reasoning"]
     },
     "phase": {
       "description": "SessionState 权威状态",
@@ -28,9 +28,6 @@
         { "type": "object", "description": "guard：M08 出护栏判据结论", "properties": { "kind": { "const": "guard" }, "hit": { "type": "boolean" }, "judge": { "type": "string", "enum": ["schema", "capability_allowlist", "forbidden_content", "pii", "intent_match", "spec_consistency"] }, "reason_code": { "$ref": "#/$defs/reasonCode" }, "source_ref": { "type": "string" } }, "required": ["hit", "judge"] },
         { "type": "object", "description": "sandbox：M08 一次性沙箱逐条断言结论", "properties": { "kind": { "const": "sandbox" }, "case_name": { "type": "string" }, "passed": { "type": "boolean" }, "detail_ref": { "type": "string" }, "reason_code": { "$ref": "#/$defs/reasonCode" } }, "required": ["case_name", "passed"] },
         { "type": "object", "description": "reasoning：ADR-008 受控推理摘要（严禁原始 CoT）", "properties": { "kind": { "const": "reasoning" }, "summary": { "type": "string" }, "source": { "type": "string", "enum": ["provider", "harness"] } }, "required": ["summary"] },
-        { "type": "object", "description": "agent_message：ADR-007 中心路由类型化消息留证", "properties": { "kind": { "const": "agent_message" }, "message_type": { "type": "string", "enum": ["TASK_ASSIGN", "REVIEW_REQUEST", "REVIEW_RESULT", "REVISION_REQUEST", "ESCALATE_HUMAN", "FINAL"] }, "from_role": { "type": "string" }, "to_role": { "type": "string" }, "rev": { "type": "integer" }, "trace_id": { "type": "string" } }, "required": ["message_type", "from_role", "to_role"] },
-        { "type": "object", "description": "review：Reviewer 角色结构化评审结论", "properties": { "kind": { "const": "review" }, "passed": { "type": "boolean" }, "reason_code": { "$ref": "#/$defs/reasonCode" }, "evidence_ref": { "type": "string" }, "artifact_ref": { "type": "string" }, "score": { "type": "number" } }, "required": ["passed"] },
-        { "type": "object", "description": "delegate：角色委托/返修指令", "properties": { "kind": { "const": "delegate" }, "action": { "type": "string", "enum": ["REVISION_REQUEST", "ESCALATE_HUMAN"] }, "reason_code": { "$ref": "#/$defs/reasonCode" } }, "required": ["action"] },
         { "type": "object", "description": "spec：逐步逼近完整的 WidgetSpec JSON（partial；不携带 reason code）", "properties": { "kind": { "const": "spec" } }, "not": { "required": ["code"] } },
         { "type": "object", "description": "attachment：附件 role 判定", "properties": { "kind": { "const": "attachment" }, "role": { "enum": ["visual_reference", "content_extraction", "data_source", "style_reference"] }, "insight_ref": { "type": "string" } }, "required": ["role"] },
         { "type": "object", "description": "routing：代码补丁路由", "properties": { "kind": { "const": "routing" }, "patches": { "type": "array", "items": { "type": "object", "properties": { "from_line": { "type": "integer", "minimum": 0 }, "to_line": { "type": "integer", "minimum": 0 }, "text": { "type": "string" } }, "required": ["from_line", "to_line", "text"] } } }, "required": ["patches"] },
@@ -44,11 +41,9 @@
       ]
     },
     "traceId": { "type": "string", "minLength": 1 },
-    "taskId": { "type": "string", "minLength": 1, "description": "ADR-006/007/009：任务级归因；done/error 带此字段=子任务级，不带=会话级（仅 Coordinator 可发）" },
+    "taskId": { "type": "string", "minLength": 1, "description": "ADR-006/009：任务级归因；done/error 带此字段=子任务级，不带=会话级（仅会话汇总可发）" },
     "taskIndex": { "type": "integer", "minimum": 1, "description": "任务序号（1-based）" },
-    "role": { "type": "string", "enum": ["planner", "generator", "reviewer", "coordinator"], "description": "ADR-007 功能角色；Router/Coordinator 不是 agent" },
-    "turn": { "type": "integer", "minimum": 1, "description": "任务内轮次 / 迭代序号" },
-    "agentId": { "type": "string", "minLength": 1, "description": "一次角色实例的 uuid" }
+    "turn": { "type": "integer", "minimum": 1, "description": "任务内轮次 / 迭代序号（ADR-009 任务层语义）" }
   },
   "allOf": [
     {

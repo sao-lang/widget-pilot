@@ -3,7 +3,7 @@
 证明三件事（review B2/B3）：
 1. API 入队给多 widget 描述打 planning=1；
 2. Dispatcher 消费规划任务 → 落 generation_task + 入队 N 条带 task_id 的子任务；
-3. 子任务消费时 role_runner 被调用（角色层真的进入链路）。
+3. 每条子任务带 task_id 供 fan-in 归因（ADR-011：子任务直接走 run() 单 agent 内核）。
 """
 from __future__ import annotations
 
@@ -86,8 +86,8 @@ def test_single_widget_does_not_fanout():
     assert len(result.tasks) == 2  # 规划器输出，触发由上层控制
 
 
-def test_child_tasks_carry_task_id_for_role_runner():
-    """fan-out 入队的每条子任务带 task_id —— role_runner 的触发条件。"""
+def test_child_tasks_carry_task_id_for_fan_in():
+    """fan-out 入队的每条子任务带 task_id —— fan-in 归因与单 agent 执行的标识。"""
     from services.orchestrator.tasks.fanout import run_fanout_planning
     from services.orchestrator.tasks.planner import extract_facts
 

@@ -1,0 +1,252 @@
+{
+  "version": "1.1",
+  "goal": "回退多 agent 角色层为多任务下单 agent，物理删净，保留多任务 fan-out/fan-in",
+  "source": "user_request",
+  "mode": "conductor",
+  "template": "conductor.6-design-refactor",
+  "confidence": 0.9,
+  "assumptions": [
+    "S0-S2 已完成：overview 定位、路由卡 full、覆盖矩阵 PASS、契约 confirmed Open=0",
+    "Docker daemon 已起，PG/Redis 可真实验证迁移与集成测试",
+    "verify.py 模板命令与项目环境不符，按工作记忆约定降级为项目实测命令"
+  ],
+  "clarifications": [],
+  "tasks": [
+    {
+      "id": "T1",
+      "goal": "影响面核实（代码/测试/契约/文档）"
+    },
+    {
+      "id": "T2",
+      "goal": "TDD RED：加单 agent 路径失败测试"
+    },
+    {
+      "id": "T3",
+      "goal": "GREEN：删角色层接线与符号 + 0018 迁移 + 契约四同步"
+    },
+    {
+      "id": "T4",
+      "goal": "全量证据门禁"
+    },
+    {
+      "id": "T5",
+      "goal": "独立 review，Blocker 清零"
+    },
+    {
+      "id": "T6",
+      "goal": "memory 沉淀"
+    }
+  ],
+  "nodes": [
+    {
+      "kind": "tool",
+      "action": "跑影响面扫描：符号/文件/diff → 直接引用者",
+      "command": "python ../../scripts/impact_analysis.py --symbols <符号> --files <文件> --diff",
+      "command_type": "command",
+      "exit_criteria": "拿到直接引用者清单（含文件:行号）",
+      "exit_check": {
+        "kind": "file_content",
+        "expect": "引用者清单非空或显式'无引用'",
+        "evidence": "impact_analysis 输出"
+      },
+      "on_fail": "ask",
+      "when": "跨模块 或 full 或 契约 Delta 含公共契约/接口变更",
+      "atomic": true,
+      "id": "n_impact-SCAN",
+      "label": "S1 影响面核实 · SCAN",
+      "serves_task": "T1",
+      "ref": "",
+      "route_ref": "impact/SCAN",
+      "expanded_from": "n_impact",
+      "next": "n_red"
+    },
+    {
+      "kind": "skill",
+      "action": "派全新上下文子代理做独立 review：七维 + 接线四问 + 功能遗漏/断点，红队视角找反例",
+      "command": "派新子代理，brief 自包含 diff + 规格 + 完成标准",
+      "command_type": "judgment",
+      "exit_criteria": "收到新子代理报告（非复用旧报告），含 Blocker 分级",
+      "exit_check": {
+        "kind": "file_content",
+        "expect": "报告含 Blocker/Should/Nit 与 文件:行号",
+        "evidence": "overview 独立 review 章节"
+      },
+      "on_fail": "retry",
+      "on_fail_next": "review/DISPATCH",
+      "when": "standard 或 full 档",
+      "atomic": true,
+      "id": "n_review-DISPATCH",
+      "label": "S5 独立 review · DISPATCH",
+      "serves_task": "T5",
+      "ref": "",
+      "route_ref": "review/DISPATCH",
+      "expanded_from": "n_review",
+      "next": "n_memory-RECORD"
+    },
+    {
+      "kind": "action",
+      "action": "只记有后续影响的内容；L0 ≤8 行，详情进 .details.md，review 报告内嵌主文件",
+      "command": "按 .conductor/README.md 分类写入 overview 主文件/详情文件",
+      "command_type": "file_write",
+      "exit_criteria": "overview 含本轮决策/证据/未完成项，目录无违规",
+      "exit_check": {
+        "kind": "file_content",
+        "expect": "主文件 L0 ≤8 行 + overview_path --audit violations=null",
+        "evidence": "overview 文件 + audit 输出"
+      },
+      "on_fail": "abort",
+      "atomic": true,
+      "id": "n_memory-RECORD",
+      "label": "S5 memory 沉淀 · RECORD",
+      "serves_task": "T6",
+      "ref": "",
+      "route_ref": "memory/RECORD",
+      "expanded_from": "n_memory",
+      "next": "n_done"
+    },
+    {
+      "id": "n_red",
+      "kind": "tool",
+      "label": "TDD RED：单 agent 路径测试",
+      "action": "先写断言：无 role_runner 时 dispatcher 经 run() 产出 done；跑出红确认失败原因是角色层接线仍在",
+      "command": ".venv/Scripts/python.exe -m pytest -q tests/unit/test_single_agent_path.py",
+      "command_type": "command",
+      "atomic": true,
+      "exit_criteria": "测试失败且原因=仍走角色分支或缺该行为",
+      "exit_check": {
+        "kind": "exit_code",
+        "expect": "非0且原因匹配目标行为",
+        "evidence": "pytest 失败输出片段"
+      },
+      "serves_task": "T2",
+      "next": "n_green",
+      "on_fail": "retry",
+      "on_fail_next": "n_red",
+      "budget": {
+        "max_rounds": 3
+      }
+    },
+    {
+      "id": "n_green",
+      "kind": "tool",
+      "label": "GREEN：物理删净角色层",
+      "action": "按契约 Delta 删 worker 注入/dispatcher 分支/端口/常量/ORM/两文件 + 0018 迁移 + 契约 kind 21→18 四同步 + 删 15 测试 + 改 test_m03 计数 + 文档 ADR-007 废弃/ADR-010 新增",
+      "command": ".venv/Scripts/python.exe -m pytest -q 相关范围 && pnpm contracts:check",
+      "command_type": "command",
+      "atomic": true,
+      "exit_criteria": "相关测试全绿、contracts drift=[]、无 fake 造假",
+      "exit_check": {
+        "kind": "exit_code",
+        "expect": "0",
+        "evidence": "pytest rc=0 + contracts:check drift=[] + source_purity --strict rc=0"
+      },
+      "serves_task": "T3",
+      "next": "n_gate",
+      "on_fail": "retry",
+      "on_fail_next": "n_red",
+      "budget": {
+        "max_rounds": 5
+      }
+    },
+    {
+      "id": "n_gate",
+      "kind": "gate",
+      "label": "S4 全量证据门禁",
+      "action": "跑全量 pytest + alembic upgrade/downgrade 0018 + ruff + pyright + contracts:check",
+      "command": ".venv/Scripts/python.exe -m pytest -q && docker compose -f docker-compose.dev.yml exec -T control-plane alembic upgrade head && ruff check . && npx pyright --pythonpath .venv/Scripts/python.exe && pnpm contracts:check",
+      "command_type": "gate_check",
+      "atomic": true,
+      "exit_criteria": "全绿：pytest passed、迁移到 0018、ruff/pyright/contracts 全过",
+      "exit_check": {
+        "kind": "exit_code",
+        "expect": "0",
+        "evidence": "各命令 rc=0 + pytest 汇总行 + alembic current=0018"
+      },
+      "serves_task": "T4",
+      "next": "n_review-DISPATCH",
+      "on_fail": "abort"
+    },
+    {
+      "id": "n_done",
+      "kind": "gate",
+      "label": "收尾门禁",
+      "action": "确认所有任务勾销、review Blocker=0、文档同步",
+      "command": "review_gate.py + 文档同步核对",
+      "command_type": "gate_check",
+      "atomic": true,
+      "exit_criteria": "Blocker=0 且文档同步完成",
+      "exit_check": {
+        "kind": "judgment",
+        "expect": "Blocker=0，AC-1~AC-9 全勾销",
+        "evidence": "review 报告 + 覆盖矩阵全勾销"
+      },
+      "serves_task": "T6",
+      "next": null,
+      "on_fail": "abort"
+    }
+  ],
+  "edges": [
+    {
+      "from": "n_impact-SCAN",
+      "to": "n_red",
+      "type": "seq"
+    },
+    {
+      "from": "n_red",
+      "to": "n_green",
+      "type": "seq"
+    },
+    {
+      "from": "n_green",
+      "to": "n_gate",
+      "type": "seq"
+    },
+    {
+      "from": "n_gate",
+      "to": "n_review-DISPATCH",
+      "type": "seq"
+    },
+    {
+      "from": "n_review-DISPATCH",
+      "to": "n_memory-RECORD",
+      "type": "seq"
+    },
+    {
+      "from": "n_memory-RECORD",
+      "to": "n_done",
+      "type": "seq"
+    }
+  ],
+  "paths": [
+    {
+      "id": "P1",
+      "label": "S1 影响面核实 / TDD RED：单 agent 路径测试 / GREEN：物理删净角色层 / S4 全量证据门禁",
+      "guard": "默认路线（无分支条件）",
+      "steps": [
+        "n_impact-SCAN",
+        "n_red",
+        "n_green",
+        "n_gate",
+        "n_review-DISPATCH",
+        "n_memory-RECORD",
+        "n_done"
+      ],
+      "terminal": "n_done",
+      "is_happy": true
+    }
+  ],
+  "budget": {
+    "max_steps": 30,
+    "max_retries": 3,
+    "noop_limit": 2
+  },
+  "meta": {
+    "created": "2026-11-23",
+    "context_refs": [
+      "f76a7264",
+      "rolelayer-rollback.contract.md"
+    ],
+    "tier": "full",
+    "expanded": true
+  }
+}

@@ -26,7 +26,7 @@ export type UserRole =
   | "user" | "curator";
 
 export type AgentEventKind =
-  | "run" | "plan" | "spec" | "attachment" | "routing" | "code" | "guard" | "validation" | "sandbox" | "artifact" | "cost" | "checkpoint" | "interrupted" | "notice" | "error" | "done" | "ask_user" | "reasoning" | "agent_message" | "review" | "delegate";
+  | "run" | "plan" | "spec" | "attachment" | "routing" | "code" | "guard" | "validation" | "sandbox" | "artifact" | "cost" | "checkpoint" | "interrupted" | "notice" | "error" | "done" | "ask_user" | "reasoning";
 
 export type ReasonCode =
   | "INPUT_INVALID" | "INTENT_OUT_OF_SCOPE" | "GUARD_INPUT_HIT" | "GUARD_OUTPUT_HIT" | "SPEC_CONFLICT" | "CAPABILITY_DENIED" | "CONTRACT_MISMATCH" | "COMPILE_FAILED" | "SANDBOX_TEST_FAILED" | "RETRY_EXHAUSTED" | "BUDGET_EXHAUSTED" | "SANDBOX_UNAVAILABLE" | "HUMAN_REQUIRED" | "MODEL_ERROR" | "SPEC_MISSING" | "CLARIFICATION_REQUIRED" | "CLARIFICATION_LIMIT";

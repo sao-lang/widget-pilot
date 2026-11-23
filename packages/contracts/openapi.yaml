@@ -680,7 +680,6 @@ components:
                             result_ref: { type: string, nullable: true }
                             current_bundle_ref: { type: string, nullable: true }
                             last_turn_index: { type: integer }
-                            role: { type: string, nullable: true }
                             turn: { type: integer, nullable: true }
     TaskTurnsOk:
       description: 任务迭代版本历史（ADR-009 task_turn）

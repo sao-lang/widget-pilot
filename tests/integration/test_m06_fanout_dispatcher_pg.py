@@ -66,7 +66,7 @@ def clean_infra() -> None:
         pg_execute(
             conn,
             "TRUNCATE TABLE users, sessions, checkpoint, audit_event, "
-            "generation_task, task_turn, agent_message, agent_workspace CASCADE",
+            "generation_task, task_turn CASCADE",
         )
 
 

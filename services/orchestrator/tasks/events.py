@@ -49,7 +49,7 @@ class RedisSeqAllocator:
 
 
 class TypedEventEmitter:
-    """ADR-007 事件发射器（经 event_bus 落 Redis Stream，带可选归因字段）。"""
+    """事件发射器（经 event_bus 落 Redis Stream，带可选任务/轮次归因字段）。"""
 
     def __init__(
         self,
@@ -72,12 +72,10 @@ class TypedEventEmitter:
         *,
         task_id: str | None = None,
         task_index: int | None = None,
-        role: str | None = None,
         turn: int | None = None,
-        agent_id: str | None = None,
         phase: str = "RUNNING",
     ) -> None:
-        """发出一条带可选 task/role/turn 归因的事件（N=1 调用方不传这些字段）。"""
+        """发出一条带可选 task/turn 归因的事件（N=1 调用方不传这些字段）。"""
         seq = self._allocator.next(self._session_id)
         event = AgentEvent(
             seq=seq,
@@ -90,9 +88,7 @@ class TypedEventEmitter:
             trace_id=self._trace_id,
             task_id=task_id,
             task_index=task_index,
-            role=role,
             turn=turn,
-            agent_id=agent_id,
         )
         self._bus.emit(event)
 

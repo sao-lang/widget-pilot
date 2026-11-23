@@ -1,6 +1,6 @@
-"""多任务/多 Agent/多轮存储的真 PG 集成测试（迁移 0015/0016/0017）。
+"""多任务/多轮存储的真 PG 集成测试（迁移 0015/0016/0018，ADR-011 角色层已移除）。
 
-验证真实落库 + 幂等 + 原子抢占 + hash 链 + 乐观锁 + 并发，不是内存替身。
+验证真实落库 + 幂等 + 原子抢占 + 并发，不是内存替身。
 PG 不可达则 skip（不冒充通过）；迁移未到 head 时用例会失败（如实暴露）。
 
 前置：docker compose --profile core up -d；alembic upgrade head。
@@ -13,22 +13,15 @@ import concurrent.futures
 import pytest
 
 from services.orchestrator.tasks.pg_stores import (
-    AgentMessageData,
     GenerationTaskData,
-    PgAgentMessageStore,
-    PgAgentWorkspace,
     PgGenerationTaskStore,
     PgTaskTurnStore,
     TaskTurnData,
-    WorkspaceConflictError,
-    _message_hash,
 )
-from services.orchestrator.tasks.ports import AgentMessage
-from services.orchestrator.tasks.states import MessageType, Role
 from tests.support.pg import pg_available, pg_connection, pg_fetchone, pg_truncate
 
 PG_DSN = "postgresql://widgetpilot:widgetpilot_dev@127.0.0.1:5432/widgetpilot"
-_TABLES = ("generation_task", "task_turn", "agent_message", "agent_workspace")
+_TABLES = ("generation_task", "task_turn")
 
 
 pytestmark = pytest.mark.skipif(
@@ -39,7 +32,7 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(autouse=True)
 def clean_tables() -> None:
-    """每例前清空四张任务表（集成测试隔离）。"""
+    """每例前清空两张任务表（集成测试隔离）。"""
     with pg_connection(PG_DSN) as conn:
         pg_truncate(conn, _TABLES, restart_identity=True)
 
@@ -56,21 +49,6 @@ def _task(index: int = 0, *, state: str = "PENDING") -> GenerationTaskData:
         task_total=2,
         state=state,
         attachment_ids=("att-1",),
-    )
-
-
-def _message(index: int = 0, *, session_id: str = "s1") -> AgentMessage:
-    """构造一条 Router 端口消息（验证与生产端口同构）。"""
-    return AgentMessage(
-        session_id=session_id,
-        task_id="task-0",
-        agent_id=f"agent-{index}",
-        from_role=Role.PLANNER,
-        to_role=Role.GENERATOR,
-        message_type=MessageType.TASK_ASSIGN,
-        turn=index,
-        trace_id=f"trace-{index}",
-        payload={"note": f"go-{index}"},
     )
 
 
@@ -101,7 +79,6 @@ class TestGenerationTaskPG:
             "task-0",
             "DONE",
             result_ref="obj://result",
-            role="reviewer",
             turn=2,
             last_turn_index=1,
             current_bundle_ref="obj://bundle",
@@ -110,7 +87,6 @@ class TestGenerationTaskPG:
         assert got is not None
         assert got.state == "DONE"
         assert got.result_ref == "obj://result"
-        assert got.role == "reviewer"
         assert got.turn == 2
         assert got.last_turn_index == 1
         assert got.current_bundle_ref == "obj://bundle"
@@ -188,95 +164,6 @@ class TestTaskTurnPG:
         assert latest.state == "DONE"
         assert len(latest.id) == 36  # uuid5 派生 id
         assert store.latest("missing") is None
-
-
-class TestAgentMessagePG:
-    """agent_message hash 链真 PG 落库。"""
-
-    def test_hash_chain_across_instances_and_input_shapes(self) -> None:
-        """Router 端口消息与读模型都可直接 append，链可跨实例复算。"""
-        store = PgAgentMessageStore(PG_DSN)
-        store.append(_message(0))
-        store.append(
-            AgentMessageData(
-                session_id="s1",
-                task_id="task-0",
-                agent_id="agent-1",
-                from_role="generator",
-                to_role="reviewer",
-                message_type="REVIEW_REQUEST",
-                turn=1,
-                trace_id="trace-1",
-                payload={"note": "please review"},
-            )
-        )
-        messages = PgAgentMessageStore(PG_DSN).list_by_task("task-0")
-        assert [m.rev for m in messages] == [1, 2]
-        assert messages[0].prev_hash == "0" * 64
-        assert messages[0].from_role == "planner"
-        assert messages[1].prev_hash == messages[0].hash
-        assert messages[1].hash == _message_hash(
-            messages[0].hash, {"note": "please review"}
-        )
-        assert all(len(m.hash) == 64 for m in messages)
-
-    def test_concurrent_appends_keep_chain(self) -> None:
-        """并发追加不丢消息、不断链（按 session advisory lock 串行化）。"""
-        store = PgAgentMessageStore(PG_DSN)
-
-        def append(index: int) -> None:
-            """并发写一条消息。"""
-            store.append(_message(index, session_id="s-concurrent"))
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
-            list(pool.map(append, range(3)))
-        messages = PgAgentMessageStore(PG_DSN).list_by_task("task-0")
-        assert len(messages) == 3
-        assert sorted(m.rev for m in messages) == [1, 2, 3]
-        for index in range(1, len(messages)):
-            assert messages[index].prev_hash == messages[index - 1].hash
-
-
-class TestAgentWorkspacePG:
-    """agent_workspace 乐观锁真 PG 语义。"""
-
-    def test_create_read_write_and_conflict(self) -> None:
-        """首次写 → 读 → 成功写推进 rev → 旧 rev 写冲突 → 新 rev 写成功。"""
-        store = PgAgentWorkspace(PG_DSN)
-        key = "generator:task-0:spec"
-        store.create_if_missing("s1", key, "obj://v0", "generator")
-        entry = store.read("s1", key)
-        assert entry is not None
-        assert entry.rev == 0
-        assert entry.value_ref == "obj://v0"
-
-        store.write("s1", key, "obj://v1", "generator", 0)
-        entry = store.read("s1", key)
-        assert entry is not None
-        assert entry.rev == 1
-        assert entry.writer_role == "generator"
-
-        with pytest.raises(WorkspaceConflictError):
-            store.write("s1", key, "obj://stale", "generator", 0)
-        assert store.read("s1", key).value_ref == "obj://v1"  # type: ignore[union-attr]
-
-        store.write("s1", key, "obj://v2", "reviewer", 1)
-        entry = store.read("s1", key)
-        assert entry is not None
-        assert entry.rev == 2
-        assert entry.value_ref == "obj://v2"
-
-    def test_create_if_missing_is_idempotent(self) -> None:
-        """重复首次写不重置 rev。"""
-        store = PgAgentWorkspace(PG_DSN)
-        key = "review:task-0:verdict"
-        store.create_if_missing("s1", key, "obj://a", "reviewer")
-        store.write("s1", key, "obj://b", "reviewer", 0)
-        store.create_if_missing("s1", key, "obj://a", "reviewer")
-        entry = store.read("s1", key)
-        assert entry is not None
-        assert entry.rev == 1
-        assert entry.value_ref == "obj://b"
 
 
 def test_migration_columns_exist() -> None:

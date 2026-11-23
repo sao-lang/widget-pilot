@@ -37,3 +37,4 @@ Thumbs.db
 .conductor/ledgers/
 .conductor/baselines/
 .conductor/archive/
+.conductor/execution-state.json

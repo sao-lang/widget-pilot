@@ -346,7 +346,6 @@ def create_app(
                         "result_ref": getattr(r, "result_ref", None),
                         "current_bundle_ref": getattr(r, "current_bundle_ref", None),
                         "last_turn_index": getattr(r, "last_turn_index", 0),
-                        "role": getattr(r, "role", None),
                         "turn": getattr(r, "turn", 0),
                     }
                     for r in rows

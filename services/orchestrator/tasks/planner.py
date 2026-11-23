@@ -21,7 +21,6 @@ from services.orchestrator.tasks.ports import (
     TaskDraft,
     TaskPlanDraft,
 )
-from services.orchestrator.tasks.states import MAX_AGENT_TURNS
 
 logger = logging.getLogger(__name__)
 
@@ -249,7 +248,6 @@ def reason_code_for_errors(errors: tuple[PlanValidationError, ...]) -> str:
 
 
 __all__ = [
-    "MAX_AGENT_TURNS",
     "build_plan_trace",
     "draft_to_json",
     "extract_facts",

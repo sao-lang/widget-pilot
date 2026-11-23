@@ -631,7 +631,6 @@ export interface components {
                             result_ref?: string | null;
                             current_bundle_ref?: string | null;
                             last_turn_index?: number;
-                            role?: string | null;
                             turn?: number | null;
                         }[];
                     };

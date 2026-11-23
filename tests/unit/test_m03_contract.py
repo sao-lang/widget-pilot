@@ -16,10 +16,10 @@ from packages.contracts.enums import AgentEventKind, ReasonCode
 SCHEMA = "packages/contracts/events.schema.json"
 
 
-# ---- T14：21 种 AgentEventKind 事件全部通过 schema 校验 ----
+# ---- T14：18 种 AgentEventKind 事件全部通过 schema 校验 ----
 def test_T14_all_event_kinds_validate():
-    # ADR-003 删 skill（17）；ADR-008 +reasoning（18）；ADR-007 +agent_message/review/delegate（21）
-    assert len(AgentEventKind) == 21
+    # ADR-003 删 skill（17）；ADR-008 +reasoning（18）；ADR-011 删角色层三 kind（18）
+    assert len(AgentEventKind) == 18
     with open(SCHEMA, encoding="utf-8") as f:
         schema = json.load(f)
     validator = validators.validator_for(schema)(schema)

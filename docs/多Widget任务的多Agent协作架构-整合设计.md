@@ -1,6 +1,8 @@
 # 多 Widget 任务的多 Agent 协作架构：整合设计
 
-**状态**: v1.0 整合视图（2026-11-22）；**多 widget 任务直接采用多 Agent 角色协作**，不是"扇出 vs 多 agent"二选一
+> **废弃声明（2026-11-23）**：本文的多 Agent 角色协作方案已由 **ADR-011 物理回退**——多 widget 任务仍扇出为子任务，但每个子任务直接走单 agent `run()`，角色层已删除。本文保留作历史留痕，当前架构以 ADR-011 + ADR-006（任务扇出）为准。
+
+**状态**: v1.0 整合视图（2026-11-22，已废弃）；**多 widget 任务直接采用多 Agent 角色协作**，不是"扇出 vs 多 agent"二选一
 **范围**: 一次用户消息要求生成 ≥2 个 widget 时，从入口校验、约束式规划、任务扇出，到每个任务内 Generator/Reviewer 角色协作、汇总回传的完整链路
 **关系**: `docs/adr/ADR-006-一次对话多控件生成的主控调度与子任务并发.md`（任务层：身份、事件、扇出、校验时序）、`docs/adr/ADR-007-多Agent角色协作架构.md`（角色层：角色、消息、黑板、终止协议）。本文是两者的统一阅读入口；单项决策与变更记录仍留在 ADR。
 **当前进度**: **任务层 + 角色层代码已落地（2026-11-22）**。ADR-006 任务层（契约 kind=21、head=0017、`tasks/` 任务层、保守触发、seq 原子域、事件归因）与 ADR-007 角色层（Router 六种类型化消息、`agent_workspace` 乐观锁、Generator/Reviewer 循环、GatewayPlanLLM/GatewayGenerator/GatewayReviewer 真实模型端口）均已改码；全量 **622 passed**（真 PG/Redis/Docker 集成真跑）、ruff 全绿、pyright 0 errors、contracts drift=[]。**缺口（不冒充已实现）**：无真实模型端点（生产 fail-fast、测试 mock，多 widget 端到端跑不了真模型）；M08 V3 门禁未强制串进 `run()`；reasoning SSE tail/前端折叠未做。逐块状态见 §8 路线图与 ADR-006 §12 / ADR-007 §10。

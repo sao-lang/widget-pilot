@@ -1,4 +1,10 @@
-# ADR-007：多 Agent 角色协作架构（v1.0，代码已落地；§1.7 非目标已撤销）
+# ADR-007：多 Agent 角色协作架构（已废弃 · 被 ADR-011 取代）
+
+> **废弃声明（2026-11-23）**：本 ADR 定义的角色层（Router 消息、`agent_workspace` 黑板、Generator/Reviewer 循环、三种角色模型端口）已由 **ADR-011「回退多 Agent 角色层为多任务下单 Agent」物理删除**。多任务 fan-out/fan-in（ADR-006）不变，子任务直接走单 agent `run()`。角色符号、三张表、三种事件 kind 均已移除（迁移 0018、kind 21→18）。本文件保留作历史留痕，**不再是当前架构的权威描述**；当前执行层以 ADR-011 为准。
+
+---
+
+# ADR-007：多 Agent 角色协作架构（历史 v1.0，代码已落地；§1.7 非目标已撤销）
 
 **状态**: **v1.0 已落地（2026-11-22）**——角色层（Router 六种类型化消息、`agent_workspace` 乐观锁、Generator/Reviewer 功能角色循环 `MAX_REVIEW_ROUNDS=2` 同 hash 升级人工、模型端口 GatewayPlanLLM/GatewayGenerator/GatewayReviewer）均已改码；事件带 role/turn/agentId，AgentEventKind 17→21。**批准生效**：正式撤销 §1.7"不做多 Agent 角色编排"（留痕不删历史），D-5"不用 Agent 框架"保留。全量 **622 passed**（真 PG/Redis/Docker 集成真跑）、ruff 全绿、pyright 0 errors、contracts drift=[]。**缺口**：无真实模型端点 → 生产 fail-fast、测试 mock（§1 第 2 点按用户拍板处理）；详见 §10/§12。
 **范围**: 多 widget 任务（N>1）**默认接入**的功能角色协作层（生成、评审、返修）；定义角色、通信、共享状态、预算、终止与可观测协议。单任务 N=1 仍走 ADR-006 零回归分支，不启用角色层。

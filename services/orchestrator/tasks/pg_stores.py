@@ -1,45 +1,27 @@
-"""任务层四张表的 PostgreSQL 真实存储（ADR-006/007/009，fail-closed）。
+"""任务层两张表的 PostgreSQL 真实存储（ADR-006/009/010，fail-closed）。
 
-generation_task / task_turn / agent_message / agent_workspace 的唯一生产实现：
-SQL 全部由 SQLAlchemy ORM/方言表达（DSN 经 db.sync_dsn 归一化，不绑定具体 DBAPI）。
-PG 失败一律抛异常，绝不降级为内存替身或静默吞错。
-
-消息留证与 guard_hit 同纪律：事务内按 session 取 advisory xact lock，读末行
-prev_hash/rev 后算 hash 追加，并发不丢消息、不断链。黑板写入走
-``UPDATE ... WHERE rev = ?`` 乐观锁，0 行抛 WorkspaceConflictError（重试由 Router 做）。
+generation_task / task_turn 的唯一生产实现：SQL 全部由 SQLAlchemy ORM/方言表达
+（DSN 经 db.sync_dsn 归一化，不绑定具体 DBAPI）。PG 失败一律抛异常，绝不降级为
+内存替身或静默吞错。角色层的 agent_message/agent_workspace 已于 ADR-011 移除。
 """
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Final, cast
+from typing import cast
 from uuid import NAMESPACE_URL, uuid5
 
 from sqlalchemy import CursorResult, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from packages.agent_core.types import JsonObject
 from services.control_plane.db import make_session_factory, session_scope
-from services.control_plane.models_tasks import (
-    AgentMessage as AgentMessageRow,
-)
-from services.control_plane.models_tasks import (
-    AgentWorkspace as AgentWorkspaceRow,
-)
 from services.control_plane.models_tasks import (
     GenerationTask as GenerationTaskRow,
 )
 from services.control_plane.models_tasks import (
     TaskTurn as TaskTurnRow,
 )
-from services.orchestrator.tasks.ports import AgentMessage
-
-_GENESIS: Final[str] = "0" * 64
-"""hash 链创世值（与 guard_hit 一致）。"""
-
 
 # ---- 存储层数据类（主 agent 从本模块 import） --------------------------------
 
@@ -63,7 +45,6 @@ class GenerationTaskData:
     plan_trace_ref: str | None = None
     reason_code: str | None = None
     evidence_ref: str | None = None
-    role: str | None = None
     turn: int = 0
     current_bundle_ref: str | None = None
     last_turn_index: int = 0
@@ -93,55 +74,7 @@ class TaskTurnData:
     created_at: datetime | None = None
 
 
-@dataclass(frozen=True)
-class AgentMessageData:
-    """agent_message 一行（迁移 0016；读模型，也可作为 append 入参）。"""
-
-    session_id: str
-    task_id: str
-    agent_id: str
-    from_role: str
-    to_role: str
-    message_type: str
-    turn: int
-    trace_id: str
-    payload: JsonObject = field(default_factory=dict)
-    rev: int = 0
-    prev_hash: str = _GENESIS
-    hash: str = ""
-    id: int = 0
-    created_at: datetime | None = None
-
-
-@dataclass(frozen=True)
-class WorkspaceEntry:
-    """agent_workspace 一行（迁移 0016；黑板只存引用 + 版本）。"""
-
-    session_id: str
-    key: str
-    value_ref: str
-    rev: int
-    writer_role: str
-    updated_at: datetime | None = None
-
-
-class WorkspaceConflictError(RuntimeError):
-    """黑板乐观锁冲突：期望 rev 已被其他写者推进。"""
-
-
-# ---- 纯函数（hash / 派生 / 收窄） -------------------------------------------
-
-
-def _canonical_json(payload: JsonObject) -> str:
-    """确定性 JSON（键排序 + 紧凑分隔 + 不转义中文），供 hash 跨实例复算。"""
-    return json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-
-
-def _message_hash(prev_hash: str, payload: JsonObject) -> str:
-    """消息行 hash = sha256(prev_hash + canonical_json(payload))。"""
-    return hashlib.sha256(
-        (prev_hash + _canonical_json(payload)).encode("utf-8")
-    ).hexdigest()
+# ---- 纯函数（派生 / 收窄） -------------------------------------------------
 
 
 def _text(value: object) -> str:
@@ -177,7 +110,6 @@ def _task_data(row: GenerationTaskRow) -> GenerationTaskData:
         else None,
         reason_code=str(row.reason_code) if isinstance(row.reason_code, str) else None,
         evidence_ref=str(row.evidence_ref) if isinstance(row.evidence_ref, str) else None,
-        role=str(row.role) if isinstance(row.role, str) else None,
         turn=int(row.turn),
         current_bundle_ref=str(row.current_bundle_ref)
         if isinstance(row.current_bundle_ref, str)
@@ -206,38 +138,6 @@ def _turn_data(row: TaskTurnRow) -> TaskTurnData:
         cost_ref=str(row.cost_ref) if isinstance(row.cost_ref, str) else None,
         state=str(row.state),
         created_at=row.created_at,
-    )
-
-
-def _message_data(row: AgentMessageRow) -> AgentMessageData:
-    """ORM 行 → AgentMessageData（hash 链字段原样读回）。"""
-    return AgentMessageData(
-        id=int(row.id),
-        session_id=str(row.session_id),
-        task_id=str(row.task_id),
-        agent_id=str(row.agent_id),
-        from_role=str(row.from_role),
-        to_role=str(row.to_role),
-        message_type=str(row.message_type),
-        turn=int(row.turn),
-        trace_id=str(row.trace_id),
-        payload=row.payload,
-        rev=int(row.rev),
-        prev_hash=str(row.prev_hash),
-        hash=str(row.hash),
-        created_at=row.created_at,
-    )
-
-
-def _workspace_data(row: AgentWorkspaceRow) -> WorkspaceEntry:
-    """ORM 行 → WorkspaceEntry。"""
-    return WorkspaceEntry(
-        session_id=str(row.session_id),
-        key=str(row.key),
-        value_ref=str(row.value_ref),
-        rev=int(row.rev),
-        writer_role=str(row.writer_role),
-        updated_at=row.updated_at,
     )
 
 
@@ -273,7 +173,6 @@ class PgGenerationTaskStore:
                 "plan_trace_ref": task.plan_trace_ref,
                 "reason_code": task.reason_code,
                 "evidence_ref": task.evidence_ref,
-                "role": task.role,
                 "turn": task.turn,
                 "current_bundle_ref": task.current_bundle_ref,
                 "last_turn_index": task.last_turn_index,
@@ -318,7 +217,6 @@ class PgGenerationTaskStore:
         current_bundle_ref: str | None = None,
         last_turn_index: int | None = None,
         turn: int | None = None,
-        role: str | None = None,
     ) -> None:
         """更新状态 + 非空附带字段 + updated_at（None 字段保持不变）。"""
         values: dict[str, object] = {"state": state, "updated_at": func.now()}
@@ -336,8 +234,6 @@ class PgGenerationTaskStore:
             values["last_turn_index"] = last_turn_index
         if turn is not None:
             values["turn"] = turn
-        if role is not None:
-            values["role"] = role
         with session_scope(self._factory) as session:
             session.execute(
                 update(GenerationTaskRow)
@@ -393,7 +289,6 @@ class PgGenerationTaskStore:
                     GenerationTaskRow.task_total,
                     GenerationTaskRow.state,
                     GenerationTaskRow.description,
-                    GenerationTaskRow.role,
                     GenerationTaskRow.turn,
                     GenerationTaskRow.result_ref,
                     GenerationTaskRow.reason_code,
@@ -410,7 +305,6 @@ class PgGenerationTaskStore:
                 "task_total": int(row.task_total),
                 "state": str(row.state),
                 "description": str(row.description),
-                "role": str(row.role) if isinstance(row.role, str) else None,
                 "turn": int(row.turn),
                 "result_ref": str(row.result_ref)
                 if isinstance(row.result_ref, str)
@@ -475,124 +369,3 @@ class PgTaskTurnStore:
                 .order_by(TaskTurnRow.turn_index)
             ).all()
         return [_turn_data(row) for row in rows]
-
-
-class PgAgentMessageStore:
-    """agent_message 的真实 PG 存储（按 session 串行化 hash 链，只追加）。"""
-
-    def __init__(self, dsn: str) -> None:
-        """注入 PG DSN（任意驱动前缀由 db.sync_dsn 归一化）。"""
-        self._factory = make_session_factory(dsn)
-
-    def append(self, message: AgentMessage | AgentMessageData) -> None:
-        """追加一条消息，服务端计算 rev/prev_hash/hash（失败抛异常，fail-closed）。
-
-        事务内先按 session 取 advisory xact lock，再读该 session 末行的 hash/rev，
-        据此续链。调用方自带的 rev/prev_hash/hash 不参与计算，避免并发断链。
-        """
-        session_id = str(message.session_id)
-        payload = message.payload
-        with session_scope(self._factory) as session:
-            session.execute(
-                select(func.pg_advisory_xact_lock(func.hashtext(session_id), 0))
-            )
-            last = session.execute(
-                select(AgentMessageRow.hash, AgentMessageRow.rev)
-                .where(AgentMessageRow.session_id == session_id)
-                .order_by(AgentMessageRow.id.desc())
-                .limit(1)
-            ).first()
-            prev_hash = str(last.hash) if last is not None else _GENESIS
-            rev = int(last.rev) + 1 if last is not None else 1
-            session.execute(
-                pg_insert(AgentMessageRow).values(
-                    session_id=session_id,
-                    task_id=str(message.task_id),
-                    agent_id=str(message.agent_id),
-                    from_role=_text(message.from_role),
-                    to_role=_text(message.to_role),
-                    message_type=_text(message.message_type),
-                    trace_id=str(message.trace_id),
-                    payload=payload,
-                    rev=rev,
-                    prev_hash=prev_hash,
-                    hash=_message_hash(prev_hash, payload),
-                    turn=int(message.turn),
-                )
-            )
-
-    def list_by_task(self, task_id: str) -> list[AgentMessageData]:
-        """按追加顺序（id 升序）列出该任务全部消息。"""
-        with session_scope(self._factory) as session:
-            rows = session.scalars(
-                select(AgentMessageRow)
-                .where(AgentMessageRow.task_id == task_id)
-                .order_by(AgentMessageRow.id)
-            ).all()
-        return [_message_data(row) for row in rows]
-
-
-class PgAgentWorkspace:
-    """agent_workspace 的真实 PG 存储（版本化黑板，乐观锁写）。"""
-
-    def __init__(self, dsn: str) -> None:
-        """注入 PG DSN（任意驱动前缀由 db.sync_dsn 归一化）。"""
-        self._factory = make_session_factory(dsn)
-
-    def read(self, session_id: str, key: str) -> WorkspaceEntry | None:
-        """读黑板项；不存在返回 None。"""
-        with session_scope(self._factory) as session:
-            row = session.scalar(
-                select(AgentWorkspaceRow).where(
-                    AgentWorkspaceRow.session_id == session_id,
-                    AgentWorkspaceRow.key == key,
-                )
-            )
-        return _workspace_data(row) if row is not None else None
-
-    def create_if_missing(
-        self, session_id: str, key: str, value_ref: str, writer_role: str
-    ) -> None:
-        """首次写路径：不存在则插入 rev=0 的初始项；已存在则原样跳过。"""
-        with session_scope(self._factory) as session:
-            session.execute(
-                pg_insert(AgentWorkspaceRow)
-                .values(
-                    session_id=session_id,
-                    key=key,
-                    value_ref=value_ref,
-                    rev=0,
-                    writer_role=writer_role,
-                )
-                .on_conflict_do_nothing(index_elements=["session_id", "key"])
-            )
-
-    def write(
-        self,
-        session_id: str,
-        key: str,
-        value_ref: str,
-        writer_role: str,
-        expected_rev: int,
-    ) -> None:
-        """乐观锁写：仅当 rev == expected_rev 时更新并 rev+1；否则抛冲突。"""
-        stmt = (
-            update(AgentWorkspaceRow)
-            .where(
-                AgentWorkspaceRow.session_id == session_id,
-                AgentWorkspaceRow.key == key,
-                AgentWorkspaceRow.rev == expected_rev,
-            )
-            .values(
-                value_ref=value_ref,
-                writer_role=writer_role,
-                rev=AgentWorkspaceRow.rev + 1,
-                updated_at=func.now(),
-            )
-        )
-        with session_scope(self._factory) as session:
-            result = cast(CursorResult[object], session.execute(stmt))
-            if result.rowcount == 0:
-                raise WorkspaceConflictError(
-                    f"workspace rev conflict: session={session_id} key={key} rev={expected_rev}"
-                )

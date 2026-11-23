@@ -885,12 +885,8 @@ class AgentEvent:
     """ADR-006/009 任务级归因；N=1 保持 None 不出现在 JSON。"""
     task_index: int | None = None
     """任务序号（1-based）。"""
-    role: str | None = None
-    """ADR-007 功能角色；仅角色层事件携带。"""
     turn: int | None = None
-    """任务内轮次 / 迭代序号。"""
-    agent_id: str | None = None
-    """一次角色实例的 uuid。"""
+    """任务内轮次 / 迭代序号（ADR-009，任务层语义）。"""
 
     def to_dict(self) -> JsonObject:
         """契约字段名为 camelCase（sessionId/runId/traceId）；可选字段仅非空时序列化（N=1 零回归）。"""
@@ -908,12 +904,8 @@ class AgentEvent:
             result["taskId"] = self.task_id
         if self.task_index is not None:
             result["taskIndex"] = self.task_index
-        if self.role is not None:
-            result["role"] = self.role
         if self.turn is not None:
             result["turn"] = self.turn
-        if self.agent_id is not None:
-            result["agentId"] = self.agent_id
         return result
 
 

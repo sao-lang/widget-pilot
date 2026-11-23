@@ -1,7 +1,7 @@
-"""多任务/多 Agent 存储的 SQL 方言编译级测试（无需真 PG）。
+"""多任务存储的 SQL 方言编译级测试（无需真 PG，ADR-011 角色层已移除）。
 
 用假 Session 捕获 pg_stores 实际下发到 SQLAlchemy 的语句，按 PostgreSQL 方言
-编译后核对：幂等 ON CONFLICT、原子 claim、乐观锁、hash 链 advisory lock 等。
+编译后核对：幂等 ON CONFLICT、原子 claim 等。
 真实落库由 tests/integration/test_m06_multitask_pg.py 验证。
 """
 
@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
 from typing import cast
 
 import pytest
@@ -18,26 +17,12 @@ from sqlalchemy.sql.elements import ClauseElement
 
 from services.orchestrator.tasks import pg_stores
 from services.orchestrator.tasks.pg_stores import (
-    AgentMessageData,
     GenerationTaskData,
-    PgAgentMessageStore,
-    PgAgentWorkspace,
     PgGenerationTaskStore,
     PgTaskTurnStore,
     TaskTurnData,
-    WorkspaceConflictError,
-    _canonical_json,
-    _message_hash,
     _turn_id,
 )
-
-
-@dataclass
-class _Last:
-    """消息链末行投影（append 只读 hash/rev）。"""
-
-    hash: str
-    rev: int
 
 
 class _Result:
@@ -204,14 +189,14 @@ class TestGenerationTaskSQL:
         """只更新非 None 字段 + updated_at，未传字段不出现在 SET。"""
         capture = _Capture(monkeypatch)
         PgGenerationTaskStore("postgresql://x").update_state(
-            "task-0", "DONE", result_ref="bundle://r", turn=2, role="reviewer"
+            "task-0", "DONE", result_ref="bundle://r", turn=2
         )
         sql = _sql(capture.last.statements[0])
         assert "UPDATE generation_task" in sql
         assert "state=" in sql
         assert "result_ref=" in sql
         assert "turn=" in sql
-        assert "role=" in sql
+        assert "role=" not in sql
         assert "updated_at=now()" in sql
         assert "reason_code=" not in sql
         assert "evidence_ref=" not in sql
@@ -251,119 +236,3 @@ class TestTaskTurnSQL:
         assert _turn_id("task-0", 1) != _turn_id("task-0", 2)
 
 
-class TestAgentMessageSQL:
-    """agent_message hash 链与串行化语句。"""
-
-    def test_canonical_hash_is_deterministic(self) -> None:
-        """同 payload 键序不同的对象得到相同 hash（跨实例可复算）。"""
-        digest = _message_hash("0" * 64, {"a": 1, "b": {"y": 2, "x": 3}})
-        assert digest == _message_hash("0" * 64, {"b": {"x": 3, "y": 2}, "a": 1})
-        assert len(digest) == 64
-        assert _canonical_json({"a": 1}) == '{"a":1}'
-
-    def test_append_takes_advisory_lock_and_continues_chain(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """按 session advisory lock → 读末行 → 续链 hash（服务端计算）。"""
-        last_hash = "a" * 64
-        capture = _Capture(
-            monkeypatch,
-            [[_Result(), _Result(rows=[_Last(hash=last_hash, rev=3)])]],
-        )
-        store = PgAgentMessageStore("postgresql://x")
-        message = AgentMessageData(
-            session_id="s1",
-            task_id="task-0",
-            agent_id="agent-1",
-            from_role="planner",
-            to_role="generator",
-            message_type="TASK_ASSIGN",
-            turn=0,
-            trace_id="trace-1",
-            payload={"note": "go"},
-        )
-        store.append(message)
-        statements = capture.last.statements
-        assert len(statements) == 3
-        lock_sql = _sql(statements[0])
-        assert "pg_advisory_xact_lock" in lock_sql
-        assert "hashtext" in lock_sql
-        assert "FROM agent_message" in _sql(statements[1])
-        insert_sql = _sql(statements[2])
-        assert "INSERT INTO agent_message" in insert_sql
-        bound = _params(statements[2])
-        assert bound["prev_hash"] == last_hash
-        assert bound["rev"] == 4
-        assert bound["hash"] == _message_hash(last_hash, {"note": "go"})
-
-    def test_append_genesis_chain(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """无末行时 prev_hash 为创世值、rev 从 1 起。"""
-        capture = _Capture(monkeypatch, [[_Result(), _Result(rows=[])]])
-        PgAgentMessageStore("postgresql://x").append(
-            AgentMessageData(
-                session_id="s2",
-                task_id="task-0",
-                agent_id="agent-1",
-                from_role="generator",
-                to_role="reviewer",
-                message_type="REVIEW_REQUEST",
-                turn=1,
-                trace_id="trace-2",
-                payload={},
-            )
-        )
-        bound = _params(capture.last.statements[2])
-        assert bound["prev_hash"] == "0" * 64
-        assert bound["rev"] == 1
-
-
-class TestAgentWorkspaceSQL:
-    """agent_workspace 乐观锁语句。"""
-
-    def test_create_if_missing_on_conflict(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """首次写幂等，冲突目标为复合主键。"""
-        capture = _Capture(monkeypatch)
-        PgAgentWorkspace("postgresql://x").create_if_missing(
-            "s1", "generator:task-0:spec", "obj://spec", "generator"
-        )
-        sql = _sql(capture.last.statements[0])
-        assert "INSERT INTO agent_workspace" in sql
-        assert "ON CONFLICT (session_id, key) DO NOTHING" in sql
-
-    def test_write_uses_rev_guard_and_increment(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """写仅命中 rev == expected_rev，命中后 rev+1。"""
-        capture = _Capture(monkeypatch, [[_Result(rowcount=1)]])
-        PgAgentWorkspace("postgresql://x").write(
-            "s1", "generator:task-0:spec", "obj://spec2", "generator", 0
-        )
-        sql = _sql(capture.last.statements[0])
-        assert "UPDATE agent_workspace" in sql
-        assert "agent_workspace.rev + " in sql
-        assert "agent_workspace.rev = " in sql
-
-    def test_write_conflict_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """0 行命中抛 WorkspaceConflictError（不当作成功）。"""
-        _Capture(monkeypatch, [[_Result(rowcount=0)]])
-        with pytest.raises(WorkspaceConflictError):
-            PgAgentWorkspace("postgresql://x").write(
-                "s1", "review:task-0:verdict", "obj://v", "reviewer", 5
-            )
-
-
-def test_protocol_compatibility() -> None:
-    """存储方法签名兼容 Router 的 MessageStore/MessageWorkspace 协议。"""
-    import inspect
-
-    from services.orchestrator.tasks.router import MessageStore, MessageWorkspace
-
-    for proto_method, impl_method in (
-        (MessageStore.append, PgAgentMessageStore.append),
-        (MessageWorkspace.read, PgAgentWorkspace.read),
-        (MessageWorkspace.write, PgAgentWorkspace.write),
-        (MessageWorkspace.create_if_missing, PgAgentWorkspace.create_if_missing),
-    ):
-        expected = set(inspect.signature(proto_method).parameters) - {"self"}
-        actual = set(inspect.signature(impl_method).parameters) - {"self"}
-        assert expected <= actual, f"{proto_method.__name__}: {expected} !<= {actual}"

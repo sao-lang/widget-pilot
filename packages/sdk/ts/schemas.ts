@@ -6,15 +6,13 @@ const AgentEvent = z.object({
   "sessionId": z.string().min(1),
   "runId": z.string().min(1),
   "ts": z.string().datetime({ offset: true }),
-  "kind": z.enum(["run","plan","spec","attachment","routing","code","guard","validation","sandbox","artifact","cost","checkpoint","interrupted","notice","error","done","ask_user","reasoning","agent_message","review","delegate"]),
+  "kind": z.enum(["run","plan","spec","attachment","routing","code","guard","validation","sandbox","artifact","cost","checkpoint","interrupted","notice","error","done","ask_user","reasoning"]),
   "phase": z.enum(["DRAFT","RUNNING","PAUSED","AWAITING_INPUT","VALIDATING","COMPLETED","FAILED","CANCELLED"]),
   "payload": z.unknown(),
   "traceId": z.string().min(1),
   "taskId": z.string().min(1).optional(),
   "taskIndex": z.number().int().min(1).optional(),
-  "role": z.enum(["planner","generator","reviewer","coordinator"]).optional(),
   "turn": z.number().int().min(1).optional(),
-  "agentId": z.string().min(1).optional(),
 });
 
 const WidgetSpec = z.object({

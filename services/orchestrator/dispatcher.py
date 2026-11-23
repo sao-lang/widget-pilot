@@ -36,7 +36,6 @@ from services.orchestrator.memory.fact_summary import (
 from services.orchestrator.memory.ports import FactSummaryStorePort
 from services.orchestrator.tasks.ports import (
     PlanLLM,
-    RoleRunner,
     TaskStorePort,
     TaskTurnStorePort,
 )
@@ -353,7 +352,6 @@ class Dispatcher:
         *,
         task_store: TaskStorePort | None = None,
         plan_llm: PlanLLM | None = None,
-        role_runner: RoleRunner | None = None,
         task_turn_store: TaskTurnStorePort | None = None,
     ) -> None:
         """注入任务队列、执行依赖、会话服务与校验链（状态回写入口）。
@@ -372,9 +370,8 @@ class Dispatcher:
             task_store: ADR-006 generation_task 存储（生产 PgGenerationTaskStore）；
                 多任务落库与 fan-in 查询。None 时多任务路径不可用（fail-fast）。
             plan_llm: ADR-006 约束式规划器真实端口；None 时多任务规划 fail-fast。
-            role_runner: ADR-007 角色循环入口 (session, task, desc) -> (ok, ref, reason)；
-                None 时子任务走现有 run() 内核（单任务零回归）。
             task_turn_store: ADR-009 task_turn 存储（生产 PgTaskTurnStore）。
+        子任务直接走 run() 单 agent 内核（ADR-011：角色层已移除）。
         """
         self._queue = queue
         self._deps = deps
@@ -385,7 +382,6 @@ class Dispatcher:
         self._fact_summary_store = fact_summary_store
         self._task_store = task_store
         self._plan_llm = plan_llm
-        self._role_runner = role_runner
         self._task_turn_store = task_turn_store
         # Coordinator fan-in 事件的原子 seq 分配器（由 Redis URL 构造，惰性连接）。
         from services.orchestrator.tasks.events import RedisSeqAllocator
@@ -817,32 +813,7 @@ class Dispatcher:
                     self._task_store.update_state(
                         task_id, TaskState.RUNNING.value, run_id=run_id
                     )
-                # ADR-007：N>1 子任务在 run() 内核之上跑角色协作（生产注入真实端口）。
-                role_ref = ""
-                role_reason = ""
-                if task_id and self._role_runner is not None:
-                    ok, role_ref, role_reason = self._role_runner(
-                        session_id, task_id, _task_str(task.get(_FIELD_DESC))
-                    )
-                    if not ok:
-                        # S4（review）：角色失败即短路，不再 run() / _write_back，
-                        # 否则对已 FAILED 会话 complete 抛 ConflictError → 死信。
-                        if task_id and self._task_store is not None:
-                            self._task_store.update_state(
-                                task_id,
-                                TaskState.FAILED.value,
-                                reason_code=role_reason or ReasonCode.RETRY_EXHAUSTED.value,
-                            )
-                        parent = _task_str(task.get(_FIELD_PARENT_RUN))
-                        if parent:
-                            self._fan_in_if_complete(session_id, user_id, parent)
-                        else:
-                            self._sessions.fail(
-                                session_id,
-                                role_reason or ReasonCode.RETRY_EXHAUSTED.value,
-                                f"agent-task/{session_id}/{task_id}/{run_id}",
-                            )
-                        return 1
+                # ADR-011：子任务直接走 run() 单 agent 内核（角色层已移除）。
                 state = run(
                     session_id, run_id, run_input, self._deps,
                     cost_sink=self._cost_sink,
@@ -858,9 +829,10 @@ class Dispatcher:
                     self._task_store.update_state(
                         task_id,
                         final,
-                        result_ref=role_ref
-                        or (terminal.bundle_ref if terminal is not None and done else None),
-                        reason_code=role_reason or None,
+                        result_ref=terminal.bundle_ref if terminal is not None and done else None,
+                        reason_code=terminal.reason_code
+                        if terminal is not None and not done
+                        else None,
                     )
                 parent = _task_str(task.get(_FIELD_PARENT_RUN))
                 if task_id and parent:
