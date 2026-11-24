@@ -44,6 +44,8 @@ from services.control_plane.accounts.stores import UserRow, UserStore
 from services.control_plane.api.guard import ForbiddenError
 from services.control_plane.attachments.ports import AttachmentServicePort
 from services.control_plane.audit.ledger import AuditLedgerPort
+from services.control_plane.bundles.api import register_bundle_routes
+from services.control_plane.bundles.service import BundleService
 from services.control_plane.sessions.revision import (
     default_revision_phrases,
     detect_revocation_intent,
@@ -56,7 +58,7 @@ from services.control_plane.sessions.service import (
     SessionError,
     SessionService,
 )
-from services.control_plane.sessions.sse import EventWindow
+from services.control_plane.sessions.sse import EventTailPort, EventWindow
 from services.control_plane.sessions.stores import SessionRow, SessionStore
 from services.guardrails.grid_resolver import resolve_grid
 from services.orchestrator.memory.ports import PreferenceStorePort
@@ -221,6 +223,8 @@ def create_app(
     preference_store: PreferenceStorePort | None = None,
     task_store: TaskStorePort | None = None,
     task_turn_store: TaskTurnStorePort | None = None,
+    bundle_service: BundleService | None = None,
+    event_tail: EventTailPort | None = None,
 ) -> FastAPI:
     """构造 M04 API app（所有真实依赖必须显式注入，源码不保留测试桩）。
 
@@ -236,6 +240,9 @@ def create_app(
         task_store: ADR-006 generation_task 存储（生产 PgGenerationTaskStore）；
             None 时 tasks[] 摘要省略（单任务模式，非兼容桩）。
         task_turn_store: ADR-009 task_turn 存储（生产 PgTaskTurnStore）。
+        bundle_service: M09 产物服务；None 时不挂载 bundles 路由（部署形态，非兼容桩）。
+        event_tail: SSE 实时尾随接线端口（ADR-008 reasoning，本模块只留锚点不实现）；
+            None 时端点保持既有有限窗口下发。后续按 ADR-008 注入 XREAD BLOCK 实现即可。
     """
     app = FastAPI(title="WidgetPilot control-plane M04", docs_url=None, redoc_url=None)
     auth = AuthService(user_store, jwt_secret)
@@ -261,6 +268,10 @@ def create_app(
     # Depends 单例（B008 规避：不在每个路由的默认参数里重复调用函数；
     # current_user 是闭包，捕获本 app 的 auth/user_store，故在 create_app 内定义一次）
     CurrentUser = Depends(current_user)
+
+    # M09 bundles 端点（成包产物管理；None 时不部署该能力）。
+    if bundle_service is not None:
+        register_bundle_routes(app, bundle_service, current_user)
 
     @app.post("/api/auth/register")
     def register(req: RegisterReq) -> ApiEnvelope:

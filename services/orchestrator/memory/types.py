@@ -122,6 +122,7 @@ class PreferenceEvent:
         created_at: 事件时刻（UTC ISO 字符串）。
         superseded_at: 被新值取代的时刻（不删行，仅失效）。
         revoked_at: 被用户清除或采纳证据撤销的时刻。
+        bundle_ref: 采纳证据关联的产物 id（M09 §9.0 精确撤销锚点；写入时确定，纳入 hash）。
         row_hash: hash 链当前行哈希（防篡改，与 guard_hit 同机制）。
     """
 
@@ -137,6 +138,7 @@ class PreferenceEvent:
     created_at: str
     superseded_at: str | None = None
     revoked_at: str | None = None
+    bundle_ref: str = ""
     row_hash: str = ""
 
 

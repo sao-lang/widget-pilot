@@ -38,6 +38,7 @@ from services.orchestrator.device_sim.detector import (
     detect_violations,
     load_limits,
 )
+from services.sandbox_runner import container_cli
 from services.sandbox_runner.assertions import (
     assert_capabilities_via_bridge,
     assert_interactions,
@@ -87,8 +88,8 @@ def _container_name(run_id: str) -> str:
 
 def _docker_command(run_id: str, image: str) -> list[str]:
     """真隔离命令：无网络、无 capability、非 root、cgroups/seccomp 限额、只读根。"""
-    return [
-        "docker", "run", "--rm", "-i", "--name", _container_name(run_id),
+    return container_cli.run_command([
+        "run", "--rm", "-i", "--name", _container_name(run_id),
         "--network", "none",
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges",
@@ -100,7 +101,7 @@ def _docker_command(run_id: str, image: str) -> list[str]:
         "--read-only",
         "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
         image,
-    ]
+    ])
 
 
 def destroy_sandbox(run_id: str, reason: str, docker_runner: DockerRunnerPort) -> None:

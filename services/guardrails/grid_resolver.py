@@ -12,11 +12,13 @@ from packages.contracts.enums import GridSpec
 from services.guardrails.constants import (
     CONFLICT_RULES,
     DEFAULT_DENSITY_HINTS,
+    DENSITY_CAUTION_RULES,
     DENSITY_HINTS,
     GRID_HINT_PATTERNS,
+    GRID_SYNONYMS,
 )
-from services.guardrails.spec_conflicts import check_conflict
-from services.guardrails.types import GridResolution, GridSource, GridStatus
+from services.guardrails.spec_conflicts import check_conflict, check_density_caution
+from services.guardrails.types import GridResolution, GridSource, GridStatus, RuleTable
 
 _SUGGEST_LIMIT = 3
 
@@ -32,23 +34,23 @@ def _density_hints(description: str) -> tuple[GridSpec, ...]:
     return DEFAULT_DENSITY_HINTS
 
 
-def _detect_conflict_features(description: str) -> tuple[str, ...]:
-    """从描述抽所有冲突矩阵特征词（§3.4 G：全特征，非仅 calendar+月视图）。
+def _detect_features_from(description: str, rules: RuleTable) -> tuple[str, ...]:
+    """从描述抽规则表中所有命中的特征词（§3.4 G：全特征，复数不提前返回）。
 
-    特征词来自 CONFLICT_RULES 的 feature 列；同义词见 semantic._detect_feature。
+    特征词取自规则表 feature 列，别名取自共用的 GRID_SYNONYMS。
     """
     features: list[str] = []
-    synonyms = {
-        "月视图": ("月视图", "翻月", "能翻月"),
-        "多行列表": ("多行列表", "列表"),
-        "宽表格": ("宽表格", "表格"),
-    }
-    known = {feature for _grid, feature, _judg, _sug in CONFLICT_RULES}
+    known = {feature for _grid, feature, _judg, _sug in rules}
     for feature in known:
-        words = synonyms.get(feature, (feature,))
+        words = GRID_SYNONYMS.get(feature, (feature,))
         if any(word in description for word in words):
             features.append(feature)
     return tuple(features)
+
+
+def _detect_conflict_features(description: str) -> tuple[str, ...]:
+    """从描述抽所有硬冲突矩阵特征词（§3.4 G：全特征，非仅 calendar+月视图）。"""
+    return _detect_features_from(description, CONFLICT_RULES)
 
 
 def _dedup(items: list[GridSpec]) -> tuple[GridSpec, ...]:
@@ -118,6 +120,13 @@ def resolve_grid(
         if not any(check_conflict(t, f) for f in features)
     ]
     candidates.extend(typical)
+    # 密度软提示（§3.4 C）：命中的规格后置而非删除——「复杂面板」只是提示信息
+    # 密度受限，2x2 仍是可选项；用稳定分区保持各段内部原有顺序。
+    cautions = _detect_features_from(description, DENSITY_CAUTION_RULES)
+    if cautions:
+        candidates = [
+            c for c in candidates if not any(check_density_caution(c, f) for f in cautions)
+        ] + [c for c in candidates if any(check_density_caution(c, f) for f in cautions)]
     return GridResolution(
         status=GridStatus.MISSING,
         grid=None,

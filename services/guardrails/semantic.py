@@ -10,6 +10,7 @@ import re
 from packages.contracts.enums import GridSpec, ReasonCode
 from services.guardrails.constants import (
     FEATURE_HINTS,
+    GRID_SYNONYMS,
     MIN_DESCRIPTION_LEN,
     ROLE_CLARIFY_THRESHOLD,
     WIDGET_ANCHOR_PATTERNS,
@@ -47,17 +48,12 @@ def _has_required_slots(description: str) -> bool:
 
 
 def _detect_feature(description: str) -> str:
-    """抽取规格冲突特征词（如「月视图」），供冲突矩阵判定。
+    """抽取规格硬冲突特征词（如「月视图」），供放行阶段冲突矩阵判定。
 
-    同义词归并：「翻月」「能翻月」映射为冲突矩阵的「月视图」特征。
+    别名取自共用的 GRID_SYNONYMS（与 grid_resolver 同源，避免词表漂移）。
+    「复杂面板」是密度软提示、不在硬冲突矩阵内， suggest_for 查不到即不拦截。
     """
-    synonyms = {
-        "月视图": ("月视图", "翻月"),
-        "多行列表": ("多行列表", "列表"),
-        "宽表格": ("宽表格", "表格"),
-        "复杂面板": ("复杂面板", "面板"),
-    }
-    for feature, words in synonyms.items():
+    for feature, words in GRID_SYNONYMS.items():
         if any(word in description for word in words):
             return feature
     return ""

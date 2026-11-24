@@ -418,8 +418,32 @@ paths:
                   - type: object
                     properties:
                       data:
-                        type: array
-                        items: { $ref: "#/components/schemas/WidgetBundleSummary" }
+                        type: object
+                        properties:
+                          items:
+                            type: array
+                            items: { $ref: "#/components/schemas/WidgetBundleSummary" }
+                          next_cursor: { type: string }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/bundles/{bundle_id}:
+    get:
+      tags: [bundles]
+      summary: 只读单包（越权 403，不泄漏存在性）
+      operationId: getBundle
+      parameters: [{ $ref: "#/components/parameters/BundleId" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        description: WidgeBundle 完整形态（widget_bundle.schema.json）
         "403": { $ref: "#/components/responses/Forbidden" }
   /api/bundles/{bundle_id}/install:
     post:
@@ -433,18 +457,64 @@ paths:
   /api/bundles/{bundle_id}/delete:
     post:
       tags: [bundles]
-      summary: 删除（软删 → BundleState=DELETED 终态）
+      summary: 删除（软删 → BundleState=DELETED 终态，二次确认 + 不做乐观更新）
       operationId: deleteBundle
       parameters: [{ $ref: "#/components/parameters/BundleId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm_token]
+              properties:
+                confirm_token:
+                  type: string
+                  minLength: 1
+                  description: 由 delete-confirm 签发的短期确认 token（TTL 120s）
       responses:
         "200": { $ref: "#/components/responses/ApiOk" }
+        "400": { $ref: "#/components/responses/BadRequest" }
         "409": { $ref: "#/components/responses/Conflict" }
+  /api/bundles/{bundle_id}/delete-confirm:
+    get:
+      tags: [bundles]
+      summary: 取删除二次确认 token（M09 §4.1 Q4 定稿）
+      operationId: deleteBundleConfirm
+      parameters: [{ $ref: "#/components/parameters/BundleId" }]
+      responses:
+        "200":
+          description: OK——confirm_token 与 expires_at
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          confirm_token: { type: string }
+                          expires_at: { type: string, format: date-time }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /api/bundles/{bundle_id}/rollback:
     post:
       tags: [bundles]
-      summary: 回滚
+      summary: 回滚（沿用上一版编译产物，不改 BundleState）
       operationId: rollbackBundle
       parameters: [{ $ref: "#/components/parameters/BundleId" }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target_version_id:
+                  type: string
+                  nullable: true
+                  description: 目标版本；省略表示上一版
       responses:
         "200": { $ref: "#/components/responses/ApiOk" }
         "409": { $ref: "#/components/responses/Conflict" }

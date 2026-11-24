@@ -83,11 +83,29 @@ DEFAULT_DENSITY_HINTS: tuple[GridSpec, ...] = (
 )
 
 # 规格冲突组合（§3.4 C 静态矩阵）；feature 为描述特征关键词
+# 硬冲突：命中即从 suggest_grid 剔除并在放行阶段触发 SPEC_CONFLICT 改选。
 CONFLICT_RULES: tuple[tuple[GridSpec, str, str, GridSpec], ...] = (
     (GridSpec._2X1, "月视图", "2x1 无法容纳月视图", GridSpec._4X4),
     (GridSpec._2X1, "多行列表", "2x1 无法容纳多行列表", GridSpec._2X4),
     (GridSpec._1X2, "宽表格", "1x2 无法容纳宽表格", GridSpec._4X2),
+    (GridSpec._1X2, "横向多指标", "1x2 无法容纳横向多指标", GridSpec._4X2),
 )
+
+# 信息密度软提示（§3.4 C：2x2 × 复杂面板 → 提示，非改选）：
+# 只把命中规格在 suggest_grid 中后置，不进 CONFLICT_RULES、不触发 SPEC_CONFLICT。
+DENSITY_CAUTION_RULES: tuple[tuple[GridSpec, str, str, GridSpec], ...] = (
+    (GridSpec._2X2, "复杂面板", "2x2 信息密度受限，建议 4x4", GridSpec._4X4),
+)
+
+# 特征词 → 口语别名（§3.4 G 全特征抽取的唯一来源，grid_resolver 与 semantic 共用）。
+# 注意「复杂面板」不带裸词「面板」：面板是常见宿主锚点，裸词会把「天气面板」误判为冲突。
+GRID_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "月视图": ("月视图", "翻月", "能翻月"),
+    "多行列表": ("多行列表", "列表"),
+    "宽表格": ("宽表格", "表格"),
+    "横向多指标": ("横向多指标", "多指标", "多个指标"),
+    "复杂面板": ("复杂面板",),
+}
 
 # ---- L1 语义族（ADR-004 去类型化）----
 # 正向 = 生成/放置/展示动作 × 宿主/产物锚点；数据词只加权、永不单独触发。

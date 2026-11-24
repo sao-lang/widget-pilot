@@ -384,3 +384,30 @@
 - 路由卡：场景 6 设计驱动重构｜路径 code｜档位 **full**｜置信 0.9；判据=architecture/cross_contract/cross_module/migration/public_interface。器官链 plan→brainstorm→impact→subagent→tdd→git→ledger→review→memory，省掉=无。覆盖矩阵**必建**（FR=11≥8），门禁含 coverage_check/commitment_ledger/source_purity/review_gate 全绿。
 - 范围：ADR-008 v0.3（迁移 0019 历史事件表 + GET /events/history + 前端进页上滑展示）+ ADR-012（迁移 0020 branch 列 + 3 端点 + branchId 事件字段 + 编排 + 前端）。基线：工作区已有未提交文档改动（ADR-008/012/00 索引），代码未动、上轮 661 passed。
 - **实现阶段已取消（2026-11-23 10:32 用户明确"落实设计文档就可以了，不要 coding"）**：曾生成执行图 `execution-plan-history-edit.json` + `execution-state-history-edit.json` 并走完 S0/S1 路由，现按用户要求删除该二文件、不进 S2–S5；本轮交付仅设计文档（ADR-008 v0.3 / ADR-012 v1.0 / 00 索引）。设计已定稿、D1–D5 已拍板，实现待后续用户明确要求时另行启动。
+
+## S0–S2 声明（2026-11-24，M09 产物与包管理域实现）
+
+- 场景 6 设计驱动重构｜路径 code｜档位 **full**｜置信 0.9｜sid=f76a7264。路由卡判据=architecture/cross_contract/cross_module/migration/public_interface/design_decision/user_thorough。器官链 plan→brainstorm→impact→subagent→tdd→git→ledger→review→memory；省掉=无（用户未说先不提交）。覆盖矩阵**必建**（FR≥8，跨模块 + 公共契约）。
+- 目标：完成 M09（`docs/modules/M09-产物与包管理域.md` v1.0）——先拷问设计并解决矛盾，再 TDD 实现；接线已完成模块；缺口标注到后续模块文档 + 代码占位注释；需模型处留真接线、测试用 mock、出缺口标注文档；源码纯净无测试桩；边改边双向同步设计并留痕。
+- **S0 环境事实**：podman CLI 6.2.0 在 `D:/apps/podman/`（MSI 装，工具会话 PATH 未刷新才 initially 找不到）；`podman info`=crun/amd64 后端就绪；`podman run --rm quay.io/podman/hello` EXIT=0（真容器可跑）；`podman compose` 因 machine URI 找不到失败（exit 125），wsl.exe 被安全中心黑名单拦截。策略：容器级依赖用 `podman run` 起（PG/Redis/MinIO），不依赖 compose/machine。
+- **S2 拷问发现（设计 vs 真实契约/代码/ADR，均带行号）**：
+  1. 事件 kind：M09 §5.1/§6.2（:794-798）写「18 种含 skill 无 reasoning」，契约 `events.schema.json:16` + ADR-011 权威=18 种含 reasoning 无 skill → 改设计。
+  2. bundle_ref：M09 §9.5（:1052-1062）「不落 SessionRow」已过时——迁移 0017 + `sessions/service.py:432-435` 已落列；真缺口=模型自报字符串未校验 → 改设计措辞。
+  3. 产物状态：设计方案/00:85/M16:324/M10:63 写 COMPLETED（实为 SessionState），BundleState 权威 GENERATED（M09 正确）→ 设计同步。
+  4. `on_bundle_deleted` 方向：M09:534 写 M10→M09，M10:63/331 写 M09→M10 输出删除事件 → 定稿方向。
+  5. ADR-010 设备 API（:38）要求 M09 bridge 调 `window.widgetDevice.*`，M09 6 Capability + 7 消息零命中 → 标注缺口。
+  6. M08 产物形态不匹配：M09:288-293 假设 `static_check{passed,violations}`/`compiled.content_ref`；M08 真实=`ValidateResult{output_guard,contract_check,sandbox_test}` + `EvidenceRefs{compiled_ref,compiled_hash}`（`guardrails/output_ports.py:50-151`），且 `validate_and_test` 未串 run()（dispatcher.py:450-455）→ M09 写适配器 + 标注驱动缺口。
+  7. 契约缺口：`widget_bundle.schema.json` 无 versions[]（additionalProperties:false）；openapi 缺 delete-confirm、install/delete/rollback 无 requestBody、preview/evidence 裸 object；artifact payload 仅 bundle_id/preview_ref。
+- **用户拍板（2026-11-24 18:12）**：① 补全契约并四同步（gen:all + contracts:check + 影响面门禁）；② podman 已装好且可跑（用户确认，已验证 hello 容器 EXIT=0），真实环境用 podman run 起依赖；③ 改 M07 增加按 bundle_id 精确撤销 API（扩大范围到 M07 存储层）。
+- 下一站：固化 change-contract + 覆盖矩阵 → coverage_check/contract_check → S3 TDD。
+
+## S5 独立 review + 收尾（2026-11-24）
+
+- **独立 review（全新上下文子代理，两轮）**：
+  - 第 1 轮 3 Blocker：B1 删除二次确认失效（token 不校验+审计造假）、B2 成包生产无调用点但契约过度声称、B3 M07 采纳信号义务未落地。6 Should（compiled.hash 丢弃/幂等声称/API 测试空转/$ref 声称/文档版本矛盾/trace 断链）。
+  - 修复：B1 新增 `bundles/confirm.py`（HMAC 无状态 token 绑定 user+bundle+exp，常量时间比较）+ BundleService 必填 confirm_secret fail-fast + delete 真校验；B2 契约/coverage 诚实化（dispatcher 成包不在本轮，缺口设计 §9.6 G1 一致）；B3 新增 `bundles/adoption.py` + 必填 adoption port + install 真发 adopted_artifact（带 palette/bundle_ref）。Should 全修（S1 compiled.hash 从版本链补、S3 六端点真测试、S4/S5 文档诚实化、S2 Open 登记）。
+  - 第 2 轮复审：3 Blocker 全闭合、无新 Blocker；新增 1 Should（畸形非 ASCII token 冒泡 500）→ 已修（confirm.py 入口 ASCII 白名单折叠为 400）+ 测试。Blocker=0，可交付。
+- **最终证据**：`.venv/Scripts/python.exe -m pytest -q` → exit 0（**699 passed, 10 skipped**，真 PG+Redis）；ruff check . → exit 0；pyright → exit 0（0 errors）；`pnpm contracts:check` → exit 0（drift=[]）；SDK build + widget_bridge tsc → exit 0；alembic upgrade head → exit 0（0019_m09_bundles，downgrade/upgrade 往返 OK）；`pytest tests/integration/test_m09_bundles_pg.py -q` → exit 0（3 passed 非 skip）；contract_check → PASS（Acceptance=10）；coverage_check → PASS（16 行，WARN=5 多需求共享 FR）。
+- **source_purity 降级登记**：全仓 `check --strict` 报 120「新增」但绝大多数为既有存量漂移（models.py:419/sessions/guardrails 等本轮未碰文件，基线过时）；本轮**新增** `bundles/` 目录独立扫描 → 新增污染=0（1 项 purity-exempt 已写理由：pg_store CursorResult[object] 泛型形参，同 sessions/pg_stores 惯例）。按工作记忆约定登记工具基线漂移，不刷基线、不改断言。
+- **环境事实**：podman 6.2.0 在 `D:/apps/podman`（PATH 未刷新）；后端 crun 可用（`podman run` hello EXIT=0）；`podman compose` 因 machine URI 失败（exit 125）；用 `podman run` 起 PG(5432)+Redis(6379) 真容器跑集成测试（镜像走 daocloud 源，docker.io 源超时）。
+- 交付：M09 全量（成包/hash/版本/状态机/WidgetRuntime/evidence/artifact + 四模块接线 + 契约四同步 + M07 精确撤销 + 采纳信号 + 设计双向同步 + 3 份新文档）；缺口 G1–G5 见设计 §9.6 与 `M09-模型依赖与测试缺口标注.md`。

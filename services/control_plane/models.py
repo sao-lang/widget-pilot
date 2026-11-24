@@ -445,6 +445,8 @@ class PreferenceEvent(Base):
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     superseded_at: Mapped[str | None] = mapped_column(Text, nullable=True)
     revoked_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    bundle_ref: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    """M09 §9.0 采纳证据精确撤销锚点（写入时确定，纳入 row_hash）。"""
     row_hash: Mapped[str] = mapped_column(Text, nullable=False)
 
 
@@ -489,3 +491,54 @@ class CostLedger(Base):
         _TzDateTime, nullable=False, server_default=func.now()
     )
 
+
+
+class WidgetBundle(Base):
+    """M09 产物索引（§6.1）：大对象只存引用，manifest/校验/版本为 JSONB。"""
+
+    __tablename__ = "widget_bundle"
+    __table_args__ = (
+        Index("ix_widget_bundle_user_id", "user_id"),
+        Index("ix_widget_bundle_session_id", "session_id"),
+        Index("ix_widget_bundle_state", "state"),
+    )
+
+    bundle_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[str] = mapped_column(Text, nullable=False)
+    spec_ref: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    source_ref: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    compiled_ref: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    manifest: Mapped[JsonValue] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    static_check: Mapped[JsonValue] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    sandbox_test: Mapped[JsonValue] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    state: Mapped[str] = mapped_column(Text, nullable=False, server_default="GENERATED")
+    hash: Mapped[str] = mapped_column(Text, nullable=False)
+    versions: Mapped[JsonValue] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    evidence_ref: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    created_at: Mapped[datetime] = mapped_column(
+        _TzDateTime, nullable=False, server_default=func.now()
+    )
+
+
+class BundleVersion(Base):
+    """M09 版本链节点（§6.1）：parent 指针成链，回滚沿用上一版编译产物。"""
+
+    __tablename__ = "bundle_version"
+    __table_args__ = (Index("ix_bundle_version_bundle_id", "bundle_id"),)
+
+    version_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    bundle_id: Mapped[str] = mapped_column(Text, nullable=False)
+    parent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    compiled_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    compiled_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    manifest_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)

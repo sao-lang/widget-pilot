@@ -296,6 +296,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/bundles/{bundle_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 只读单包（越权 403，不泄漏存在性） */
+        get: operations["getBundle"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/bundles/{bundle_id}/install": {
         parameters: {
             query?: never;
@@ -322,8 +339,25 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** 删除（软删 → BundleState=DELETED 终态） */
+        /** 删除（软删 → BundleState=DELETED 终态，二次确认 + 不做乐观更新） */
         post: operations["deleteBundle"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/bundles/{bundle_id}/delete-confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 取删除二次确认 token（M09 §4.1 Q4 定稿） */
+        get: operations["deleteBundleConfirm"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -339,7 +373,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** 回滚 */
+        /** 回滚（沿用上一版编译产物，不改 BundleState） */
         post: operations["rollbackBundle"];
         delete?: never;
         options?: never;
@@ -1166,7 +1200,36 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ApiResponse"] & {
-                        data?: components["schemas"]["WidgetBundleSummary"][];
+                        data?: {
+                            items?: components["schemas"]["WidgetBundleSummary"][];
+                            next_cursor?: string;
+                        };
+                    };
+                };
+            };
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    getBundle: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bundle_id: components["parameters"]["BundleId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse"] & {
+                        /** @description WidgeBundle 完整形态（widget_bundle.schema.json） */
+                        data?: Record<string, never>;
                     };
                 };
             };
@@ -1197,10 +1260,47 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description 由 delete-confirm 签发的短期确认 token（TTL 120s） */
+                    confirm_token: string;
+                };
+            };
+        };
         responses: {
             200: components["responses"]["ApiOk"];
+            400: components["responses"]["BadRequest"];
             409: components["responses"]["Conflict"];
+        };
+    };
+    deleteBundleConfirm: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bundle_id: components["parameters"]["BundleId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK——confirm_token 与 expires_at */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiResponse"] & {
+                        data?: {
+                            confirm_token?: string;
+                            /** Format: date-time */
+                            expires_at?: string;
+                        };
+                    };
+                };
+            };
+            403: components["responses"]["Forbidden"];
         };
     };
     rollbackBundle: {
@@ -1212,7 +1312,14 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @description 目标版本；省略表示上一版 */
+                    target_version_id?: string | null;
+                };
+            };
+        };
         responses: {
             200: components["responses"]["ApiOk"];
             409: components["responses"]["Conflict"];

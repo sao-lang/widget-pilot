@@ -13,6 +13,9 @@ from enum import StrEnum
 from packages.contracts.enums import GridSpec, ModelTier, ReasonCode, WidgetType
 from packages.contracts.types import JsonObject
 
+# 规格规则表四元组：(grid, 特征词, 判定说明, 建议规格)，冲突矩阵与密度提示共用
+RuleTable = tuple[tuple[GridSpec, str, str, GridSpec], ...]
+
 
 class GuardHitType(StrEnum):
     """进护栏命中类型（§5.1，大写枚举，与 M03 小写 _HitType 区分）。"""

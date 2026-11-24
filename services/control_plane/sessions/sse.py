@@ -83,3 +83,31 @@ class RedisEventSource:
                     }
                 )
         return result
+
+
+@runtime_checkable
+class EventTailPort(Protocol):
+    """SSE 实时尾随接线端口（ADR-008 reasoning 流式可视化的 M04 侧契约）。
+
+    【本模块只留接线，不实现内部逻辑】浏览器展示模型思考过程属 ADR-008 方案，
+    当前阶段不实现（前端折叠组件 + XREAD BLOCK tail + frames 实时推送均未做）。
+    本端口仅为后续实现预留可插拔锚点：届时注入 Redis XREAD BLOCK 实现，SSE 端点
+    据此把有限窗口一次性下发改为长连接实时推送。未注入时端点保持既有有限窗口
+    行为（§4.5 客户端凭 Last-Event-ID 续传），不降级为任何内存桩。
+    """
+
+    def tail(
+        self, last_id: str, session_id: str, timeout_ms: int
+    ) -> list[tuple[str, SSEEvent]]:
+        """阻塞等一批新事件（或超时），返回 [(stream_id, event), ...] 按序。
+
+        Args:
+            last_id: Redis Stream 上次读到的 id（'$' 表示只等新事件）。
+            session_id: 会话标识，定位 Stream key。
+            timeout_ms: XREAD BLOCK 毫秒（心跳间隔控制）。
+
+        Returns:
+            新事件列表（空表示超时无新事件）；stream_id 用于下次续传锚点。
+        """
+        ...
+

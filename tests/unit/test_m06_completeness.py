@@ -186,6 +186,23 @@ def test_suggest_grid_filters_wide_table_conflict() -> None:
     assert GridSpec._1X2 not in res.suggest_grid
 
 
+def test_suggest_grid_filters_horizontal_multi_metric_conflict() -> None:
+    """§3.4 G：横向多指标 + 1x2 硬冲突 → 1x2 被过滤。"""
+    res = resolve_grid(None, "展示横向多指标", preferred_grids=["1x2", "4x2"])
+    assert GridSpec._1X2 not in res.suggest_grid
+    assert GridSpec._4X2 in res.suggest_grid
+
+
+def test_suggest_grid_deprioritizes_complex_panel_soft_caution() -> None:
+    """§3.4 C：复杂面板是软提示 → 2x2 后置而非删除；裸「面板」不误伤。"""
+    res = resolve_grid(None, "做一个复杂面板", preferred_grids=["2x2", "4x4"])
+    assert GridSpec._2X2 in res.suggest_grid  # 软提示不删
+    assert res.suggest_grid[0] is GridSpec._4X4  # 但后置
+
+    panel = resolve_grid(None, "做一个天气面板", preferred_grids=["2x2", "4x4"])
+    assert panel.suggest_grid[0] is GridSpec._2X2  # 裸「面板」不触发降权
+
+
 # ── review 修复回归 ─────────────────────────────────────────────────────────
 
 

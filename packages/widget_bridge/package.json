@@ -1,0 +1,16 @@
+{
+  "name": "@widgetpilot/widget-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "M09/M16 宿主 ↔ iframe 的 postMessage 窄 bridge 实现与类型（7 条固定消息，非任意 JSON-RPC）",
+  "main": "ts/index.ts",
+  "types": "ts/index.ts",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test ts/*.test.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}

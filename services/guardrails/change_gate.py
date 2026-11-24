@@ -21,6 +21,9 @@ class ConfigSnapshot:
     conflict_count: int
     capability_max: int
     intent_vocab_version: str = ""
+    # 规格规则的两类扩展：密度软提示条数 + 特征别名表规模（任一词表变更须触发回归）
+    density_caution_count: int = 0
+    grid_synonym_count: int = 0
 
 
 def capture_snapshot() -> ConfigSnapshot:
@@ -32,6 +35,8 @@ def capture_snapshot() -> ConfigSnapshot:
         conflict_count=len(constants.CONFLICT_RULES),
         capability_max=constants.MAX_CAPABILITY_PER_TURN,
         intent_vocab_version=f"{constants.INTENT_VOCAB_VERSION}:{constants.INTENT_SAMPLES_VERSION}",
+        density_caution_count=len(constants.DENSITY_CAUTION_RULES),
+        grid_synonym_count=len(constants.GRID_SYNONYMS),
     )
 
 

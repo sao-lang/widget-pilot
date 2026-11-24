@@ -54,6 +54,7 @@ class WidgetBundle(BaseModel):
     manifest: JsonObject
     static_check: JsonObject
     sandbox_test: JsonObject
+    versions: list[JsonValue] | None = None
     state: str
     hash: str
     created_at: str

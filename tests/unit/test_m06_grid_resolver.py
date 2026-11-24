@@ -45,6 +45,20 @@ def test_a7_conflict_2x1_month() -> None:
     assert check_conflict(GridSpec._4X4, "月视图") is False
 
 
+def test_conflict_1x2_horizontal_multi_metric() -> None:
+    """§3.4 C 补规则：1x2 × 横向多指标为硬冲突，建议 4x2。"""
+    assert check_conflict(GridSpec._1X2, "横向多指标") is True
+    assert check_conflict(GridSpec._4X2, "横向多指标") is False
+
+
+def test_density_caution_2x2_complex_panel_is_soft() -> None:
+    """§3.4 C 补规则：2x2 × 复杂面板是软提示，不进硬冲突矩阵。"""
+    from services.guardrails.spec_conflicts import check_density_caution
+
+    assert check_density_caution(GridSpec._2X2, "复杂面板") is True
+    assert check_conflict(GridSpec._2X2, "复杂面板") is False
+
+
 def test_invalid_grid_rejected() -> None:
     """A6：非法 grid 枚举被拒（resolve 只接受 GridSpec，字符串非法 → 抛错）。"""
     import pytest

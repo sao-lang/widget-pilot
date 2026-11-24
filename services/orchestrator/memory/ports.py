@@ -47,6 +47,8 @@ class PreferenceStorePort(Protocol):
         new_value: JsonValue,
         source: PreferenceSource,
         trace_id: str,
+        *,
+        bundle_ref: str = "",
     ) -> tuple[UserPreference, PreferenceEvent]:
         """四操作写入：返回写入后的偏好与刚追加的事件（含四操作决策）。
 
@@ -57,6 +59,7 @@ class PreferenceStorePort(Protocol):
             new_value: 字段新值（JSON 边界，确定性短值）。
             source: 写入信号来源（决定固定权重）。
             trace_id: 链路追踪标识，写进事件供审计。
+            bundle_ref: 采纳证据的产物锚点（M09 §9.0 精确撤销）；默认空。
 
         Returns:
             （写入后偏好，刚追加的情节事件）。
@@ -78,6 +81,21 @@ class PreferenceStorePort(Protocol):
 
         Returns:
             清除后的偏好（字段为空、version 已递增）。
+        """
+        ...
+
+    def revoke_evidence_by_bundle(
+        self, user_id: str, bundle_id: str, trace_id: str
+    ) -> int:
+        """按 bundle_id 精确撤销采纳证据（M09 §9.0 义务 2 / D-13）。
+
+        Args:
+            user_id: 租户隔离键。
+            bundle_id: 被删除/回滚的产物 id（采纳证据锚点）。
+            trace_id: 撤销动作的链路标识。
+
+        Returns:
+            被撤销的事件条数（0 表示无可撤销证据）。
         """
         ...
 

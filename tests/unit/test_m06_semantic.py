@@ -68,6 +68,30 @@ def test_spec_conflict_detected() -> None:
     assert result.spec_conflict.suggest_grid is GridSpec._4X4
 
 
+def test_spec_conflict_horizontal_multi_metric_detected() -> None:
+    """§3.4 C 补规则：1x2 + 横向多指标 → SPEC_CONFLICT + 改选 4x2。"""
+    result = validate_semantic(
+        "做一个展示横向多指标的面板",
+        [],
+        grid=GridSpec._1X2,
+    )
+    assert result.ok is False
+    assert result.reason_code is ReasonCode.SPEC_CONFLICT
+    assert result.spec_conflict is not None
+    assert result.spec_conflict.suggest_grid is GridSpec._4X2
+
+
+def test_complex_panel_soft_caution_does_not_block() -> None:
+    """§3.4 C：2x2 + 复杂面板是提示级，放行不拦截（裸「面板」也不误伤）。"""
+    result = validate_semantic(
+        "在桌面做一个复杂面板",
+        [],
+        grid=GridSpec._2X2,
+    )
+    assert result.ok is True
+    assert result.reason_code is None
+
+
 def test_valid_semantic_passed() -> None:
     """合法描述 + 明确 grid → 通过。"""
     result = validate_semantic(

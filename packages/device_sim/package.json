@@ -1,0 +1,16 @@
+{
+  "name": "@widgetpilot/device-sim",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "ADR-010 设备 API 浏览器模拟运行时（window.widgetDevice），约束值单一事实来源 packages/contracts/device-apis.json",
+  "main": "ts/index.ts",
+  "types": "ts/index.ts",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test ts/*.test.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}

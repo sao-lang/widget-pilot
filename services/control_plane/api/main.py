@@ -22,11 +22,17 @@ from services.control_plane.attachments.s3_store import S3ObjectStore
 from services.control_plane.attachments.service import AttachmentService
 from services.control_plane.attachments.tenant_guard import SessionTenantGuard
 from services.control_plane.audit.pg_ledger import PgAuditLedger
+from services.control_plane.bundles.adoption import M07ArtifactAdoption
+from services.control_plane.bundles.corpus_link import AuditBackedCorpusLink
+from services.control_plane.bundles.m04_events import M04ArtifactSink
+from services.control_plane.bundles.pg_store import PgBundleStore
+from services.control_plane.bundles.service import BundleService
 from services.control_plane.sessions.pg_stores import PgSessionStore
 from services.control_plane.sessions.sse import RedisEventSource
 from services.orchestrator.adapters import RedisEventBus, make_event_decoder
 from services.orchestrator.dispatcher import TASK_QUEUE_KEY, RedisTaskQueue
-from services.orchestrator.memory.pg_stores import PgPreferenceStore
+from services.orchestrator.memory.pg_stores import PgPreferenceStore, PgProcedureStore
+from services.orchestrator.tasks.events import RedisSeqAllocator
 from services.orchestrator.tasks.pg_stores import PgGenerationTaskStore, PgTaskTurnStore
 
 # 环境变量名（结构性字面量集中一处）
@@ -63,18 +69,32 @@ def create_prod_app() -> FastAPI:
         event_sink=RedisEventSink(bus, redis_url),  # A8：事件跨 worker 可达 SSE
     )
     task_queue = RedisTaskQueue(redis_url, TASK_QUEUE_KEY)
+    audit = PgAuditLedger(dsn)  # A18：审计落 PG，跨实例可重放（B2 生产接线）
+    pref_store = PgPreferenceStore(dsn)  # M07 B6：偏好 REST 生产真实 PG
+    # M09 产物域生产装配：PG 索引 + Redis 事件扇出 + PG 审计 + M07 精确撤销。
+    # M10 语料撤回执行体未落地，用审计留证桥接（缺口见 M09 模型/功能缺口文档）。
+    bundle_service = BundleService(
+        store=PgBundleStore(dsn),
+        audit=audit,
+        events=M04ArtifactSink(bus, RedisSeqAllocator(redis_url)),
+        corpus=AuditBackedCorpusLink(audit),
+        preference_revocation=pref_store,
+        adoption=M07ArtifactAdoption(pref_store, PgProcedureStore(dsn)),
+        confirm_secret=secret,  # 删除二次确认 HMAC 密钥（与 JWT 同源，缺则 fail-fast）
+    )
     app = create_m04_app(
         user_store,
         session_store,
         secret,
         event_source=event_source,
         attachment_service=attachments,
-        audit=PgAuditLedger(dsn),  # A18：审计落 PG，跨实例可重放（B2 生产接线）
+        audit=audit,
         task_enqueuer=task_queue.enqueue,  # B1b：提交描述真实入队，驱动编排
-        preference_store=PgPreferenceStore(dsn),  # M07 B6：偏好 REST 生产真实 PG
+        preference_store=pref_store,
         # ADR-006/009：任务摘要 + 多任务消歧 + 版本历史（生产真实 PG）。
         task_store=PgGenerationTaskStore(dsn),
         task_turn_store=PgTaskTurnStore(dsn),
+        bundle_service=bundle_service,  # M09 bundles REST 挂载
     )
     health = create_health_app("control-plane", 8000)
 

@@ -15,6 +15,7 @@ from pathlib import Path
 
 from packages.agent_core.errors import CoreError
 from packages.contracts.enums import ReasonCode
+from services.sandbox_runner import container_cli
 
 _EXEC_IMAGE = "python:3.13-slim"
 _ISOLATION_NOTE = "docker-hardened"
@@ -54,8 +55,8 @@ def execute_code(code: str, timeout_s: int) -> CodeExecResult:
         CoreError: 超时或 docker 调用故障（infra, retryable）。
     """
     name = "wp-exec-" + uuid.uuid4().hex[:12]
-    cmd = [
-        "docker", "run", "--rm", "-i", "--name", name,
+    cmd = container_cli.run_command([
+        "run", "--rm", "-i", "--name", name,
         "--network", "none",
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges",
@@ -67,7 +68,7 @@ def execute_code(code: str, timeout_s: int) -> CodeExecResult:
         "--read-only",
         "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
         _EXEC_IMAGE, "python", "-",
-    ]
+    ])
     try:
         proc = subprocess.run(
             cmd, input=code, capture_output=True, text=True,
@@ -77,7 +78,9 @@ def execute_code(code: str, timeout_s: int) -> CodeExecResult:
         _kill_container(name)
         raise CoreError.infra(ReasonCode.SANDBOX_UNAVAILABLE, "code execution timeout") from exc
     except FileNotFoundError as exc:
-        raise CoreError.infra(ReasonCode.SANDBOX_UNAVAILABLE, "docker CLI unavailable") from exc
+        raise CoreError.infra(
+            ReasonCode.SANDBOX_UNAVAILABLE, f"{container_cli.cli()} CLI unavailable"
+        ) from exc
     return CodeExecResult(
         ok=proc.returncode == 0,
         stdout=proc.stdout,
@@ -90,7 +93,10 @@ def execute_code(code: str, timeout_s: int) -> CodeExecResult:
 def _kill_container(name: str) -> None:
     """超时强杀；桩环境可能再次抛超时，不能盖掉原始基础设施错误。"""
     safe = re.sub(r"[^A-Za-z0-9_-]", "-", name)
-    for args in (["docker", "kill", safe], ["docker", "rm", "-f", safe]):
+    for args in (
+        container_cli.run_command(["kill", safe]),
+        container_cli.run_command(["rm", "-f", safe]),
+    ):
         try:
             subprocess.run(args, capture_output=True, timeout=10, check=False)
         except (OSError, subprocess.TimeoutExpired):

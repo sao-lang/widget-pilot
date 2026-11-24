@@ -287,12 +287,32 @@ def test_a16_regression_gate_fires_on_change() -> None:
         threshold=base.threshold + 0.1,  # 模拟阈值变更
         conflict_count=base.conflict_count,
         capability_max=base.capability_max,
+        intent_vocab_version=base.intent_vocab_version,
+        density_caution_count=base.density_caution_count,
+        grid_synonym_count=base.grid_synonym_count,
     )
     gate = RegressionGate()
     assert gate.check(base, base) is False  # 无变更 → 不触发
     assert gate.check(base, changed) is True  # 有变更 → 触发
     assert gate.calls == 1
-    assert "threshold" in gate.last_change
+    assert gate.last_change == ["threshold"]  # 单一变量，无其它字段混入
+
+
+def test_a16_grid_synonym_expansion_triggers_gate() -> None:
+    """A16：规格别名/软提示词表扩容 → 回归门禁触发（扩表不可静默）。"""
+    from dataclasses import replace
+
+    from services.guardrails.change_gate import capture_snapshot, diff_config
+
+    base = capture_snapshot()
+    assert base.conflict_count == 4  # §3.4 C 四条硬冲突
+    assert base.density_caution_count == 1  # 复杂面板软提示
+    assert "grid_synonym_count" in diff_config(
+        base, replace(base, grid_synonym_count=base.grid_synonym_count + 1)
+    )
+    assert "density_caution_count" in diff_config(
+        base, replace(base, density_caution_count=base.density_caution_count + 1)
+    )
 
 
 # ── A17 检索片段注入 ────────────────────────────────────────────────────────

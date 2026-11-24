@@ -5,7 +5,8 @@
   "description": "pnpm workspace root（M01/M02 monorepo；真实包在 apps/* 与 packages/*）",
   "scripts": {
     "contracts:check": "pnpm --filter @widgetpilot/contracts run contracts:check",
-    "gen:all": "pnpm --filter @widgetpilot/contracts run gen:all"
+    "gen:all": "pnpm --filter @widgetpilot/contracts run gen:all",
+    "test:device-sim": "node --experimental-strip-types --test packages/device_sim/ts/index.test.ts packages/widget_bridge/ts/device-channel.test.ts"
   },
   "devDependencies": {
     "typescript": "^5.7.0"

@@ -19,6 +19,7 @@ from urllib.parse import quote
 import httpx
 
 from services.guardrails.output_ports import make_object_ref, parse_object_ref
+from services.sandbox_runner import container_cli
 
 __all__ = [
     "CommandResult",
@@ -206,10 +207,11 @@ class DockerCliRunner:
             self.kill(_container_name(args))
             raise SandboxUnavailableError("sandbox hard timeout") from exc
         except FileNotFoundError as exc:
-            raise SandboxUnavailableError("docker CLI unavailable") from exc
+            raise SandboxUnavailableError(f"{container_cli.cli()} CLI unavailable") from exc
         if proc.returncode != 0:
             raise SandboxUnavailableError(
-                f"docker run failed: {proc.returncode} {proc.stderr.decode(errors='replace')[:200]}"
+                f"{container_cli.cli()} run failed: "
+                f"{proc.returncode} {proc.stderr.decode(errors='replace')[:200]}"
             )
         return CommandResult(
             stdout=proc.stdout.decode("utf-8", errors="replace"),
@@ -221,7 +223,10 @@ class DockerCliRunner:
         """docker kill + rm -f 双保险；--rm 下 rm 为空操作。"""
         if not container_name:
             return
-        for args in (["docker", "kill", container_name], ["docker", "rm", "-f", container_name]):
+        for args in (
+            container_cli.run_command(["kill", container_name]),
+            container_cli.run_command(["rm", "-f", container_name]),
+        ):
             try:
                 subprocess.run(args, capture_output=True, timeout=15, check=False)
             except (OSError, subprocess.TimeoutExpired):
@@ -233,10 +238,10 @@ class DockerCliRunner:
             return False
         try:
             proc = subprocess.run(
-                [
-                    "docker", "ps", "-a", "--filter",
+                container_cli.run_command([
+                    "ps", "-a", "--filter",
                     f"name=^{container_name}$", "--format", "{{.ID}}",
-                ],
+                ]),
                 capture_output=True,
                 text=True,
                 timeout=15,

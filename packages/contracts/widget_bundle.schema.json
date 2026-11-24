@@ -94,6 +94,23 @@
         "snapshot_ref": { "type": "string" }
       }
     },
+    "versions": {
+      "type": "array",
+      "description": "M09 git 式版本链（§6.1 BundleVersion）；回滚沿用上一版编译产物",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["version_id", "parent_id", "compiled_ref", "compiled_hash", "manifest_hash", "created_at"],
+        "properties": {
+          "version_id": { "type": "string", "minLength": 1 },
+          "parent_id": { "type": "string", "description": "父版本；首节点为空串" },
+          "compiled_ref": { "type": "string", "minLength": 1 },
+          "compiled_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "manifest_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "created_at": { "type": "string", "format": "date-time" }
+        }
+      }
+    },
     "state": { "enum": ["GENERATED", "INSTALLED", "DELETED"], "description": "BundleState（M09 拥有状态机）" },
     "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "整包摘要，防篡改" },
     "created_at": { "type": "string", "format": "date-time" }

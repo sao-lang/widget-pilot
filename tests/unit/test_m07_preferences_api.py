@@ -45,6 +45,8 @@ class StubPreferenceStore:
         new_value: JsonValue,
         source: PreferenceSource,
         trace_id: str,
+        *,
+        bundle_ref: str = "",
     ) -> tuple[UserPreference, PreferenceEvent]:
         """写入字段（测试替身用简单覆盖，四操作规则由领域单测覆盖）。"""
         pref = self.get(user_id)
@@ -60,9 +62,15 @@ class StubPreferenceStore:
             user_id=user_id, session_id=session_id, field_name=field_name,
             old_value=old.value if old else None, new_value=new_value,
             source=source, source_weight=1.0, decision=PreferenceDecision.ADD,
-            trace_id=trace_id, created_at=now,
+            trace_id=trace_id, created_at=now, bundle_ref=bundle_ref,
         )
         return pref, event
+
+    def revoke_evidence_by_bundle(
+        self, user_id: str, bundle_id: str, trace_id: str
+    ) -> int:
+        """按 bundle 撤销采纳证据（测试替身：无事件链，返回 0）。"""
+        return 0
 
     def clear(
         self, user_id: str, fields: list[PreferenceField] | None, trace_id: str

@@ -63,6 +63,7 @@ def learn_from_adopted_artifact(
     recipe_id: str,
     widget_type: str,
     trace_id: str,
+    bundle_ref: str = "",
 ) -> tuple[UserPreference | None, UserProcedure | None]:
     """从用户采纳/安装产物学偏好与程序记忆（权重 0.3，D-10 第 4 类 + D-14）。
 
@@ -74,6 +75,7 @@ def learn_from_adopted_artifact(
         recipe_id: 产物采用的规程句柄（程序记忆键）。
         widget_type: 产物控件类型。
         trace_id: 链路追踪标识。
+        bundle_ref: 被采纳产物 id（M09 §9.0 精确撤销锚点，写入事件供删除/回滚撤销）。
 
     Returns:
         （写入后的偏好，程序记忆记录）；无对应信号的一侧为 None。
@@ -87,6 +89,7 @@ def learn_from_adopted_artifact(
             palette,
             PreferenceSource.ADOPTED_ARTIFACT,
             trace_id,
+            bundle_ref=bundle_ref,
         )
     procedure: UserProcedure | None = None
     if procedure_store is not None and recipe_id:

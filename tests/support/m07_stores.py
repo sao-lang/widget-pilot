@@ -51,6 +51,8 @@ class InMemoryPreferenceStore:
         new_value: object,
         source: PreferenceSource,
         trace_id: str,
+        *,
+        bundle_ref: str = "",
     ) -> tuple[UserPreference, PreferenceEvent]:
         """四操作写入：裁定后更新偏好并追加事件。"""
         value = cast(JsonValue, new_value)
@@ -69,6 +71,7 @@ class InMemoryPreferenceStore:
             decision=decision,
             trace_id=trace_id,
             created_at=now,
+            bundle_ref=bundle_ref,
         )
         if decision in (PreferenceDecision.ADD, PreferenceDecision.UPDATE):
             pref.fields[field_name] = FieldEvidence(
@@ -116,6 +119,35 @@ class InMemoryPreferenceStore:
             )
         pref.version += 1
         return pref
+
+    def revoke_evidence_by_bundle(
+        self, user_id: str, bundle_id: str, trace_id: str
+    ) -> int:
+        """按 bundle_id 精确撤销采纳证据（内存替身，供 M09 接线测试）。"""
+        now = utc_now_iso()
+        count = 0
+        touched: set[PreferenceField] = set()
+        new_events: list[PreferenceEvent] = []
+        for event in self.events:
+            if (
+                event.user_id == user_id
+                and event.bundle_ref == bundle_id
+                and event.source is PreferenceSource.ADOPTED_ARTIFACT
+                and event.revoked_at is None
+                and event.decision in (PreferenceDecision.ADD, PreferenceDecision.UPDATE)
+            ):
+                new_events.append(replace(event, revoked_at=now))
+                touched.add(event.field_name)
+                count += 1
+            else:
+                new_events.append(event)
+        self.events = new_events
+        if count:
+            pref = self.preferences.setdefault(user_id, UserPreference(user_id=user_id))
+            for field_name in touched:
+                pref.fields.pop(field_name, None)
+            pref.version += 1
+        return count
 
     def _mark(
         self,

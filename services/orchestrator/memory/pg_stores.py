@@ -106,6 +106,7 @@ def _event_hash(event: PreferenceEvent, prev_hash: str) -> str:
             str(event.source_weight),
             event.decision.value,
             event.trace_id,
+            event.bundle_ref,
             event.created_at,
         ]
     )
@@ -129,6 +130,7 @@ def _event_from_row(row: Mapping[str, object]) -> PreferenceEvent:
         created_at=str(row["created_at"]),
         superseded_at=str(row["superseded_at"]) if row["superseded_at"] else None,
         revoked_at=str(row["revoked_at"]) if row["revoked_at"] else None,
+        bundle_ref=str(row["bundle_ref"]) if row.get("bundle_ref") else "",
         row_hash=str(row["row_hash"]),
     )
 
@@ -205,6 +207,7 @@ def _append_event(session: Session, event: PreferenceEvent) -> str:
             decision=event.decision.value,
             superseded_at=event.superseded_at,
             revoked_at=event.revoked_at,
+            bundle_ref=event.bundle_ref,
             trace_id=event.trace_id,
             created_at=event.created_at,
             row_hash=row_hash,
@@ -244,11 +247,14 @@ class PgPreferenceStore:
         new_value: JsonValue,
         source: PreferenceSource,
         trace_id: str,
+        *,
+        bundle_ref: str = "",
     ) -> tuple[UserPreference, PreferenceEvent]:
         """四操作写入：返回写入后的偏好与刚追加的事件（含行哈希）。
 
         ADD/UPDATE 写偏好并 version+1；UPDATE 把旧事件标 superseded_at；
         NOOP 只记事件（低权重不覆盖高权重，I-M3）；DELETE 仅由 clear 入口触发。
+        bundle_ref 为采纳证据锚点（M09 §9.0 精确撤销），写入时确定并入 hash 链。
         """
         value = new_value
         with session_scope(self._factory) as session:
@@ -268,6 +274,7 @@ class PgPreferenceStore:
                 decision=decision,
                 trace_id=trace_id,
                 created_at=now,
+                bundle_ref=bundle_ref,
             )
             if decision in (PreferenceDecision.ADD, PreferenceDecision.UPDATE):
                 pref.fields[field_name] = FieldEvidence(
@@ -324,6 +331,81 @@ class PgPreferenceStore:
             _upsert_preference(session, pref)
         return pref
 
+    def revoke_evidence_by_bundle(
+        self, user_id: str, bundle_id: str, trace_id: str
+    ) -> int:
+        """按 bundle_id 精确撤销采纳证据（M09 §9.0 义务 2 / D-13）。
+
+        只失效 ``bundle_ref == bundle_id`` 且来源为 ADOPTED_ARTIFACT 的仍有效
+        ADD/UPDATE 事件（标 revoked_at，不删行），其贡献的偏好字段从聚合中移除，
+        version+1；其它 bundle / 其它来源证据不受影响。PG 失败抛异常 fail-closed。
+
+        Args:
+            user_id: 租户隔离键。
+            bundle_id: 被删除/回滚的产物 id（采纳证据锚点）。
+            trace_id: 撤销动作的链路标识，写进新追加的 DELETE 事件。
+
+        Returns:
+            被撤销的事件条数（0 表示该 bundle 无可撤销证据）。
+        """
+        with session_scope(self._factory) as session:
+            session.execute(select(func.pg_advisory_xact_lock(_PREF_ADVISORY_KEY)))
+            # 找该 bundle 仍有效、来源为采纳的 ADD/UPDATE 事件。
+            rows = session.execute(
+                select(
+                    PreferenceEventRow.id,
+                    PreferenceEventRow.field_name,
+                    PreferenceEventRow.old_value,
+                )
+                .where(PreferenceEventRow.user_id == user_id)
+                .where(PreferenceEventRow.bundle_ref == bundle_id)
+                .where(PreferenceEventRow.source == PreferenceSource.ADOPTED_ARTIFACT.value)
+                .where(PreferenceEventRow.revoked_at.is_(None))
+                .where(
+                    PreferenceEventRow.decision.in_(
+                        (PreferenceDecision.ADD.value, PreferenceDecision.UPDATE.value)
+                    )
+                )
+            ).all()
+            if not rows:
+                return 0
+            now = utc_now_iso()
+            pref = _load_preference(session, user_id)
+            touched_fields: set[PreferenceField] = set()
+            for row in rows:
+                # 逐条失效（只改列不删行，D-13）；用 id 精确定位避免误伤。
+                session.execute(
+                    update(PreferenceEventRow)
+                    .where(PreferenceEventRow.id == row.id)
+                    .values(revoked_at=now)
+                )
+                try:
+                    touched_fields.add(PreferenceField(str(row.field_name)))
+                except ValueError:
+                    continue
+            # 受影响字段从偏好聚合移除，追加 DELETE 事件（source=EXPLICIT 标记操作），
+            # version+1（I-M4 清除后版本递增）。
+            for field_name in touched_fields:
+                old = pref.fields.pop(field_name, None)
+                deleted = PreferenceEvent(
+                    user_id=user_id,
+                    session_id=None,
+                    field_name=field_name,
+                    old_value=old.value if old else None,
+                    new_value=None,
+                    source=PreferenceSource.EXPLICIT,
+                    source_weight=SOURCE_WEIGHT[PreferenceSource.EXPLICIT],
+                    decision=PreferenceDecision.DELETE,
+                    trace_id=trace_id,
+                    created_at=now,
+                    revoked_at=now,
+                    bundle_ref=bundle_id,
+                )
+                _append_event(session, deleted)
+            pref.version += 1
+            _upsert_preference(session, pref)
+            return len(rows)
+
     def verify_event_chain(self) -> bool:
         """从 PG 读回全链：按 id 顺序复算 prev_hash 衔接与行哈希是否一致。"""
         with session_scope(self._factory) as session:
@@ -341,6 +423,7 @@ class PgPreferenceStore:
                     PreferenceEventRow.created_at,
                     PreferenceEventRow.superseded_at,
                     PreferenceEventRow.revoked_at,
+                    PreferenceEventRow.bundle_ref,
                     PreferenceEventRow.row_hash,
                 ).order_by(PreferenceEventRow.id)
             ).all()

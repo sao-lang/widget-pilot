@@ -53,3 +53,38 @@ def test_execute_code_result_dataclass_frozen():
     """CodeExecResult 不可变，防止执行后被篡改。"""
     r = CodeExecResult(ok=True, stdout="x", stderr="", exit_code=0, isolation_note="none")
     assert r.isolation_note == "none"
+
+
+def test_container_cli_podman_switch(monkeypatch):
+    """容器 CLI 可切 podman（默认 docker），命令前缀正确（docker 卸载后可用 podman）。"""
+    from services.sandbox_runner import container_cli
+
+    monkeypatch.delenv("WIDGETPILOT_CONTAINER_CLI_PATH", raising=False)
+    monkeypatch.delenv("WIDGETPILOT_CONTAINER_CLI", raising=False)
+    assert container_cli.cli() == "docker"
+    assert container_cli.run_command(["run", "--rm"]) == ["docker", "run", "--rm"]
+
+    monkeypatch.setenv("WIDGETPILOT_CONTAINER_CLI", "podman")
+    assert container_cli.cli() == "podman"
+    assert container_cli.run_command(["run", "--rm"]) == ["podman", "run", "--rm"]
+    assert container_cli.info_probe()[0] == "podman"
+
+    # 绝对路径优先（Windows podman 常不在 PATH）
+    monkeypatch.setenv("WIDGETPILOT_CONTAINER_CLI_PATH", "D:/apps/podman/podman.exe")
+    assert container_cli.cli() == "D:/apps/podman/podman.exe"
+
+
+def test_execute_code_uses_configured_cli(monkeypatch):
+    """execute_code 命令前缀随容器 CLI 配置变化（默认 docker）。"""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "ok\n", "")
+
+    monkeypatch.setattr("services.sandbox_runner.executor.subprocess.run", fake_run)
+    monkeypatch.setenv("WIDGETPILOT_CONTAINER_CLI", "podman")
+    monkeypatch.delenv("WIDGETPILOT_CONTAINER_CLI_PATH", raising=False)
+    execute_code("print('ok')", timeout_s=5)
+    assert calls[0][0] == "podman"
+    assert calls[0][1] == "run"
