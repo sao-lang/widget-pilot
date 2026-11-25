@@ -445,8 +445,11 @@ def _finalize(
         handoff=repair_count >= MAX_REPAIR,
         elapsed_ms=int((time.monotonic() - started) * 1000),
     )
-    with _CACHE_LOCK:
-        _RESULT_CACHE[key] = result
+    # N3（review）：只缓存通过结果。失败可能是瞬时环境故障（沙箱/网络抖动），
+    # 永久缓存 failed 会让同 run 重投复用旧失败造成假失败；失败每次真跑。
+    if result.passed:
+        with _CACHE_LOCK:
+            _RESULT_CACHE[key] = result
     return result
 
 

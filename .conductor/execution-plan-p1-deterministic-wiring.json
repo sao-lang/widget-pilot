@@ -1,0 +1,141 @@
+{
+  "version": "1.1",
+  "goal": "P1：把确定性通道接进生产 dispatcher（validation.ok 后带开关分流），命中走三门禁+成包，fallback 继续 LLM；履行 process_one 后置义务，不重复安全校验",
+  "source": "user_request",
+  "mode": "conductor",
+  "template": "conductor.4-development",
+  "confidence": 0.9,
+  "assumptions": [
+    "P0 已打通：services/deterministic/ 端到端 11 单测 + 1 podman 真沙箱集成测试全绿，零云端 LLM",
+    "用户已确认按 6 阶段计划执行，本轮仅 P1 生产接线，P2-P6 不在范围",
+    "路由卡：场景4/full，覆盖矩阵不需要，省掉 subagent/git/ledger",
+    "同一安全校验只做一次：复用 validate_chain 的 validation 结果，解释器不重复安全裁判",
+    "命中分支必须履行 process_one 全部后置义务（ack/fan-in/租约/事件 seq），不能旁路丢状态"
+  ],
+  "clarifications": [],
+  "tasks": [
+    {"id": "T1", "goal": "S2 规格固化：change-contract（无公共契约/DB 变更）+ 影响面核实"},
+    {"id": "T2", "goal": "TDD RED：dispatcher 生产接线失败测试（命中分流/开关/fallback/后置义务）"},
+    {"id": "T3", "goal": "实现：Dispatcher 注入钩子 + worker 装配 + 四分支回写"},
+    {"id": "T4", "goal": "门禁：pytest/ruff/pyright/contracts/source_purity + 独立 review"}
+  ],
+  "nodes": [
+    {
+      "id": "n_impact-SCAN",
+      "kind": "tool",
+      "ref": "impact_analysis.py",
+      "route_ref": "impact/SCAN",
+      "label": "S2 影响面与规格核实",
+      "action": "核实 Dispatcher 全部构造点、process_one 的 validation.ok→run() 分流、后置义务（ack/fan-in/租约/事件 seq）路径；固化 change-contract（声明无公共契约/DB 变更）",
+      "command": "grep 影响面 + 写 change-contract + contract_check.py",
+      "command_type": "command",
+      "exit_criteria": "影响面清单齐全；change-contract confirmed；无公共契约变更声明",
+      "exit_check": {"kind": "exit_code", "expect": "0", "evidence": "影响面清单 + contract_check PASS"},
+      "on_fail": "retry",
+      "on_fail_next": "n_impact-SCAN"
+    },
+    {
+      "id": "n_red_wiring",
+      "kind": "tool",
+      "ref": "tdd",
+      "route_ref": "tdd/RED",
+      "label": "TDD RED：生产接线失败测试",
+      "action": "写失败测试：Dispatcher 注入 deterministic_runner 后 compiled 命中不进 run() 且成包回写、llm_fallback 继续 run()、rejected/clarification 回写状态、开关 off 零注入、命中履行后置义务",
+      "command": ".venv/Scripts/python.exe -m pytest tests/unit/test_v3_deterministic_wiring.py -q",
+      "command_type": "command",
+      "exit_criteria": "RED：ImportError/签名不匹配/断言失败，原因是接线不存在",
+      "exit_check": {"kind": "exit_code", "expect": "nonzero", "evidence": "pytest RED 输出"},
+      "on_fail": "ask",
+      "on_fail_next": "n_impact-SCAN"
+    },
+    {
+      "id": "n_green_wiring",
+      "kind": "tool",
+      "ref": "tdd",
+      "route_ref": "tdd/GREEN",
+      "label": "TDD GREEN：实现生产接线",
+      "action": "实现：Dispatcher 增 deterministic_runner 可选注入 + WIDGETPILOT_DETERMINISTIC 开关；process_one 在 validation.ok 后分流；worker 装配钩子；四分支回写会话状态且履行后置义务",
+      "command": ".venv/Scripts/python.exe -m pytest tests/unit/test_v3_deterministic_wiring.py -q && .venv/Scripts/python.exe -m ruff check services/orchestrator/dispatcher.py services/orchestrator/worker.py services/deterministic/",
+      "command_type": "command",
+      "exit_criteria": "GREEN：接线测试全过 + ruff 绿",
+      "exit_check": {"kind": "exit_code", "expect": "0", "evidence": "pytest 全绿 + ruff All checks passed"},
+      "on_fail": "retry",
+      "on_fail_next": "n_red_wiring"
+    },
+    {
+      "id": "n_gate",
+      "kind": "gate",
+      "label": "S4 全量证据门禁",
+      "action": "全量 pytest + ruff + pyright + contracts + source_purity --strict（新增目录）",
+      "command": ".venv/Scripts/python.exe -m pytest -q && .venv/Scripts/python.exe -m ruff check . && npx pyright --pythonpath .venv/Scripts/python.exe && pnpm contracts:check",
+      "command_type": "gate_check",
+      "atomic": true,
+      "exit_criteria": "全绿；source_purity 新增目录零污染",
+      "exit_check": {"kind": "exit_code", "expect": "0", "evidence": "各命令 rc=0 + pytest passed"},
+      "on_fail": "retry",
+      "on_fail_next": "n_green_wiring"
+    },
+    {
+      "id": "n_review-DISPATCH",
+      "kind": "skill",
+      "ref": "review",
+      "route_ref": "review/DISPATCH",
+      "label": "S5 独立复核",
+      "action": "派全新上下文子代理独立 review：七维+接线四问+后置义务不丢+开关回退+同一校验只一次；Blocker 清零才放行",
+      "command": "派新子代理，brief 自包含 diff+规格+完成标准",
+      "command_type": "judgment",
+      "exit_criteria": "Blocker=0 的独立报告",
+      "exit_check": {"kind": "file_content", "expect": "Blocker=0", "evidence": "overview 独立 review 章节"},
+      "on_fail": "retry",
+      "on_fail_next": "n_green_wiring",
+      "when": "standard 或 full 档"
+    },
+    {
+      "id": "n_memory-RECORD",
+      "kind": "action",
+      "ref": "memory",
+      "route_ref": "memory/RECORD",
+      "label": "S5 沉淀收尾",
+      "action": "追加 .workbuddy/memory/2026-11-25.md（P1 接线结论+门禁数字+剩余缺口），overview L0 收口",
+      "command": "追加工作日志 + overview 收口",
+      "command_type": "judgment",
+      "exit_criteria": "日志已追加、overview 已收口",
+      "exit_check": {"kind": "file_content", "expect": "P1 接线记录", "evidence": ".workbuddy/memory/2026-11-25.md"},
+      "on_fail": "retry",
+      "on_fail_next": "n_memory-RECORD"
+    },
+    {
+      "id": "n_done",
+      "kind": "gate",
+      "label": "收尾",
+      "action": "路线走完",
+      "command": "plan_run.py next 返回 finished",
+      "command_type": "gate_check",
+      "atomic": true,
+      "exit_criteria": "next 返回路线已走完",
+      "exit_check": {"kind": "exit_code", "expect": "0", "evidence": "plan_run next finished"},
+      "on_fail": "retry",
+      "on_fail_next": "n_memory-RECORD"
+    }
+  ],
+  "edges": [
+    {"from": "n_impact-SCAN", "to": "n_red_wiring", "type": "seq"},
+    {"from": "n_red_wiring", "to": "n_green_wiring", "type": "seq"},
+    {"from": "n_green_wiring", "to": "n_gate", "type": "seq"},
+    {"from": "n_gate", "to": "n_review-DISPATCH", "type": "seq"},
+    {"from": "n_review-DISPATCH", "to": "n_memory-RECORD", "type": "seq"},
+    {"from": "n_memory-RECORD", "to": "n_done", "type": "seq"}
+  ],
+  "paths": [
+    {
+      "id": "P1",
+      "label": "影响面 / TDD RED / GREEN / 全量门禁 / review / memory",
+      "guard": "默认路线（无分支条件）",
+      "steps": ["n_impact-SCAN", "n_red_wiring", "n_green_wiring", "n_gate", "n_review-DISPATCH", "n_memory-RECORD", "n_done"],
+      "terminal": "n_done",
+      "is_happy": true
+    }
+  ],
+  "budget": {"max_rounds": 8, "max_steps": 20, "noop_limit": 3},
+  "meta": {"created": "2026-11-25", "context_refs": ["f76a7264", "deterministic-wiring-p1"], "tier": "full", "expanded": true}
+}

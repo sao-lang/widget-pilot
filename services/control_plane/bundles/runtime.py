@@ -30,8 +30,13 @@ GRID_PX: dict[GridSpec, tuple[int, int]] = {
     GridSpec._2X4: (160, 320),
     GridSpec._4X2: (320, 160),
     GridSpec._4X4: (320, 320),
+    # v2fix：新增 4 规格，按 cell=80px 计算（与 sandbox_runner/render.py 一致）
+    GridSpec._2X3: (160, 240),
+    GridSpec._3X2: (240, 160),
+    GridSpec._4X3: (320, 240),
+    GridSpec._5X3: (400, 240),
 }
-"""六种规格 → (w,h) 真实像素映射（§6.3 / A17，不统一拉伸）。"""
+"""规格 → (w,h) 真实像素映射（§6.3 / A17，按 cell=80 计算，不统一拉伸）。"""
 
 STRICT_CSP: str = (
     "default-src 'none'; "

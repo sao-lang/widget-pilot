@@ -572,7 +572,7 @@ export interface components {
         /** @enum {string} */
         SessionState: "DRAFT" | "RUNNING" | "PAUSED" | "AWAITING_INPUT" | "VALIDATING" | "COMPLETED" | "FAILED" | "CANCELLED";
         /** @enum {string} */
-        GridSpec: "2x2" | "2x4" | "4x2" | "4x4" | "2x1" | "1x2";
+        GridSpec: "2x1" | "1x2" | "2x2" | "2x3" | "2x4" | "3x2" | "4x2" | "4x3" | "4x4" | "5x3";
         /** @enum {string} */
         AttachmentRole: "visual_reference" | "content_extraction" | "data_source" | "style_reference";
         /**
@@ -654,7 +654,7 @@ export interface components {
                         state?: components["schemas"]["SessionState"];
                         grid?: components["schemas"]["GridSpec"];
                         resume_hint?: string;
-                        bundle_refs?: string[];
+                        bundle_ref?: string | null;
                         target_task_id?: string | null;
                         /** @description ADR-006/009 会话内任务摘要（generation_task） */
                         tasks?: {

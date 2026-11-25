@@ -76,6 +76,17 @@ class S3ObjectStore:
             f"att/{user_id}/{session_id}/{attachment_id}/insight.json", data
         )
 
+    def put_derived(self, source_key: str, name: str, data: bytes) -> str:
+        """写派生件到 derived/ 前缀，返回 ``key#sha256:<hash>`` 引用（ADR-014）。
+
+        source_key 为原文 key（att/.../original）；派生件放独立前缀，
+        与原文/洞察物理隔离，M10 入库门禁对两者都拒。
+        """
+        base = source_key.partition("#sha256:")[0]
+        key = f"derived/{base}/{name}"
+        ref = self._put(key, data)
+        return f"{ref.key}#sha256:{ref.hash}"
+
     def get_with_hash_verify(self, key: str, expected_hash: str) -> bytes:
         """按 key 读取并校验 sha256，篡改即抛（§6.4 读时校验）。"""
         data = self._get(key)

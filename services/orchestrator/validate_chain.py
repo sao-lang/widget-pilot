@@ -21,7 +21,7 @@ from services.guardrails.audit import (
 )
 from services.guardrails.guard_hit import GuardHitStore
 from services.guardrails.input_guard import check_input
-from services.guardrails.intent_cascade import classify_intent, is_out_of_scope
+from services.guardrails.intent_cascade import is_out_of_scope
 from services.guardrails.ports import (
     Embedder,
     IntentClassifier,
@@ -37,6 +37,7 @@ from services.guardrails.types import (
     EventPayload,
     GridSource,
     GuardHitType,
+    HitDecision,
     InputGuardHit,
     IntentCategory,
     RouteLayer,
@@ -259,15 +260,59 @@ def validate_chain(
             "code": (
                 "OK"
                 if guard.passed
-                else _RC_BY_HIT.get(
-                    guard.hits[0].hit_type.value, ReasonCode.GUARD_INPUT_HIT
-                ).value
+                else (
+                    # ADR-020 D1：AWAIT 命中（混排反问）的事件码要与 notice 一致，
+                    # 不能报 INTENT_OUT_OF_SCOPE 误导前端/监控为硬拒。
+                    ReasonCode.CLARIFICATION_REQUIRED.value
+                    if guard.hits[0].decision is HitDecision.AWAIT
+                    else _RC_BY_HIT.get(
+                        guard.hits[0].hit_type.value, ReasonCode.GUARD_INPUT_HIT
+                    ).value
+                )
             ),
         },
     )
     if not guard.passed and guard.hits:
         hit = guard.hits[0]
-        store.log_hit(session_id, run_id, hit, trace_id)
+        # ADR-020 D1：AWAIT（混排反问）不是护栏拒绝，不写 guard_hit——
+        # 否则 `hit_type=INTENT` 的 FPR 统计会把反问误算成越界硬拒。
+        if hit.decision is not HitDecision.AWAIT:
+            store.log_hit(session_id, run_id, hit, trace_id)
+        # ADR-020 D1 强化：AWAIT 命中（生成+教程混排）走语义挂起反问，
+        # 带两个片段让用户确认；不是硬拒（INTENT_OUT_OF_SCOPE）。
+        # dispatcher 见 CLARIFICATION_REQUIRED 不在 _REJECT_CODES → AWAITING_INPUT。
+        if hit.decision is HitDecision.AWAIT:
+            # S2：guard_hit 不写（保 FPR 统计纯净），但 route_log 留一条
+            # CLARIFICATION_REQUIRED，保证持久化审计看得到这次反问。
+            rlog.append(
+                IntentRouteLogRow(
+                    session_id,
+                    run_id,
+                    RouteLayer.L1,
+                    ReasonCode.CLARIFICATION_REQUIRED.value,
+                    None,
+                    0,
+                    INTENT_SAMPLES_VERSION,
+                    trace_id,
+                    None,
+                )
+            )
+            _emit(
+                event_sink,
+                "notice",
+                _notice_payload(
+                    ReasonCode.CLARIFICATION_REQUIRED,
+                    (hit.judgement,),
+                    None,
+                    None,
+                ),
+            )
+            return ValidationResult(
+                ok=False,
+                reason_code=ReasonCode.CLARIFICATION_REQUIRED,
+                trace_id=trace_id,
+                evidence_ref=ref,
+            )
         rc = _RC_BY_HIT.get(hit.hit_type.value, ReasonCode.GUARD_INPUT_HIT)
         return _terminal(rc, trace_id, event_sink, ref)
 
@@ -313,29 +358,24 @@ def validate_chain(
             evidence_ref=ref,
         )
 
-    # step11：意图四级级联（L1 已由 intent 参数给出，此处再确认放行方向意图）
-    decision = classify_intent(
-        description,
-        embedder=embedder,
-        classifier=classifier,
-        gateway=gateway,
-        on_fallback=on_fallback,
-    )
+    # ADR-020 D2：意图裁判唯一化——拒绝类由 step0 `is_out_of_scope` 零模型短路，
+    # 放行方向由 step7 `check_input` 意图白名单裁定，二者已足够。
+    # 原 step11 四级意图级联与此重复且会打架（ADR-004 硬样本
+    # 「桌面放个2x2天气卡片，显示今天天气怎么样」被 L1 二次裁判误拒），按
+    # v3 spec FR-11 删除本处调用。级联函数本身保留供独立端口/单测使用。
     rlog.append(
         IntentRouteLogRow(
             session_id,
             run_id,
-            decision.route_layer,
-            decision.intent.value,
-            decision.similarity,
-            decision.latency_ms,
+            RouteLayer.L1,
+            intent,
+            None,
+            0,
             INTENT_SAMPLES_VERSION,
             trace_id,
-            decision.fallback_reason,
+            None,
         )
     )
-    if decision.intent is IntentCategory.OUT_OF_SCOPE:
-        return _terminal(ReasonCode.INTENT_OUT_OF_SCOPE, trace_id, event_sink, ref)
 
     # ADR-003：技能预取已删除（纯按需加载）。规程 id 由 registry.level0() 全量列给模型，
     # 经 LOAD_CAPABILITY 自主选择，不再随 ValidationResult 下发 recipe_ids。
@@ -346,7 +386,9 @@ def validate_chain(
     widget = WidgetType.CUSTOM
     # ADR-003：need_skill 请求链已删除——模型经 LOAD_CAPABILITY 按需加载，
     # 五项闸门在 loop 内执行（capability_guard_adapter），审计写 capability_audit_log。
-    effective_tier = decision.model_tier or ModelTier.STANDARD
+    # ADR-020 D2：step11 删除后 routing 事件取 L1 确定性值——意图裁判已在
+    # step0/step7 完成，此处只做可观测留证，不再重复级联打分。
+    effective_tier = ModelTier.STANDARD
     _emit(
         event_sink,
         "routing",
@@ -354,18 +396,18 @@ def validate_chain(
             "widget_type": widget.value,
             "grid": effective_grid.value,
             "model_tier": effective_tier.value,
-            "threshold_hit": decision.threshold_hit,
-            "intent_normalized": decision.intent.value,
-            "route_layer": decision.route_layer.value,
-            "similarity": decision.similarity,
-            "latency_ms": decision.latency_ms,
-            "fallback_reason": decision.fallback_reason,
+            "threshold_hit": False,
+            "intent_normalized": intent,
+            "route_layer": RouteLayer.L1.value,
+            "similarity": None,
+            "latency_ms": 0,
+            "fallback_reason": None,
         },
     )
     _emit(
         event_sink,
         "plan",
-        {"steps": ["语义校验", "进护栏", "意图级联（门禁）", "能力目录建议"]},
+        {"steps": ["语义校验", "进护栏", "意图裁判（L1 唯一）", "能力目录建议"]},
     )
 
     return ValidationResult(
@@ -374,11 +416,11 @@ def validate_chain(
         grid=effective_grid,
         grid_source=semantic.grid_source,
         model_tier=effective_tier,
-        intent_normalized=decision.intent,
+        intent_normalized=IntentCategory(intent),
         attachment_refs=tuple(a.attachment_id for a in attachments),
-        route_layer=decision.route_layer,
-        similarity=decision.similarity,
-        latency_ms=decision.latency_ms,
+        route_layer=RouteLayer.L1,
+        similarity=None,
+        latency_ms=0,
         trace_id=trace_id,
         evidence_ref=ref,
     )

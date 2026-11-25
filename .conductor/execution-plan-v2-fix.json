@@ -1,0 +1,247 @@
+{
+  "version": "1.1",
+  "goal": "v2 复杂描述拷问出的 5 类真 bug + 契约扩容 + 会话查询/真取消全修：解释器语义止血、style 接线、判定收敛、grid 规格扩容四同步、0LLM session_query 与真取消",
+  "source": "user_request",
+  "mode": "conductor",
+  "template": "conductor.8-debug",
+  "confidence": 0.9,
+  "assumptions": [
+    "用户 2026-11-26 拍板：全修含第4组契约扩容，第5组会话查询+真取消一起做",
+    "grid 扩容为公共契约变更：enums.source.json→enums.py/ts→schema→constants→前端，pnpm contracts:check drift=[]",
+    "保持 898 passed 基线不回退；安全门前置顺序不动（Round4 教训）"
+  ],
+  "clarifications": [
+    "AskUserQuestion 两项：全修含契约 / 第5组本轮一起做"
+  ],
+  "tasks": [
+    {
+      "id": "T1",
+      "goal": "S2 规格：change-contract + 覆盖矩阵 + 影响面"
+    },
+    {
+      "id": "T2",
+      "goal": "TDD RED：v2 症状固化必红测试"
+    },
+    {
+      "id": "T3",
+      "goal": "第1组 rule.py 语义止血（实例数/槽位/意图/摘要）"
+    },
+    {
+      "id": "T4",
+      "goal": "第2+3组 style 接线 + 判定收敛"
+    },
+    {
+      "id": "T5",
+      "goal": "第4组 grid 扩容契约四同步 + 第5组 session_query/真取消"
+    },
+    {
+      "id": "T6",
+      "goal": "全量门禁 + 独立复审"
+    }
+  ],
+  "nodes": [
+    {
+      "kind": "tool",
+      "action": "规格固化：从澄清输出抽取六段契约（Why/Delta/Invariants/Affected/Acceptance/Open），落 .conductor/contracts/，跑契约检查",
+      "command": "python ../conductor-brainstorm/scripts/contract_check.py --contract <契约路径>",
+      "command_type": "command",
+      "exit_criteria": "契约文件存在且检查退出码 0，Acceptance 灌入台账",
+      "exit_check": {
+        "kind": "exit_code",
+        "expect": "0",
+        "evidence": "contract_check.py rc=0 + 契约文件路径"
+      },
+      "on_fail": "retry",
+      "on_fail_next": "S2-clarify",
+      "when": "standard 或 full 档",
+      "atomic": true,
+      "id": "n_spec-S2-contract",
+      "label": "S2 规格固化 · S2-contract",
+      "serves_task": "T1",
+      "ref": "brainstorm",
+      "route_ref": "brainstorm/S2-contract",
+      "expanded_from": "n_spec",
+      "next": "n_red"
+    },
+    {
+      "kind": "skill",
+      "action": "派全新上下文子代理做独立 review：七维 + 接线四问 + 功能遗漏/断点，红队视角找反例",
+      "command": "派新子代理，brief 自包含 diff + 规格 + 完成标准",
+      "command_type": "judgment",
+      "exit_criteria": "收到新子代理报告（非复用旧报告），含 Blocker 分级",
+      "exit_check": {
+        "kind": "file_content",
+        "expect": "报告含 Blocker/Should/Nit 与 文件:行号",
+        "evidence": "overview 独立 review 章节"
+      },
+      "on_fail": "retry",
+      "on_fail_next": "review/DISPATCH",
+      "when": "standard 或 full 档",
+      "atomic": true,
+      "id": "n_review-DISPATCH",
+      "label": "S5 独立复审 · DISPATCH",
+      "serves_task": "T6",
+      "ref": "review",
+      "route_ref": "review/DISPATCH",
+      "expanded_from": "n_review"
+    },
+    {
+      "id": "n_red",
+      "kind": "tool",
+      "ref": "tdd",
+      "route_ref": "tdd/RED",
+      "label": "TDD RED：v2 症状必红测试",
+      "action": "写测试：V01 单widget n=1、V01 style不抽闲聊、V20 interaction不抽指代词、V20 不判CANCEL、V19 摘要不误伤、2x3 grid可解析、style 进 spec、session_query 分支、真取消分支",
+      "command": ".venv/Scripts/python.exe -m pytest tests/unit/test_v2_fix.py -q",
+      "command_type": "command",
+      "exit_criteria": "RED：断言失败原因是缺行为",
+      "exit_check": {
+        "kind": "exit_code",
+        "expect": "nonzero",
+        "evidence": "pytest RED 输出"
+      },
+      "on_fail": "ask",
+      "on_fail_next": "n_spec",
+      "next": "n_green1"
+    },
+    {
+      "id": "n_green1",
+      "kind": "tool",
+      "ref": "tdd",
+      "route_ref": "tdd/GREEN",
+      "label": "第1组：rule.py 语义止血",
+      "action": "修 _anchors/n 公式（去 len(anchors) 下界、按分句+显式count驱动）、槽位正则分句+黑名单、_intent_category 分句优先+CANCEL 不 compiled、_LOCAL_NEGATIVE 摘要改创作语境",
+      "command": ".venv/Scripts/python.exe -m pytest tests/unit/test_v2_fix.py -k 'instance or slot or intent or negative' -q && .venv/Scripts/python.exe -m ruff check services/guardrails/interpreter/rule.py",
+      "command_type": "command",
+      "exit_criteria": "第1组测试绿 + ruff 绿",
+      "exit_check": {
+        "kind": "exit_code",
+        "expect": "0",
+        "evidence": "pytest rc=0 + ruff rc=0"
+      },
+      "on_fail": "retry",
+      "on_fail_next": "n_red",
+      "next": "n_green2"
+    },
+    {
+      "id": "n_green2",
+      "kind": "tool",
+      "ref": "tdd",
+      "route_ref": "tdd/GREEN",
+      "label": "第2+3组：style 接线 + 判定收敛",
+      "action": "compiler.py style palette 填充（颜色 token→hex）；channel/dispatcher 判定收敛：解释器缺 grid 不被选择器覆盖、两链分歧留告警",
+      "command": ".venv/Scripts/python.exe -m pytest tests/unit/test_v2_fix.py -k 'style or converge' -q && .venv/Scripts/python.exe -m ruff check services/deterministic/compiler.py services/deterministic/channel.py",
+      "command_type": "command",
+      "exit_criteria": "第2+3组测试绿",
+      "exit_check": {
+        "kind": "exit_code",
+        "expect": "0",
+        "evidence": "pytest rc=0"
+      },
+      "on_fail": "retry",
+      "on_fail_next": "n_green1",
+      "next": "n_green3"
+    },
+    {
+      "id": "n_green3",
+      "kind": "tool",
+      "ref": "tdd",
+      "route_ref": "tdd/GREEN",
+      "label": "第4+5组：契约扩容 + session_query + 真取消",
+      "action": "enums.source.json 加 2x3/3x2/4x3/5x3 等四同步；channel 加 session_query 分支走 SessionQueryPort；真取消分支不编译不重成包",
+      "command": "pnpm gen:all && .venv/Scripts/python.exe -m pytest tests/unit/test_v2_fix.py -k 'grid or query or cancel' -q && pnpm contracts:check",
+      "command_type": "command",
+      "exit_criteria": "第4+5组测试绿 + drift=[]",
+      "exit_check": {
+        "kind": "exit_code",
+        "expect": "0",
+        "evidence": "pytest rc=0 + contracts drift=[]"
+      },
+      "on_fail": "retry",
+      "on_fail_next": "n_green2",
+      "next": "n_evidence"
+    },
+    {
+      "id": "n_evidence",
+      "kind": "tool",
+      "ref": "verify.py",
+      "route_ref": "tdd/EVIDENCE",
+      "label": "S4 全量门禁",
+      "action": "全量 pytest + ruff + pyright 本轮文件 + contracts drift + v2 探针复跑（20 条复杂描述）",
+      "command": ".venv/Scripts/python.exe -m pytest -q && .venv/Scripts/python.exe -m ruff check . --exclude widgetpilot-m10-m11 && npx pyright --pythonpath .venv/Scripts/python.exe services/guardrails/interpreter/rule.py services/deterministic/compiler.py services/deterministic/channel.py && pnpm contracts:check && PYTHONPATH=. .venv/Scripts/python.exe .conductor/probes/complex_description_probe_v2.py",
+      "command_type": "command",
+      "exit_criteria": "全绿且 v2 探针症状消失",
+      "exit_check": {
+        "kind": "exit_code",
+        "expect": "0",
+        "evidence": "门禁 rc=0 + v2 探针输出"
+      },
+      "on_fail": "retry",
+      "on_fail_next": "n_green3",
+      "next": "n_review-DISPATCH"
+    }
+  ],
+  "budget": {
+    "max_steps": 40,
+    "max_retries": 8,
+    "noop_limit": 2
+  },
+  "meta": {
+    "created": "2026-11-26",
+    "context_refs": [
+      "v2 根因报告",
+      "覆盖矩阵-复杂描述"
+    ],
+    "expanded": true
+  },
+  "paths": [
+    {
+      "id": "P1",
+      "label": "v2全修正常路线",
+      "guard": "默认路线",
+      "steps": [
+        "n_spec-S2-contract",
+        "n_red",
+        "n_green1",
+        "n_green2",
+        "n_green3",
+        "n_evidence",
+        "n_review-DISPATCH"
+      ],
+      "terminal": "n_review-DISPATCH",
+      "is_happy": true
+    }
+  ],
+  "edges": [
+    {
+      "from": "n_spec-S2-contract",
+      "to": "n_red",
+      "type": "seq"
+    },
+    {
+      "from": "n_red",
+      "to": "n_green1",
+      "type": "seq"
+    },
+    {
+      "from": "n_green1",
+      "to": "n_green2",
+      "type": "seq"
+    },
+    {
+      "from": "n_green2",
+      "to": "n_green3",
+      "type": "seq"
+    },
+    {
+      "from": "n_green3",
+      "to": "n_evidence",
+      "type": "seq"
+    },
+    {
+      "from": "n_evidence",
+      "to": "n_review-DISPATCH",
+      "type": "seq"
+    }
+  ]
+}

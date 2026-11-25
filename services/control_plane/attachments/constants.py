@@ -32,3 +32,32 @@ MAX_KEYFRAMES: int = 3
 
 MAX_TEXT_ROWS: int = 1000
 """`data_source` 解析行数上限。"""
+
+# --- ADR-014 多媒体工具集硬上限（集中一处，无在线关闭开关）-----------------
+
+MAX_CLIP_S: float = 15.0
+"""视频片段导出最长秒数（防超长导出耗尽存储/超时）。"""
+
+MAX_CROP_PADDING: int = 64
+"""裁剪框外扩像素上限。"""
+
+MAX_TEXT_OUT: int = 8000
+"""文本类工具输出字符上限（超长截断并标记 truncated）。"""
+
+MAX_CHUNKS: int = 200
+"""文本切片最多块数。"""
+
+MAX_FRAME_TIMES: int = 5
+"""frames_ocr 单次指定时刻上限。"""
+
+MAX_EXTRACT_FIELDS: int = 20
+"""extract_fields 单次抽取字段上限。"""
+
+# --- ADR-014 CSV 工具组硬上限 ----------------------------------------------
+
+MAX_CSV_PREVIEW_ROWS: int = 200
+"""CSV 工具单次返回预览行数上限（防大结果撑爆 prompt）。"""
+
+MAX_CSV_COLUMNS: int = 100
+"""CSV 列数上限（防畸形宽表耗尽内存）。"""
+

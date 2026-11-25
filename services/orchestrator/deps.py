@@ -279,8 +279,8 @@ def build_deps(
     bus = RedisEventBus(redis_url, window, make_event_decoder())
     checkpoint_store = build_checkpoint_store(dsn, redis_url)
     gateway = _EnvModelGateway(endpoint, api_key, model)
-    # ADR-003 / Q2：composition root 单次注册首批能力并冻结；视觉理解复用同一
-    # ModelGateway（Q9）。已冻结时跳过——同进程重复 build_deps 不重复注册。
+    # ADR-003 / Q2 + ADR-014：composition root 单次注册全部能力（首批 + 14 个
+    # 媒体工具）并冻结；视觉理解复用同一 ModelGateway（Q9）。已冻结时跳过。
     from packages.agent_core.tools.registry import is_frozen
     from services.control_plane.attachments.s3_store import S3ObjectStore
     from services.orchestrator.capabilities import (
@@ -289,9 +289,24 @@ def build_deps(
     )
 
     if not is_frozen():
-        # ADR-003 未完成项4：附件能力用 S3 原文读取（带 sha256 校验），
-        # 不再用本地路径 reader——生产传对象存储 key 时后者必然 FileNotFoundError。
-        register_capabilities(gateway=gateway, blob_reader=make_s3_blob_reader(S3ObjectStore()))
+        # 附件能力用 S3 原文读取（带 sha256 校验），派生件写独立 derived/ 前缀。
+        attachment_store = S3ObjectStore()
+        # P2 #36：会话查询能力生产注入。user_id 不在此绑定（进程级单例），
+        # 由 handler 从请求 ContextVar 读取后传入端口；无 user 上下文时 fail-closed。
+        from services.control_plane.attachments.pg_stores import PgAttachmentStore
+        from services.control_plane.bundles.pg_store import PgBundleStore
+        from services.orchestrator.session_query import BundleSessionQuery
+
+        session_query = BundleSessionQuery(
+            bundles=PgBundleStore(dsn),
+            attachments=PgAttachmentStore(dsn),
+        )
+        register_capabilities(
+            gateway=gateway,
+            blob_reader=make_s3_blob_reader(attachment_store),
+            derived_writer=attachment_store,
+            session_query=session_query,
+        )
     from services.orchestrator.capability_audit_adapter import ProductionCapabilityAudit
     from services.orchestrator.capability_guard_adapter import ProductionCapabilityGuard
 

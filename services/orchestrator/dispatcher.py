@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Final, cast
 
 import redis
@@ -24,7 +26,14 @@ import redis
 from packages.agent_core.injection import Deps
 from packages.agent_core.loop.run import run
 from packages.agent_core.tools.registry import level0
-from packages.agent_core.types import Input, JsonObject, State, TerminalKind
+from packages.agent_core.types import (
+    Decision,
+    DecisionKind,
+    Input,
+    JsonObject,
+    State,
+    TerminalKind,
+)
 from packages.contracts.enums import ReasonCode, SessionState
 from packages.contracts.types import TaskFields
 from services.control_plane.sessions.service import SessionService
@@ -53,6 +62,13 @@ def _l0_catalog() -> tuple[JsonObject, ...]:
 # A1（v1.8 接线）：校验链可注入入口。签名只取生产可提供的入参，
 # 复杂端口（embedder/store 等）由装配层绑定成闭包，dispatcher 不感知（关注点分离）。
 ValidatorFn = Callable[[str, TaskFields], ValidationResult]
+
+# P1：确定性通道钩子。返回内部 dict（branch/bundle/reason/missing_slots），
+# 只在 validation.ok 后调用，命中 compiled 走确定性成包、其余交回 run()。
+DeterministicRunnerFn = Callable[[Input, str, str], dict[str, object]]
+OccurrenceSink = Callable[[str, str, str, str], None]
+"""ADR-019 D3：(session_id, run_id, generation_path, branch) 分流决策留证回调。"""
+_ENV_DETERMINISTIC: Final[str] = "WIDGETPILOT_DETERMINISTIC"
 # 校验「硬拒绝」原因码（不放行进模型且转 FAILED）：输入护栏命中 / 越界 / 预算 / 契约不符。
 # 其余 ok=False（规格缺失/冲突、role 歧义 INPUT_INVALID、澄清请求）按语义挂起转 AWAITING_INPUT，
 # 对齐 M06 §3.2「护栏拒绝 vs 语义补充」两类去向，也对齐 §3.3 状态机。
@@ -120,6 +136,23 @@ def _as_str(value: bytes | str | None) -> str:
 def _task_str(value: TaskValue) -> str:
     """把任务字段值收窄为 str（任务 JSON 边界仍可能含 list，沿用旧 str() 行为）。"""
     return str(value) if value is not None else ""
+
+
+def _normalize_reason(raw: str, branch: str) -> str:
+    """把通道自由字符串 reason 归一到 ReasonCode 值域（#37）。
+
+    通道 failed 分支可能产出 "GATE_FAILED" 等非枚举串；会话 reason_code 由
+    前端/审计按 ReasonCode 消费，落非枚举值会破坏契约。已知值原样返回，
+    未知值按 branch 回落（rejected→INTENT_OUT_OF_SCOPE，其余→GUARD_OUTPUT_HIT）。
+    """
+    raw = raw.strip()
+    try:
+        return ReasonCode(raw).value
+    except ValueError:
+        return (
+            ReasonCode.INTENT_OUT_OF_SCOPE.value if branch == "rejected"
+            else ReasonCode.GUARD_OUTPUT_HIT.value
+        )
 
 
 def _task_attachments(task: Task) -> list[str]:
@@ -353,6 +386,10 @@ class Dispatcher:
         task_store: TaskStorePort | None = None,
         plan_llm: PlanLLM | None = None,
         task_turn_store: TaskTurnStorePort | None = None,
+        deterministic_runner: DeterministicRunnerFn | None = None,
+        terminal_event_emitter: Callable[[State], None] | None = None,
+        artifact_verifier: Callable[[str, str], bool] | None = None,
+        occurrence_sink: OccurrenceSink | None = None,
     ) -> None:
         """注入任务队列、执行依赖、会话服务与校验链（状态回写入口）。
 
@@ -371,6 +408,17 @@ class Dispatcher:
                 多任务落库与 fan-in 查询。None 时多任务路径不可用（fail-fast）。
             plan_llm: ADR-006 约束式规划器真实端口；None 时多任务规划 fail-fast。
             task_turn_store: ADR-009 task_turn 存储（生产 PgTaskTurnStore）。
+            deterministic_runner: P1 确定性通道钩子；None 或 WIDGETPILOT_DETERMINISTIC=off
+                时为零注入，process_one 行为与历史逐字一致。
+            terminal_event_emitter: #42 确定性命中分支的终态事件发射器（生产由
+                worker 注入 TypedEventEmitter 闭包；测试注入记录器）。None 时命中
+                分支不发终态事件（历史行为；llm_fallback 仍由 run() 内部发）。
+            artifact_verifier: ADR-019 D4/D5：校验 (bundle_id, user_id) 对应真实
+                产物（M09 widget_bundle 存在且属主；成包即已过三门禁）。生产由
+                worker 注入 BundleService.get 闭包；None 时保留历史行为（仅空串
+                拒绝），仅用于未接产物的单测。
+            occurrence_sink: ADR-019 D3 分流决策留证回调（生产 worker 绑定 PG
+                store）。None 时不留痕（历史行为）；用于统计全分支漏斗。
         子任务直接走 run() 单 agent 内核（ADR-011：角色层已移除）。
         """
         self._queue = queue
@@ -383,6 +431,10 @@ class Dispatcher:
         self._task_store = task_store
         self._plan_llm = plan_llm
         self._task_turn_store = task_turn_store
+        self._deterministic_runner = deterministic_runner
+        self._terminal_event_emitter = terminal_event_emitter
+        self._artifact_verifier = artifact_verifier
+        self._occurrence_sink = occurrence_sink
         # Coordinator fan-in 事件的原子 seq 分配器（由 Redis URL 构造，惰性连接）。
         from services.orchestrator.tasks.events import RedisSeqAllocator
 
@@ -420,10 +472,102 @@ class Dispatcher:
             render_fact_summary(fact),
         )
 
+    def _try_deterministic(
+        self, session_id: str, run_id: str, run_input: Input
+    ) -> State | None:
+        """P1：确定性通道分流。返回 State=命中（用其走完后置义务）；None=继续 run()。
+
+        只在 validation.ok 之后被调用；同一安全校验不重复（通道不跑进护栏）。
+        开关 off / 未注入 runner / 通道异常 → None（fail-open 回原 LLM 链路，
+        不吞任务、不造假绿）。命中分支的 ack/fan-in/task_store 更新由调用方
+        process_one 的公共后置路径承担，本方法不旁路丢义务。
+        """
+        from services.orchestrator.request_context import generation_path_var
+
+        def record(path: str, branch: str) -> None:
+            """设本请求 path（供 cost_sink 读）+ occurrence 留证（ADR-019 D2/D3）。"""
+            generation_path_var.set(path)
+            if self._occurrence_sink is not None:
+                self._occurrence_sink(session_id, run_id, path, branch)
+
+        if self._deterministic_runner is None:
+            record("llm-only", "no-runner")
+            return None
+        if os.getenv(_ENV_DETERMINISTIC, "on").strip().lower() == "off":
+            record("llm-only", "disabled")
+            return None
+        try:
+            result = self._deterministic_runner(run_input, session_id, run_id)
+            branch = str(result.get("branch", ""))
+            base = State.initial(session_id, run_id, run_input.text, run_input.grid)
+            path = str(result.get("generation_path", "deterministic"))
+            logger.info("deterministic branch=%s path=%s session=%s run=%s",
+                        branch, path, session_id, run_id)
+            if branch == "compiled":
+                record(path, branch)
+                bundle = result.get("bundle")
+                bundle_id = bundle.get("bundle_id") if isinstance(bundle, dict) else None
+                if not isinstance(bundle_id, str) or not bundle_id:
+                    logger.warning("deterministic compiled without bundle_ref, fall back to run()")
+                    return None
+                # ADR-013 §3.4：沙箱真耗时回灌预算，成本账不再恒 0。
+                elapsed_ms = result.get("elapsed_ms")
+                if isinstance(elapsed_ms, int) and elapsed_ms > 0:
+                    base = replace(base, budget_used={
+                        **base.budget_used,
+                        "sandbox_minutes": elapsed_ms / 60_000.0,
+                    })
+                return base.terminate(Decision(DecisionKind.DONE), bundle_ref=bundle_id)
+            if branch in ("rejected", "failed"):
+                record(path, branch)
+                # 门禁失败/越界均为确定性失败：显式 FAILED 终态，绝不静默回落云端。
+                reason = _normalize_reason(str(result.get("reason") or ""), branch)
+                evidence = str(result.get("evidence_ref") or "").strip() or (
+                    f"deterministic/{session_id}/{run_id}/{branch}"
+                )
+                return base.terminate(
+                    Decision(DecisionKind.FAILED, reason_code=reason),
+                    evidence_ref=evidence,
+                )
+            if branch == "clarification":
+                record(path, branch)
+                # B2（review）：把精准反问信息带出 ChannelResult → SessionRow。
+                # State.pause(reason) 不写 spec.reason，故用 contextvar 传载荷，
+                # 由 _write_back 落到 mark_awaiting_input(evidence_ref=...)。
+                from services.orchestrator.request_context import (
+                    clarification_payload_var,
+                )
+
+                reason = str(result.get("reason") or "").strip() or "SPEC_MISSING"
+                choices = result.get("target_choices")
+                import json
+
+                raw_slots = result.get("missing_slots")
+                missing_slots = (
+                    [str(slot) for slot in raw_slots]
+                    if isinstance(raw_slots, list) else []
+                )
+                clarification_payload_var.set(json.dumps(
+                    {
+                        "reason": reason,
+                        "question_kind": str(result.get("question_kind") or ""),
+                        "choices": choices or [],
+                        "missing_slots": missing_slots,
+                    },
+                    ensure_ascii=False, default=str,
+                ))
+                return base.pause(reason)
+            # llm_fallback / 未知 → 云端降级；path 由通道标注（cloud-fallback）。
+            record(path, branch or "llm_fallback")
+            return None
+        except Exception as exc:  # noqa: BLE001 - 通道故障 fail-open 到 LLM，不阻断任务
+            logger.warning("deterministic runner/terminal failed, fall back to run(): %s", exc)
+            record("llm-only", "error")
+            return None
+
     def _write_back(
         self,
-        session_id: str,
-        user_id: str,
+        session_id: str, user_id: str,
         state: State,
         *,
         last_intent: str = "",
@@ -441,27 +585,43 @@ class Dispatcher:
         if state.terminal is None:
             # 无终态但进入挂起（ask_user / AWAIT_INPUT）→ 等用户输入
             if state.phase is SessionState.AWAITING_INPUT:
+                # B2（review）：deterministic clarification 的 reason 不进 State，
+                # 用 contextvar 承载；精准 choices 落 evidence_ref（已有列，无迁移）。
+                from services.orchestrator.request_context import (
+                    clarification_payload_var,
+                )
+
+                payload = clarification_payload_var.get()
+                payload_obj = json.loads(payload) if payload else {}
+                reason = (
+                    str(payload_obj.get("reason"))
+                    if payload_obj.get("reason")
+                    else (state.spec.reason or "SPEC_MISSING")
+                )
                 self._sessions.mark_awaiting_input(
-                    session_id, user_id, reason_code=state.spec.reason or "SPEC_MISSING"
+                    session_id, user_id, reason_code=reason,
+                    evidence_ref=payload or None,
                 )
             return
         if state.terminal.kind is TerminalKind.DONE:
             bundle_ref = state.terminal.bundle_ref
-            # 【M08 V3 强制门禁待接】当前 loop 终态只携带模型自报 bundle_ref，
-            # 无经校验的 WidgetSpec + TSX source_ref + manifest（M08 validate_and_test
-            # 的三个必需入参）。产物本体须由 M07 结构化生成回路落对象存储后，
-            # 在此处调用 services.sandbox_runnerentry.validate_and_test 并以
-            # static_check/sandbox_test 通过为完成前提；在此之前 bundle_ref 仅作
-            # 引用记录，不能视为已通过出护栏。缺口已登记 M08 模块文档 §9。
-            if not bundle_ref:
-                # review B6：模型自报产物不可信，空引用直接失败不假绿
+            # ADR-019 D4/D5/#38：DONE 的 bundle_ref 必须是真实产物。M09 成包
+            # （BundleService.assemble）本身以三门禁全过为前提，故"bundle 存在且
+            # 属主"等价于"该产物已过三门禁"——不必在此重跑 validate_and_test
+            # （LLM 终态也无 spec/source_ref/manifest 三个入参）。
+            # 空引用（review B6）与校验失败一律不假绿。
+            verified = bool(bundle_ref) and (
+                self._artifact_verifier is None
+                or self._artifact_verifier(bundle_ref, user_id)
+            )
+            if not verified:
                 self._sessions.fail(
                     session_id,
                     _NO_BUNDLE_REASON,
-                    f"{_EVIDENCE_PREFIX}/{session_id}/{state.run_id}/no-bundle",
+                    f"{_EVIDENCE_PREFIX}/{session_id}/{state.run_id}/unverified-bundle",
                 )
             else:
-                self._sessions.complete(session_id, bundle_ref)
+                self._sessions.complete(session_id, bundle_ref)  # type: ignore[arg-type]
                 # ADR-009：仅成功且有产物时生成事实；失败 turn 不生成新事实。
                 # 写失败只丢事实证据（store 层 fail-closed 抛异常），不回滚已完成的
                 # 会话状态、不阻断 ACK——事实是建议不是门禁。
@@ -762,6 +922,20 @@ class Dispatcher:
         session_id = _task_str(task.get(_FIELD_SESSION))
         run_id = _task_str(task.get(_FIELD_RUN))
         user_id = _task_str(task.get(_FIELD_USER))
+        # P2 #36：per-request 上下文（user/session）set + finally reset。
+        # run_forever 同线程复用、worker 线程池复用，裸 set 会跨任务串号。
+        from services.orchestrator.request_context import (
+            DEFAULT_GENERATION_PATH,
+            clarification_payload_var,
+            generation_path_var,
+            session_id_var,
+            user_id_var,
+        )
+
+        _tok_user = user_id_var.set(user_id)
+        _tok_session = session_id_var.set(session_id)
+        _tok_path = generation_path_var.set(DEFAULT_GENERATION_PATH)
+        _tok_payload = clarification_payload_var.set("")
         try:
             # A1：校验链先过（ADR-006 V1 安全门禁：规划任务也先过，命中不进模型）。
             validation = self._check_guardrail(session_id, run_id, user_id, task)
@@ -813,11 +987,22 @@ class Dispatcher:
                     self._task_store.update_state(
                         task_id, TaskState.RUNNING.value, run_id=run_id
                     )
-                # ADR-011：子任务直接走 run() 单 agent 内核（角色层已移除）。
-                state = run(
-                    session_id, run_id, run_input, self._deps,
-                    cost_sink=self._cost_sink,
-                )
+                # P1：确定性通道优先（validation.ok 后一次分流，安全校验不重复）。
+                # 命中 compiled/rejected/clarification → State 走同一后置义务链；
+                # llm_fallback / 开关 off / 通道异常 → None → 原 run() 链路。
+                state = self._try_deterministic(session_id, run_id, run_input)
+                deterministic_hit = state is not None
+                if state is None:
+                    # ADR-011：子任务直接走 run() 单 agent 内核（角色层已移除）。
+                    state = run(
+                        session_id, run_id, run_input, self._deps,
+                        cost_sink=self._cost_sink,
+                    )
+                elif self._cost_sink is not None and state.terminal is not None:
+                    # #37：命中确定性分支跳过 run()，但终态仍须落成本账（与
+                    # run.py:419-420 一致：仅终态落账，clarification 挂起不落）。
+                    # 只在命中分支调；llm_fallback 由 run() 内部落账，避免重复。
+                    self._cost_sink(state)
                 # ADR-009：迭代任务写 task_turn（每轮独立 run_id，旧版本不删）。
                 target_task_id = _task_str(task.get(_FIELD_TARGET_TASK))
                 if target_task_id and self._task_turn_store is not None:
@@ -825,7 +1010,18 @@ class Dispatcher:
                 if task_id and self._task_store is not None:
                     terminal = state.terminal
                     done = terminal is not None and terminal.kind is TerminalKind.DONE
-                    final = TaskState.DONE.value if done else TaskState.FAILED.value
+                    # #35：子任务澄清挂起（terminal=None + AWAITING_INPUT）必须落
+                    # AWAITING_INPUT，不可落 FAILED——否则 fan_in 把挂起当终态，
+                    # 误判整会话失败（is_terminal 不含 AWAITING_INPUT，fan_in 会
+                    # 返回 terminal=False，等用户回答后重投）。
+                    awaiting = (
+                        terminal is None
+                        and state.phase is SessionState.AWAITING_INPUT
+                    )
+                    if awaiting:
+                        final = TaskState.AWAITING_INPUT.value
+                    else:
+                        final = TaskState.DONE.value if done else TaskState.FAILED.value
                     self._task_store.update_state(
                         task_id,
                         final,
@@ -848,6 +1044,11 @@ class Dispatcher:
                             if validation and validation.widget_type else "custom"
                         ),
                     )
+                    # #42：确定性命中跳过 run()（内部发 checkpoint/cost/done），
+                    # 须补发终态/澄清事件，否则前端 SSE 收不到完成通知。仅非子任务
+                    # 路径发（子任务由 fan_in 统一发会话级事件，避免重复）。
+                    if deterministic_hit and self._terminal_event_emitter is not None:
+                        self._terminal_event_emitter(state)
         except Exception:
             # review B2：失败不 ACK，留 PEL 由 xautoclaim 重投；超限写死信
             retries = int(_task_str(task.get(_FIELD_RETRIES, "0")) or "0")
@@ -856,6 +1057,12 @@ class Dispatcher:
             raise
         else:
             self._queue.ack(task)  # 仅成功后 ACK
+        finally:
+            # P2 #36 / P1 D2：四个 ContextVar 全部复位，防跨任务串号。
+            clarification_payload_var.reset(_tok_payload)
+            generation_path_var.reset(_tok_path)
+            session_id_var.reset(_tok_session)
+            user_id_var.reset(_tok_user)
         return 1
 
     def run_forever(self, poll_s: float = 1.0) -> None:

@@ -1,0 +1,214 @@
+{
+  "version": "1.1",
+  "goal": "P0+P1 止血 + R3 边界 ADR：①删 step11 classify_intent 收敛意图裁判并修 ADR-004 硬样本 N1 误拒；②SlotFill 扩 10 类槽位、缺槽走结构化反问；③落 ADR-020 声明 0 LLM 能力边界（结构化反问采集为降级满足）",
+  "source": "user_request",
+  "mode": "conductor",
+  "template": "conductor.4-development",
+  "confidence": 0.9,
+  "assumptions": [
+    "用户 2026-11-25 拍板：R3 走结构化反问采集；本轮只做 P0+P1；先落 ADR-020 声明边界",
+    "范围：R10（校验去重+误拒修复）、R2（槽位反问），不改公共 JSON Schema、无 DB 迁移",
+    "不碰 R7 取消在生成/LLM 成包/本地小模型——登记 Open",
+    "同一安全校验只做一次；契约四同步门禁保持 drift=[]"
+  ],
+  "clarifications": [
+    "用户已在 AskUserQuestion 选：结构化反问采集（推荐）+ 先做 P0+P1 止血（推荐）"
+  ],
+  "tasks": [
+    {
+      "id": "T1",
+      "goal": "S2 规格：ADR-020 + change-contract + 覆盖矩阵 + 影响面"
+    },
+    {
+      "id": "T2",
+      "goal": "TDD RED：P0 意图去重/N1 误拒 + P1 槽位反问失败测试"
+    },
+    {
+      "id": "T3",
+      "goal": "实现：validate_chain/input_guard 去重 + interpreter 槽位扩表与反问"
+    },
+    {
+      "id": "T4",
+      "goal": "门禁与 review：pytest/ruff/pyright/contracts/purity + 独立复审"
+    }
+  ],
+  "nodes": [
+    {
+      "kind": "tool",
+      "action": "规格固化：从澄清输出抽取六段契约（Why/Delta/Invariants/Affected/Acceptance/Open），落 .conductor/contracts/，跑契约检查",
+      "command": "python ../conductor-brainstorm/scripts/contract_check.py --contract <契约路径>",
+      "command_type": "command",
+      "exit_criteria": "契约文件存在且检查退出码 0，Acceptance 灌入台账",
+      "exit_check": {
+        "kind": "exit_code",
+        "expect": "0",
+        "evidence": "contract_check.py rc=0 + 契约文件路径"
+      },
+      "on_fail": "retry",
+      "on_fail_next": "S2-clarify",
+      "when": "standard 或 full 档",
+      "atomic": true,
+      "id": "n_spec-S2-contract",
+      "label": "S2 规格固化：ADR-020 + change-contract + 覆盖矩阵 · S2-contract",
+      "ref": "brainstorm",
+      "route_ref": "brainstorm/S2-contract",
+      "expanded_from": "n_spec",
+      "serves_task": "T1",
+      "next": "n_red"
+    },
+    {
+      "kind": "skill",
+      "action": "派全新上下文子代理做独立 review：七维 + 接线四问 + 功能遗漏/断点，红队视角找反例",
+      "command": "派新子代理，brief 自包含 diff + 规格 + 完成标准",
+      "command_type": "judgment",
+      "exit_criteria": "收到新子代理报告（非复用旧报告），含 Blocker 分级",
+      "exit_check": {
+        "kind": "file_content",
+        "expect": "报告含 Blocker/Should/Nit 与 文件:行号",
+        "evidence": "overview 独立 review 章节"
+      },
+      "on_fail": "retry",
+      "on_fail_next": "review/DISPATCH",
+      "when": "standard 或 full 档",
+      "atomic": true,
+      "id": "n_review-DISPATCH",
+      "label": "S5 独立复审 · DISPATCH",
+      "ref": "review",
+      "route_ref": "review/DISPATCH",
+      "expanded_from": "n_review",
+      "serves_task": "T4",
+      "next": "n_end"
+    },
+    {
+      "id": "n_red",
+      "kind": "tool",
+      "ref": "tdd",
+      "route_ref": "tdd/RED",
+      "label": "TDD RED：意图去重 + 槽位反问失败测试",
+      "action": "写失败测试：①ADR-004 硬样本不再被 check_input N1 误拒（validate_chain 层）；②validate_chain 不再调用 classify_intent（意图裁判唯一）；③SlotFill 解析出 count/style/interaction/function 等槽位；④缺槽位时 interpreter 返回 clarification 且 missing_slots 含具体槽位名",
+      "command": ".venv/Scripts/python.exe -m pytest tests/unit/test_p0p1_intent_slot_clarify.py -q",
+      "command_type": "command",
+      "exit_criteria": "RED：断言失败原因是缺目标行为（非导入/拼写/环境）",
+      "exit_check": {
+        "kind": "exit_code",
+        "expect": "nonzero",
+        "evidence": "pytest RED 输出片段"
+      },
+      "on_fail": "ask",
+      "on_fail_next": "n_spec",
+      "next": "n_green"
+    },
+    {
+      "id": "n_green",
+      "kind": "tool",
+      "ref": "tdd",
+      "route_ref": "tdd/GREEN",
+      "label": "TDD GREEN：实现去重与槽位反问",
+      "action": "实现：①validate_chain 删 step11 classify_intent（保留意图越界裁判在 step0 + check_input），修 N1 正则/正向优先使硬样本通过；②interpreter types/rule/capability_planner 扩槽位（count/style/interaction/function/structure/attachment_purpose/target），缺槽返回 clarification；③channel 反问载荷带槽位名",
+      "command": ".venv/Scripts/python.exe -m pytest tests/unit/test_p0p1_intent_slot_clarify.py -q && .venv/Scripts/python.exe -m ruff check services/guardrails/ services/orchestrator/validate_chain.py services/deterministic/channel.py",
+      "command_type": "command",
+      "exit_criteria": "GREEN：新测试全过 + ruff 绿；未改公共 schema、无 DB 迁移",
+      "exit_check": {
+        "kind": "exit_code",
+        "expect": "0",
+        "evidence": "pytest rc=0 + ruff rc=0"
+      },
+      "on_fail": "retry",
+      "on_fail_next": "n_red",
+      "next": "n_evidence"
+    },
+    {
+      "id": "n_evidence",
+      "kind": "tool",
+      "ref": "verify.py",
+      "route_ref": "tdd/EVIDENCE",
+      "label": "S4 全量门禁证据",
+      "action": "跑全量 pytest（真 PG+Redis 环境）+ pyright + ruff + contracts drift + source_purity 新改文件",
+      "command": ".venv/Scripts/python.exe -m pytest -q && .venv/Scripts/python.exe -m ruff check . && npx pyright --pythonpath .venv/Scripts/python.exe && pnpm contracts:check && python C:/Users/30895/.workbuddy/skills/conductor.bak.20261124/organs/conductor-review/scripts/source_purity.py check --strict --path services/guardrails/interpreter --path services/orchestrator/validate_chain.py",
+      "command_type": "command",
+      "exit_criteria": "全绿（pyright 0 errors；contracts drift=[]；purity 0 污染）",
+      "exit_check": {
+        "kind": "exit_code",
+        "expect": "0",
+        "evidence": "verify 命令组退出码 0 + 输出摘要"
+      },
+      "on_fail": "retry",
+      "on_fail_next": "n_green",
+      "next": "n_review-DISPATCH"
+    },
+    {
+      "id": "n_end",
+      "kind": "gate",
+      "ref": "收尾",
+      "label": "收尾门禁：overview + 记忆",
+      "action": "写 overview L0 结论与证据；追加工作日志；确认未改公共 schema/无 DB 迁移",
+      "command": "写 overview + .workbuddy/memory/2026-11-25.md；git status --short 核对改动面",
+      "command_type": "command",
+      "exit_criteria": "overview 有结论；改动面与本轮范围一致",
+      "exit_check": {
+        "kind": "exit_code",
+        "expect": "0",
+        "evidence": "overview 结论段 + git status"
+      },
+      "on_fail": "abort",
+      "on_fail_next": "n_end"
+    }
+  ],
+  "edges": [
+    {
+      "from": "n_spec-S2-contract",
+      "to": "n_red",
+      "type": "seq"
+    },
+    {
+      "from": "n_red",
+      "to": "n_green",
+      "type": "seq"
+    },
+    {
+      "from": "n_green",
+      "to": "n_evidence",
+      "type": "seq"
+    },
+    {
+      "from": "n_evidence",
+      "to": "n_review-DISPATCH",
+      "type": "seq"
+    },
+    {
+      "from": "n_review-DISPATCH",
+      "to": "n_end",
+      "type": "seq"
+    }
+  ],
+  "paths": [
+    {
+      "id": "P1",
+      "label": "P0+P1 止血正常路线",
+      "guard": "默认路线",
+      "steps": [
+        "n_spec-S2-contract",
+        "n_red",
+        "n_green",
+        "n_evidence",
+        "n_review-DISPATCH",
+        "n_end"
+      ],
+      "terminal": "n_end",
+      "is_happy": true
+    }
+  ],
+  "budget": {
+    "max_steps": 30,
+    "max_retries": 5,
+    "noop_limit": 2
+  },
+  "meta": {
+    "created": "2026-11-25",
+    "context_refs": [
+      "overview L0 拷问结论",
+      "覆盖矩阵 f76a7264-0LLM意图路由拷问.coverage.md"
+    ],
+    "expanded": true
+  }
+}

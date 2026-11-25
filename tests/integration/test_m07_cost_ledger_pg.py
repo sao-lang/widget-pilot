@@ -58,6 +58,7 @@ def _entry() -> CostEntry:
         tool_calls=2,
         sandbox_minutes=1.5,
         repro_fingerprint="a" * 64,
+        generation_path="deterministic",
         created_at=_FIXED_TIME,
     )
 
@@ -68,7 +69,7 @@ def _read_row(run_id: str) -> Mapping[str, Any] | None:
         row = pg_fetchone(
             conn,
             f"SELECT run_id, session_id, user_id, model_tier, tokens, iterations, "
-            f"tool_calls, sandbox_minutes, repro_fingerprint, created_at "
+            f"tool_calls, sandbox_minutes, repro_fingerprint, generation_path, created_at "
             f"FROM {_TABLE} WHERE run_id = %s",
             (run_id,),
         )
@@ -92,6 +93,7 @@ class TestPgCostLedger:
         assert row["iterations"] == entry.iterations
         assert row["tool_calls"] == entry.tool_calls
         assert row["sandbox_minutes"] == entry.sandbox_minutes
+        assert row["generation_path"] == entry.generation_path
         assert row["created_at"] == entry.created_at
 
     def test_same_run_id_is_idempotent(self) -> None:

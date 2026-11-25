@@ -33,12 +33,31 @@ class InMemoryBundleStore:
         self.rows[bid] = dict(bundle)
         self.versions[bid] = versions
 
+    def _with_versions(self, row: JsonObject) -> JsonObject:
+        """与 PgBundleStore._to_json 同构：版本链从独立存储读回。"""
+        result = dict(row)
+        bid = str(row.get("bundle_id", ""))
+        if bid in self.versions:
+            result["versions"] = [
+                {
+                    "version_id": v.version_id,
+                    "bundle_id": v.bundle_id,
+                    "parent_id": v.parent_id or "",
+                    "compiled_ref": v.compiled_ref,
+                    "compiled_hash": v.compiled_hash,
+                    "manifest_hash": v.manifest_hash,
+                    "created_at": v.created_at,
+                }
+                for v in self.versions[bid]
+            ]
+        return result
+
     def get(self, bundle_id: str, user_id: str) -> JsonObject | None:
         """按 id 读取，非本人返回 None。"""
         row = self.rows.get(bundle_id)
         if row is None or row.get("user_id") != user_id:
             return None
-        return dict(row)
+        return self._with_versions(row)
 
     def list_by_user(
         self, user_id: str, state: str | None, limit: int
@@ -50,6 +69,20 @@ class InMemoryBundleStore:
             if r.get("user_id") == user_id
             and (state is None or r.get("state") == state)
         ]
+        return rows[:limit]
+
+    def list_by_session(
+        self, user_id: str, session_id: str, state: str | None, limit: int
+    ) -> list[JsonObject]:
+        """按会话列包（租户隔离 + 状态过滤），created_at 降序。"""
+        rows = [
+            self._with_versions(r)
+            for r in self.rows.values()
+            if r.get("user_id") == user_id
+            and r.get("session_id") == session_id
+            and (state is None or r.get("state") == state)
+        ]
+        rows.sort(key=lambda r: str(r.get("created_at", "")), reverse=True)
         return rows[:limit]
 
     def update_state(self, bundle_id: str, user_id: str, state: str) -> bool:
@@ -80,6 +113,21 @@ class InMemoryBundleStore:
                 }
                 for v in versions
             ]
+
+    def update_content(
+        self,
+        bundle_id: str,
+        user_id: str,
+        bundle: JsonObject,
+        versions: tuple[VersionNode, ...],
+    ) -> bool:
+        """重成包内存桩：仅更新已有行，不创建新行（与 Pg 同口径）。"""
+        row = self.rows.get(bundle_id)
+        if row is None or row.get("user_id") != user_id:
+            return False
+        row.update(bundle)
+        self.replace_versions(bundle_id, user_id, versions)
+        return True
 
 
 class RecordingEventSink:

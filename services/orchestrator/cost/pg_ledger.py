@@ -44,6 +44,7 @@ class PgCostLedger:
                 tool_calls=entry.tool_calls,
                 sandbox_minutes=entry.sandbox_minutes,
                 repro_fingerprint=entry.repro_fingerprint,
+                generation_path=entry.generation_path,
                 created_at=entry.created_at,
             )
             .on_conflict_do_nothing(index_elements=["run_id"])

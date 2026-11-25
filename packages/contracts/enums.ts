@@ -8,7 +8,7 @@ export type BundleState =
   | "GENERATED" | "INSTALLED" | "DELETED";
 
 export type GridSpec =
-  | "2x2" | "2x4" | "4x2" | "4x4" | "2x1" | "1x2";
+  | "2x1" | "1x2" | "2x2" | "2x3" | "2x4" | "3x2" | "4x2" | "4x3" | "4x4" | "5x3";
 
 export type WidgetType =
   | "calendar" | "clock" | "alarm" | "task" | "custom";

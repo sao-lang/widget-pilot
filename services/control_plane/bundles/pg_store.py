@@ -93,6 +93,21 @@ class PgBundleStore:
             rows = session.execute(stmt).scalars().all()
             return [self._to_json(row) for row in rows]
 
+    def list_by_session(
+        self, user_id: str, session_id: str, state: str | None, limit: int
+    ) -> list[JsonObject]:
+        """按会话列包（租户隔离 + 可选状态过滤），最新在前（P2 target last 用）。"""
+        with session_scope(self._factory) as session:
+            stmt = select(WidgetBundle).where(
+                WidgetBundle.user_id == user_id,
+                WidgetBundle.session_id == session_id,
+            )
+            if state is not None:
+                stmt = stmt.where(WidgetBundle.state == state)
+            stmt = stmt.order_by(WidgetBundle.created_at.desc()).limit(limit)
+            rows = session.execute(stmt).scalars().all()
+            return [self._to_json(row) for row in rows]
+
     def update_state(self, bundle_id: str, user_id: str, state: str) -> bool:
         """幂等更新状态，返回是否发生实际变更（rowcount>0）。"""
         with session_scope(self._factory) as session:
@@ -147,6 +162,62 @@ class PgBundleStore:
                         created_at=version.created_at,
                     )
                 )
+
+    def update_content(
+        self,
+        bundle_id: str,
+        user_id: str,
+        bundle: JsonObject,
+        versions: tuple[VersionNode, ...],
+    ) -> bool:
+        """重成包：事务内更新已有 bundle 可变字段 + 覆盖版本链（复用首版 insert 口径）。"""
+        payload = cast(JsonValue, [self._version_json(v) for v in versions])
+        with session_scope(self._factory) as session:
+            result = cast(
+                CursorResult[object],  # purity-exempt: Core UPDATE rowcount 收窄（同 update_state）
+                session.execute(
+                update(WidgetBundle)
+                .where(
+                    WidgetBundle.bundle_id == bundle_id,
+                    WidgetBundle.user_id == user_id,
+                )
+                .values(
+                    spec_ref=canonical_json(bundle.get("spec", {})),
+                    source_ref=_content_ref(bundle, "source"),
+                    compiled_ref=_content_ref(bundle, "compiled"),
+                    manifest=cast(JsonValue, bundle.get("manifest", {})),
+                    static_check=cast(JsonValue, bundle.get("static_check", {})),
+                    sandbox_test=cast(JsonValue, bundle.get("sandbox_test", {})),
+                    hash=str(bundle["hash"]),
+                    versions=payload,
+                    evidence_ref=str(bundle.get("evidence_ref", "")),
+                )
+                ),
+            )
+            if not (result.rowcount and result.rowcount > 0):
+                return False  # 不存在/越权：不创建、不泄漏
+            existing = set(
+                session.execute(
+                    select(BundleVersion.version_id).where(
+                        BundleVersion.bundle_id == bundle_id
+                    )
+                ).scalars().all()
+            )
+            for version in versions:
+                if version.version_id in existing:
+                    continue
+                session.add(
+                    BundleVersion(
+                        version_id=version.version_id,
+                        bundle_id=version.bundle_id,
+                        parent_id=version.parent_id,
+                        compiled_ref=version.compiled_ref,
+                        compiled_hash=version.compiled_hash,
+                        manifest_hash=version.manifest_hash,
+                        created_at=version.created_at,
+                    )
+                )
+        return True
 
     def _to_json(self, row: WidgetBundle) -> JsonObject:
         """ORM 行 → service 消费的 bundle 视图（spec 从 spec_ref 反序列化）。"""

@@ -30,29 +30,67 @@ class VisionResult:
     raw: str = ""
 
 
+@dataclass(slots=True, frozen=True)
+class VisionAnswer:
+    """通用视觉问答结果（ADR-014：一组视觉工具共享的返回形态）。
+
+    text 是模型原始输出（当数据、不当指令）；json_value 是能解析成 JSON 时的
+    结构化值，解析失败为 None 而 text 仍保留——不伪造、不静默吞掉。
+    """
+
+    text: str
+    json_value: object | None
+    degraded: bool
+
+
+def ask_vision(
+    image_ref: str,
+    prompt: str,
+    gateway: ModelGateway | None,
+    *,
+    suffix: str = "",
+) -> VisionAnswer:
+    """通用单图视觉调用：复用 ModelGateway 多模态消息，不另起 VisionPort。
+
+    Args:
+        image_ref: 图片 data URL（调用方由 source_ref 生成）。
+        prompt: 业务提示（恒当数据，不解析为指令）。
+        gateway: 注入的模型网关；None 表示无真实端点（降级，不造假）。
+        suffix: 可选输出格式约束（如"只输出 JSON"），由各工具决定。
+
+    Returns:
+        VisionAnswer；降级时 text 空、degraded=True。
+    """
+    if gateway is None:
+        return VisionAnswer(text="", json_value=None, degraded=True)
+    message = Message(
+        role="user",
+        content=prompt + (suffix or ""),
+        image_ref=image_ref,
+    )
+    out = gateway.complete([message], tier=ModelTier.STANDARD.value, stream=False)
+    parsed: object | None
+    try:
+        parsed = json.loads(out.content)
+    except (ValueError, TypeError):
+        parsed = None
+    return VisionAnswer(text=out.content, json_value=parsed, degraded=False)
+
+
 def understand_image(
     image_ref: str,
     prompt: str,
     gateway: ModelGateway | None,
 ) -> VisionResult:
-    """用注入的模型网关对图片做语义理解。
-
-    Args:
-        image_ref: 图片 data URL 或对象存储引用。
-        prompt: 图像理解提示（业务侧给，如"描述界面元素"）。
-        gateway: ModelGateway 注入点；None 表示当前环境无真实模型（降级）。
-
-    Returns:
-        VisionResult；降级时 elements 空、degraded=True。
-    """
-    if gateway is None:
-        return VisionResult(elements=(), degraded=True)
-    message = Message(role="user", content=prompt + _VISION_PROMPT_SUFFIX, image_ref=image_ref)
-    out = gateway.complete([message], tier=ModelTier.STANDARD.value, stream=False)
-    try:
-        payload = json.loads(out.content)
-        raw_elements = payload.get("elements", []) if isinstance(payload, dict) else []
-        elements = tuple(str(e) for e in raw_elements if isinstance(e, str))
-    except (ValueError, TypeError):
-        elements = ()
-    return VisionResult(elements=elements, degraded=False, raw=out.content)
+    """元素列表专用封装（保留旧签名，内部走 ask_vision）。"""
+    answer = ask_vision(image_ref, prompt, gateway, suffix=_VISION_PROMPT_SUFFIX)
+    if answer.degraded or not isinstance(answer.json_value, dict):
+        raw_elements = ()
+    else:
+        maybe = answer.json_value.get("elements", ())
+        raw_elements = (
+            tuple(str(e) for e in maybe if isinstance(e, str))
+            if isinstance(maybe, list)
+            else ()
+        )
+    return VisionResult(elements=raw_elements, degraded=answer.degraded, raw=answer.text)

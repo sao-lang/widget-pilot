@@ -18,7 +18,7 @@ const AgentEvent = z.object({
 const WidgetSpec = z.object({
   "spec_version": z.string().min(1),
   "widget_id": z.string().min(1),
-  "grid": z.enum(["2x2","2x4","4x2","4x4","2x1","1x2"]),
+  "grid": z.enum(["2x1","1x2","2x2","2x3","2x4","3x2","4x2","4x3","4x4","5x3"]),
   "widget_type": z.enum(["calendar","clock","alarm","task","custom"]),
   "intent": z.string().min(1),
   "attachments": z.array(z.object({
@@ -29,6 +29,7 @@ const WidgetSpec = z.object({
   "layout_slots": z.array(z.object({
   "slot": z.string().min(1),
   "content": z.string(),
+  "image_data_url": z.string().optional(),
 })),
   "capabilities": z.array(z.enum(["date","timer","local_storage","static_data","theme","locale"])),
   "data_contract": z.object({
@@ -70,7 +71,7 @@ const WidgetBundle = z.object({
   "manifest": z.object({
   "spec_version": z.string().min(1),
   "spec_hash": z.string(),
-  "grid": z.enum(["2x2","2x4","4x2","4x4","2x1","1x2"]),
+  "grid": z.enum(["2x1","1x2","2x2","2x3","2x4","3x2","4x2","4x3","4x4","5x3"]),
   "widget_type": z.enum(["calendar","clock","alarm","task","custom"]),
   "capabilities": z.array(z.enum(["date","timer","local_storage","static_data","theme","locale"])),
   "import_allowlist": z.tuple([z.literal("react"),z.literal("@widget/bridge")]),
@@ -113,7 +114,7 @@ const WidgetBundle = z.object({
 
 const WidgetRuntime = z.object({
   "card": z.object({
-  "grid": z.enum(["2x2","2x4","4x2","4x4","2x1","1x2"]),
+  "grid": z.enum(["2x1","1x2","2x2","2x3","2x4","3x2","4x2","4x3","4x4","5x3"]),
   "px": z.object({
   "w": z.number().int().min(1),
   "h": z.number().int().min(1),

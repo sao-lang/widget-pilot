@@ -205,6 +205,84 @@ class BundleService:
         )
         return bundle
 
+    def rework(
+        self,
+        *,
+        base_bundle_id: str,
+        validation: ValidateResult,
+        spec: JsonObject,
+        source_ref: str,
+        user_id: str,
+        session_id: str,
+        run_id: str,
+        trace_id: str = "",
+    ) -> JsonObject | None:
+        """P2/P5 重成包：基于已有 bundle 追加新版本（不新建 bundle_id）。
+
+        复用 assemble 的折叠/manifest/hash 口径，但保留原 bundle_id + created_at，
+        版本链在旧链上 append_version。租户校验失败/不存在返回 None（不泄漏）。
+        全程零模型——新 spec 由确定性编译器产出后传入。
+        """
+        base = self._store.get(base_bundle_id, user_id)
+        if base is None:
+            return None
+        bundle = adapt_validation_to_bundle(
+            validation=validation,
+            bundle_id=base_bundle_id,
+            user_id=user_id,
+            session_id=session_id,
+            spec=spec,
+        )
+        src = bundle["source"]
+        if isinstance(src, dict):
+            src["content_ref"] = source_ref
+        self._fill_manifest(bundle, spec)
+        bundle["hash"] = compute_bundle_hash(bundle)
+        bundle["state"] = BundleState.GENERATED.value
+        bundle["created_at"] = base.get("created_at", datetime.now(UTC).isoformat())
+        base_versions = base.get("versions")
+        existing_versions = tuple(
+            VersionNode(
+                version_id=str(v.get("version_id", "")),
+                bundle_id=str(v.get("bundle_id", base_bundle_id)),
+                parent_id=str(v.get("parent_id") or "") or None,
+                compiled_ref=str(v.get("compiled_ref", "")),
+                compiled_hash=str(v.get("compiled_hash", "")),
+                manifest_hash=str(v.get("manifest_hash", "")),
+                created_at=str(v.get("created_at", "")),
+            )
+            for v in (base_versions if isinstance(base_versions, list) else [])
+            if isinstance(v, dict)
+        )
+        versions = append_version(
+            existing_versions,
+            _nested_str(bundle["compiled"], "content_ref"),
+            _nested_str(bundle["compiled"], "hash"),
+            _nested_str(bundle["manifest"], "spec_hash"),
+            bundle_id=base_bundle_id,
+        )
+        if not self._store.update_content(
+            base_bundle_id, user_id, bundle, versions
+        ):
+            return None
+        bundle["versions"] = [self._version_json(v) for v in versions]
+        self._audit_write(
+            user_id=user_id, session_id=session_id,
+            action=_ACTION_ASSEMBLE, decision=_DECISION_OK, trace_id=trace_id,
+            payload={"bundle_id": base_bundle_id, "run_id": run_id, "rework": True,
+                     "version_count": len(versions)},
+        )
+        self._events.emit(
+            "artifact",
+            {"bundle_id": base_bundle_id,
+             "preview_ref": _nested_str(bundle["compiled"], "content_ref"),
+             "grid": str(spec.get("grid", GridSpec._2X2.value)),
+             "state": BundleState.GENERATED.value, "hash": str(bundle["hash"]),
+             "rework": True, "version_count": len(versions)},
+            session_id,
+        )
+        return bundle
+
     def _fill_manifest(self, bundle: JsonObject, spec: JsonObject) -> None:
         """补全 manifest 完整字段（§6.2 / schema required 13 项）。"""
         manifest = bundle.get("manifest")
@@ -268,6 +346,12 @@ class BundleService:
     ) -> list[JsonObject]:
         """列包（按 user_id 隔离）。"""
         return self._store.list_by_user(user_id, state, limit)
+
+    def list_by_session(
+        self, user_id: str, session_id: str, state: str | None, limit: int
+    ) -> list[JsonObject]:
+        """列出会话内产物（P2 注册表查询入口，租户隔离）。"""
+        return self._store.list_by_session(user_id, session_id, state, limit)
 
     def install(self, bundle_id: str, user_id: str, trace_id: str = "") -> JsonObject:
         """安装（A12 幂等）：GENERATED/INSTALLED → INSTALLED，写审计。"""

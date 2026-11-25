@@ -487,6 +487,32 @@ class CostLedger(Base):
         Float, nullable=False, server_default="0"
     )
     repro_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    generation_path: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="llm-only"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        _TzDateTime, nullable=False, server_default=func.now()
+    )
+
+
+class GenerationOccurrence(Base):
+    """ADR-019：分流决策留证（每次请求一条，含非终态分支）。
+
+    与 cost_ledger 分工：成本账只记终态成本，本表记全分支漏斗
+    （compiled/rejected/clarification/failed/llm_fallback/off/error）。
+    """
+
+    __tablename__ = "generation_occurrence"
+    __table_args__ = (
+        Index("ix_gen_occ_session_id", "session_id"),
+        Index("ix_gen_occ_path", "generation_path"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[str] = mapped_column(Text, nullable=False)
+    generation_path: Mapped[str] = mapped_column(Text, nullable=False)
+    branch: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
     created_at: Mapped[datetime] = mapped_column(
         _TzDateTime, nullable=False, server_default=func.now()
     )

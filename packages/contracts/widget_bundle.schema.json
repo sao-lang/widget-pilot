@@ -44,7 +44,7 @@
       "properties": {
         "spec_version": { "type": "string", "minLength": 1 },
         "spec_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "grid": { "enum": ["2x2", "2x4", "4x2", "4x4", "2x1", "1x2"] },
+        "grid": { "enum": ["2x1", "1x2", "2x2", "2x3", "2x4", "3x2", "4x2", "4x3", "4x4", "5x3"] },
         "widget_type": { "enum": ["calendar", "clock", "alarm", "task", "custom"] },
         "capabilities": { "type": "array", "items": { "enum": ["date", "timer", "local_storage", "static_data", "theme", "locale"] }, "description": "与 spec 一致，静态校验比对" },
         "import_allowlist": { "type": "array", "items": { "type": "string" }, "const": ["react", "@widget/bridge"] },

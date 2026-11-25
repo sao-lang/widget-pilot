@@ -735,7 +735,7 @@ components:
                       state: { $ref: "#/components/schemas/SessionState" }
                       grid: { $ref: "#/components/schemas/GridSpec" }
                       resume_hint: { type: string }
-                      bundle_refs: { type: array, items: { type: string } }
+                      bundle_ref: { type: string, nullable: true }
                       target_task_id: { type: string, nullable: true }
                       tasks:
                         type: array
@@ -863,7 +863,7 @@ components:
       enum: [DRAFT, RUNNING, PAUSED, AWAITING_INPUT, VALIDATING, COMPLETED, FAILED, CANCELLED]
     GridSpec:
       type: string
-      enum: ["2x2", "2x4", "4x2", "4x4", "2x1", "1x2"]
+      enum: ["2x1", "1x2", "2x2", "2x3", "2x4", "3x2", "4x2", "4x3", "4x4", "5x3"]
     AttachmentRole:
       type: string
       enum: [visual_reference, content_extraction, data_source, style_reference]

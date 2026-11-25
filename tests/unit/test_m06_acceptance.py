@@ -400,38 +400,27 @@ def test_a24_reject_zero_models() -> None:
 
 
 def test_a25_route_layer_logged() -> None:
-    """A25：各级命中率/升级率可从 IntentRouteLog 复算（非永真断言）。"""
+    """A25：意图裁判唯一化后 IntentRouteLog 全部记 L1（ADR-020 D2）。
+
+    原断言「两条 L1 + step11 一条 L3 → 升级率 1/3」随 step11 `classify_intent`
+    删除而作废：级联端口仍可独立调用（test_m06_intent_cascade 覆盖），但
+    validate_chain 不再二次裁判，注入的 classifier/embedder 不得改变路由层。
+    """
     store = IntentRouteLogStore()
-    # 两条 L1 + 一条 L3 → L1=0.67, L3=0.33, 升级率=0.33
-    for _ in range(2):
+    for desc in ("做一个能翻月的日历", "给我整一个能显示日期的小玩意"):
         validate_chain(
-            "s",
-            "r",
-            "做一个能翻月的日历",
-            "4x4",
-            [],
-            "WIDGET_GENERATION",
-            100.0,
+            "s", "r", desc, "4x4", [], "WIDGET_GENERATION", 100.0,
+            classifier=CountingClassifier(
+                LowTierResult(IntentCategory.WIDGET_GENERATION, True, 100)
+            ),
+            embedder=CountingEmbedder(0.0),
             route_log=store,
         )
-    validate_chain(
-        "s",
-        "r",
-        "给我整一个能显示日期的小玩意",
-        "4x4",
-        [],
-        "WIDGET_GENERATION",
-        100.0,
-        classifier=CountingClassifier(
-            LowTierResult(IntentCategory.WIDGET_GENERATION, True, 100)
-        ),
-        embedder=CountingEmbedder(0.0),
-        route_log=store,
-    )
     stats = store.stats()
-    assert stats["L1"] == pytest.approx(2 / 3)
-    assert stats["escalation_rate"] == pytest.approx(1 / 3)
-    assert all(row.route_layer is not None for row in store.rows)
+    assert len(store.rows) == 2
+    assert stats["L1"] == pytest.approx(1.0)
+    assert stats["escalation_rate"] == pytest.approx(0.0)
+    assert all(row.route_layer.value == "L1" for row in store.rows)
 
 
 # ── A26 偏好建议 ────────────────────────────────────────────────────────────

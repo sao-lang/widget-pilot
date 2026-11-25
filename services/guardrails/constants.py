@@ -38,6 +38,11 @@ GRID_HINT_PATTERNS: tuple[tuple[str, GridSpec], ...] = (
     (r"2\s*[x×]\s*2|两行两列|二行二列", GridSpec._2X2),
     (r"2\s*[x×]\s*1|两行一列|二行一列", GridSpec._2X1),
     (r"1\s*[x×]\s*2|一行两列|一行二列", GridSpec._1X2),
+    # v2fix：新增 4 规格（用户复杂描述实测 2x3/3x2/4x3/5x3 被误判缺 grid）
+    (r"2\s*[x×]\s*3|两行三列|二行三列", GridSpec._2X3),
+    (r"3\s*[x×]\s*2|三行两列|三行二列", GridSpec._3X2),
+    (r"4\s*[x×]\s*3|四行三列", GridSpec._4X3),
+    (r"5\s*[x×]\s*3|五行三列", GridSpec._5X3),
 )
 
 # 宿主/产物锚点词表（ADR-004 去类型化）：只回答「有没有承载 widget 的位置或产物」，
@@ -161,9 +166,13 @@ OUT_OF_SCOPE_PATTERNS: tuple[str, ...] = (
     _N8_STATUS,
 )
 
-# 进护栏 check_input 没有正向优先：N1/N4 需自带「宿主 + 生成动词」联合排除，
+# 进护栏 check_input 没有正向优先：N1/N4/N5 需自带「宿主 + 生成动词」联合排除，
 # 否则「能帮我在桌面加个天气吗？」会被二次误拒（ADR-004 复审 B1）。
-# 仍从同一批语义族常量派生，不引入第二份手写文本。
+# ADR-020 D2：N5（「卡片怎么添加」教程族）**不加** `_NEG_WIDGET_GUARD`——
+# 该 guard 禁止整句出现宿主词，而 N5 自身要求句首就是宿主词，二者互斥会让
+# N5 永久失效（review B1：「卡片怎么添加到桌面」被放行）。硬样本误拒改由
+# check_input 的「显式生成动词+宿主+grid 正向优先豁免」处理（见 input_guard）。
+# OUT_OF_SCOPE_PATTERNS（L1）有正向优先保护，不动。
 INTENT_GUARD_PATTERNS: tuple[str, ...] = (
     _NEG_WIDGET_GUARD + _N1_QUERY,
     _N2_CHAT,

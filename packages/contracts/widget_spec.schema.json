@@ -13,7 +13,7 @@
   "properties": {
     "spec_version": { "type": "string", "minLength": 1, "description": "版本化，索引与 manifest 均绑定" },
     "widget_id": { "type": "string", "minLength": 1 },
-    "grid": { "enum": ["2x2", "2x4", "4x2", "4x4", "2x1", "1x2"], "description": "用户显式选择，不推断" },
+    "grid": { "enum": ["2x1", "1x2", "2x2", "2x3", "2x4", "3x2", "4x2", "4x3", "4x4", "5x3"], "description": "用户显式选择，不推断" },
     "widget_type": { "enum": ["calendar", "clock", "alarm", "task", "custom"] },
     "intent": { "type": "string", "minLength": 1, "description": "归一化后的描述" },
     "attachments": {
@@ -38,7 +38,11 @@
         "required": ["slot", "content"],
         "properties": {
           "slot": { "type": "string", "minLength": 1 },
-          "content": { "type": "string" }
+          "content": { "type": "string" },
+          "image_data_url": {
+            "type": "string",
+            "description": "可选内联图片（data:image/...;base64,...）；无网络沙箱内唯一可出像素的形态"
+          }
         }
       }
     },

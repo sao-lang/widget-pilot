@@ -29,6 +29,8 @@ class CostEntry:
         tool_calls: 累计工具调用次数。
         sandbox_minutes: 累计沙箱分钟数。
         repro_fingerprint: 该 run 的复现指纹（含 preference_version）。
+        generation_path: 生成路径标签（ADR-019 D1；deterministic/cloud-fallback/
+            llm-only/llm-rework），供三口径统计 GROUP BY。
         created_at: 落账时刻（UTC，带时区）。
     """
 
@@ -41,6 +43,7 @@ class CostEntry:
     tool_calls: int
     sandbox_minutes: float
     repro_fingerprint: str
+    generation_path: str
     created_at: datetime
 
 
@@ -55,11 +58,14 @@ class CostEntryMeta:
         user_id: 租户标识（由会话注入，State 无此字段）。
         model_tier: 本轮模型档位；None 时取 ``state.tier_history`` 末项。
         repro_inputs: 复现指纹十字段（``preference_version`` 由装配层注入）。
+        generation_path: 生成路径标签（ADR-019 D2）；默认 llm-only 兼容未注入
+            的旧调用点，生产由 dispatcher 按分支注入真实值。
     """
 
     user_id: str
     model_tier: str | None = None
     repro_inputs: ReproInputs = field(default_factory=ReproInputs)
+    generation_path: str = "llm-only"
 
 
 @runtime_checkable

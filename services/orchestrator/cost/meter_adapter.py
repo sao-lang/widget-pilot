@@ -51,6 +51,7 @@ def accrue(
             tool_calls=int(used.get("tool_calls", 0)),
             sandbox_minutes=float(used.get("sandbox_minutes", 0.0)),
             repro_fingerprint=compute_repro_fingerprint(entry_meta.repro_inputs),
+            generation_path=entry_meta.generation_path,
             created_at=deps.clock.now(),
         )
     )

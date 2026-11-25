@@ -34,6 +34,12 @@ class BundleStorePort(Protocol):
         """按用户列包，可选状态过滤。"""
         ...
 
+    def list_by_session(
+        self, user_id: str, session_id: str, state: str | None, limit: int
+    ) -> list[JsonObject]:
+        """按会话列包（租户隔离必带 user_id），最新在前。"""
+        ...
+
     def update_state(self, bundle_id: str, user_id: str, state: str) -> bool:
         """幂等更新状态；返回是否发生实际变更（供审计幂等判定）。"""
         ...
@@ -42,6 +48,20 @@ class BundleStorePort(Protocol):
         self, bundle_id: str, user_id: str, versions: tuple[VersionNode, ...]
     ) -> None:
         """覆盖版本链（回滚追加节点后写回）。"""
+        ...
+
+    def update_content(
+        self,
+        bundle_id: str,
+        user_id: str,
+        bundle: JsonObject,
+        versions: tuple[VersionNode, ...],
+    ) -> bool:
+        """重成包：更新已有 bundle 的可变字段并追加版本链（同一事务）。
+
+        租户隔离按 (bundle_id, user_id) 精确定位；不存在/越权返回 False，
+        不创建新行（与 insert 的唯一约束语义区分）。
+        """
         ...
 
 

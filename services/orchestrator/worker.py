@@ -125,6 +125,13 @@ async def main() -> None:
     procedure_store = PgProcedureStore(dsn)
     preference_port = PreferenceInjectionAdapter(preference_store)
     procedure_port = ProcedureHintAdapter(procedure_store)
+    # U-8：附件洞察槽真实端口（M05 已产出的 insight JSON，零视觉模型）。
+    from services.control_plane.attachments.s3_store import S3ObjectStore
+    from services.orchestrator.memory.attachment_adapter import StoreInsightPort
+
+    attachment_insight_port = StoreInsightPort(
+        attachment_store, S3ObjectStore()
+    )
 
     def _preferred_grids_get(user_id: str) -> list[str]:
         """按 user_id 读高置信 preferred_grids（B1，偏好是建议非门禁）。"""
@@ -142,6 +149,7 @@ async def main() -> None:
             run_input,
             preference_port=preference_port,
             procedure_port=procedure_port,
+            attachment_port=attachment_insight_port,
         )
 
     # B7：真实 PG 成本账本 + 终态落账回调（repro 指纹含真实 preference_version）。
@@ -154,7 +162,13 @@ async def main() -> None:
     cost_ledger = deps.cost_ledger  # 闭包内局部收窄（Python 闭包不保留外部 guard 收窄）
 
     def _cost_sink(state: State) -> None:
-        """终态落成本账（B7）：user_id 与 preference_version 从真实会话/偏好读。"""
+        """终态落成本账（B7）：user_id 与 preference_version 从真实会话/偏好读。
+
+        ADR-019 D2：generation_path 从请求级 contextvar 读（由 Dispatcher 分流时
+        设置），不改 run() 的 cost_sink 签名；默认 llm-only 兼容未埋点路径。
+        """
+        from services.orchestrator.request_context import generation_path_var
+
         row = sessions.get(state.session_id)
         pref_version = preference_store.get(row.user_id).version
         accrue(
@@ -164,6 +178,7 @@ async def main() -> None:
             CostEntryMeta(
                 user_id=row.user_id,
                 repro_inputs=ReproInputs(preference_version=pref_version),
+                generation_path=generation_path_var.get(),
             ),
         )
 
@@ -184,6 +199,35 @@ async def main() -> None:
     task_store = PgGenerationTaskStore(dsn)
     task_turn_store = PgTaskTurnStore(dsn)
 
+    # P1：确定性通道钩子（零云端 LLM）。依赖不齐（S3/JWT_SECRET）时 build 返回 None
+    # → Dispatcher 未注入 → 走原 run() 链路，fail-open 不阻断生产。
+    from services.orchestrator.deterministic_runner import build_deterministic_runner
+
+    deterministic_runner = build_deterministic_runner(
+        dsn=dsn, redis_url=redis_url,
+        jwt_secret=os.getenv("JWT_SECRET"),
+        container_cli_path=os.getenv("WIDGETPILOT_CONTAINER_CLI_PATH", ""),
+        model_gateway=deps.model,  # 返工③唯一真实模型接线点（env=on 时才构造端口）
+    )
+
+    # #42：确定性命中分支跳过 run()（内部发 checkpoint/cost/done），补发终态
+    # 事件供前端 SSE 消费（工厂逻辑可单测，见 dispatcher_events.py）。
+    # ADR-019 D4/D5/#38：DONE 的 bundle_ref 必须是真实产物。M09 成包以三门禁
+    # 全过为前提，故"bundle 存在且属主"即"已过门禁"。用只读 PgBundleStore 直查，
+    # 不依赖确定性通道是否启用（S3/JWT 缺失时 LLM 路径产物同样受校验）。
+    from services.control_plane.bundles.pg_store import PgBundleStore
+    from services.orchestrator.dispatcher_events import make_terminal_event_emitter
+
+    _bundle_store = PgBundleStore(dsn)
+
+    def _verify_bundle(bundle_id: str, user_id: str) -> bool:
+        return _bundle_store.get(bundle_id, user_id) is not None
+
+    # ADR-019 D3：全分支漏斗留证（含 clarification/off/异常这些不落账分支）。
+    from services.orchestrator.cost.occurrence import PgGenerationOccurrenceStore
+
+    _occurrence_store = PgGenerationOccurrenceStore(dsn)
+
     dispatcher = Dispatcher(
         queue=queue, deps=deps, sessions=sessions, validator=validator,
         input_enricher=_enrich_input, cost_sink=_cost_sink,
@@ -191,6 +235,10 @@ async def main() -> None:
         task_store=task_store,
         plan_llm=GatewayPlanLLM(deps.model),
         task_turn_store=task_turn_store,
+        deterministic_runner=deterministic_runner,  # type: ignore[arg-type]
+        terminal_event_emitter=make_terminal_event_emitter(deps),
+        artifact_verifier=_verify_bundle,
+        occurrence_sink=_occurrence_store.append,
     )
 
     print(

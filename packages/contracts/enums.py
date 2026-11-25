@@ -21,12 +21,16 @@ class BundleState(StrEnum):
     DELETED = "DELETED"
 
 class GridSpec(StrEnum):
-    _2X2 = "2x2"
-    _2X4 = "2x4"
-    _4X2 = "4x2"
-    _4X4 = "4x4"
     _2X1 = "2x1"
     _1X2 = "1x2"
+    _2X2 = "2x2"
+    _2X3 = "2x3"
+    _2X4 = "2x4"
+    _3X2 = "3x2"
+    _4X2 = "4x2"
+    _4X3 = "4x3"
+    _4X4 = "4x4"
+    _5X3 = "5x3"
 
 class WidgetType(StrEnum):
     CALENDAR = "calendar"

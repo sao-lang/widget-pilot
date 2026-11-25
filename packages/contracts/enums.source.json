@@ -2,7 +2,7 @@
   "$comment": "M02 枚举单一事实来源（§6.3）：enums.ts / enums.py 均由此生成，前后端共用同一份（I2）。任何枚举/错误码变更必须改本文件并重跑 pnpm gen:enums。",
   "SessionState": ["DRAFT", "RUNNING", "PAUSED", "AWAITING_INPUT", "VALIDATING", "COMPLETED", "FAILED", "CANCELLED"],
   "BundleState": ["GENERATED", "INSTALLED", "DELETED"],
-  "GridSpec": ["2x2", "2x4", "4x2", "4x4", "2x1", "1x2"],
+  "GridSpec": ["2x1", "1x2", "2x2", "2x3", "2x4", "3x2", "4x2", "4x3", "4x4", "5x3"],
   "WidgetType": ["calendar", "clock", "alarm", "task", "custom"],
   "AttachmentRole": ["visual_reference", "content_extraction", "data_source", "style_reference"],
   "Capability": ["date", "timer", "local_storage", "static_data", "theme", "locale"],

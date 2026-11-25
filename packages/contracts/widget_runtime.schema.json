@@ -12,7 +12,7 @@
       "additionalProperties": false,
       "required": ["grid", "px"],
       "properties": {
-        "grid": { "enum": ["2x2", "2x4", "4x2", "4x4", "2x1", "1x2"] },
+        "grid": { "enum": ["2x1", "1x2", "2x2", "2x3", "2x4", "3x2", "4x2", "4x3", "4x4", "5x3"] },
         "px": {
           "type": "object",
           "additionalProperties": false,

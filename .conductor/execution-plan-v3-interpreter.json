@@ -1,0 +1,211 @@
+{
+  "version": "1.1",
+  "goal": "S3 第一步：实现三层解释器接口 + RuleInterpreter（共现消歧/分散槽位聚合/后置grid分配）+ 24 条复杂描述探针，用 mock 权重跑通零云端 LLM 链路；不依赖真实模型权重",
+  "source": "user_request",
+  "mode": "conductor",
+  "template": "conductor.4-development",
+  "confidence": 0.9,
+  "assumptions": [
+    "S2 已完成：ADR-016 设计已批准（U-1 BIO / U-2 本地文件+env / U-3 本地小模型不算 LLM / U-4 阈值），契约 confirmed Acceptance=7，覆盖矩阵 23 行 PASS",
+    "设备已实测：AMD Ryzen 7 4800H 8核16线程 / 31.4GB RAM / onnxruntime 1.32 CPU provider 可用，跑小型 BIO 模型绰绰有余",
+    "仓库当前无模型权重：本地模型层本轮用 mock 注入，只测接口与降级判据，不宣称模型质量",
+    "已否决简化：规则层必须实现消歧三件套，不许退回 v1 切片法",
+    "用户明确先出设计再进入 S3；本轮先做解释器域实现与探针，不改 run()/decide()/公共契约 schema"
+  ],
+  "clarifications": [],
+  "tasks": [
+    {
+      "id": "T1",
+      "goal": "TDD RED：解释器协议与规则层失败测试"
+    },
+    {
+      "id": "T2",
+      "goal": "实现 Interpreter 协议 + SlotFill + RuleInterpreter 共现消歧三件套"
+    },
+    {
+      "id": "T3",
+      "goal": "24 条复杂描述探针测试（含消歧反例）+ mock 本地模型层与降级判据"
+    },
+    {
+      "id": "T4",
+      "goal": "门禁：pytest / ruff / pyright / contracts:check + review"
+    }
+  ],
+  "nodes": [
+    {
+      "kind": "skill",
+      "action": "派全新上下文子代理做独立 review：七维 + 接线四问 + 功能遗漏/断点，红队视角找反例",
+      "command": "派新子代理，brief 自包含 diff + 规格 + 完成标准",
+      "command_type": "judgment",
+      "exit_criteria": "收到新子代理报告（非复用旧报告），含 Blocker 分级",
+      "exit_check": {
+        "kind": "file_content",
+        "expect": "报告含 Blocker/Should/Nit 与 文件:行号",
+        "evidence": "overview 独立 review 章节"
+      },
+      "on_fail": "retry",
+      "on_fail_next": "n_red_interpreter",
+      "when": "standard 或 full 档",
+      "atomic": true,
+      "id": "n_review-DISPATCH-DISPATCH",
+      "label": "独立复核：source_purity + review_gate",
+      "ref": "review",
+      "route_ref": "review/DISPATCH",
+      "expanded_from": "n_review-DISPATCH"
+    },
+    {
+      "id": "n_red_interpreter",
+      "kind": "loop",
+      "ref": "tdd:RED",
+      "action": "写失败测试：Interpreter 协议 + SlotFill 结构 + RuleInterpreter 三件套（桌面+卡片=1、分散槽位聚合、后置grid分配）+ mock 本地层降级判据",
+      "command": ".venv/Scripts/python.exe -m pytest tests/unit/test_v3_interpreter.py -q",
+      "command_type": "command",
+      "exit_criteria": "RED：ImportError 或断言失败，原因是实现不存在",
+      "exit_check": {
+        "kind": "command_exit",
+        "expect": "nonzero",
+        "evidence": "pytest RED 输出"
+      },
+      "on_fail": "ask",
+      "route_ref": "tdd/RED",
+      "label": "TDD RED：解释器协议与规则层失败测试",
+      "budget": {
+        "max_rounds": 3
+      }
+    },
+    {
+      "id": "n_green_interpreter",
+      "kind": "loop",
+      "ref": "tdd:GREEN",
+      "action": "实现 services/guardrails/interpreter/ 域：Interpreter 协议 + SlotFill/InterpretResult + RuleInterpreter（共现消歧/分散聚合/后置grid）+ 24 条探针样例集",
+      "command": ".venv/Scripts/python.exe -m pytest tests/unit/test_v3_interpreter.py -q && .venv/Scripts/python.exe -m ruff check services/guardrails/interpreter tests/unit/test_v3_interpreter.py",
+      "command_type": "command",
+      "exit_criteria": "GREEN：全部测试通过 + ruff 绿",
+      "exit_check": {
+        "kind": "command_exit",
+        "expect": "0",
+        "evidence": "pytest 全绿 + ruff All checks passed"
+      },
+      "on_fail": "retry",
+      "route_ref": "tdd/GREEN",
+      "label": "TDD GREEN：实现解释器域与规则层",
+      "budget": {
+        "max_rounds": 3
+      },
+      "on_fail_next": "n_red_interpreter"
+    },
+    {
+      "id": "n_green_wiring",
+      "kind": "loop",
+      "ref": "tdd:GREEN",
+      "action": "mock 本地模型层 + 三层降级判据 + 按层可观测：rule=0 / local=0 / cloud>0 计数；缺权重 fail-fast 告警不冒充 bigram",
+      "command": ".venv/Scripts/python.exe -m pytest tests/unit/test_v3_interpreter.py tests/unit/test_m06_routing_ports.py -q",
+      "command_type": "command",
+      "exit_criteria": "三层判据与 ADR-004 硬样本测试全绿",
+      "exit_check": {
+        "kind": "command_exit",
+        "expect": "0",
+        "evidence": "pytest 全绿"
+      },
+      "on_fail": "retry",
+      "route_ref": "tdd/GREEN",
+      "label": "TDD GREEN：三层判据与按层可观测",
+      "budget": {
+        "max_rounds": 3
+      },
+      "on_fail_next": "n_red_interpreter"
+    },
+    {
+      "id": "n_gate",
+      "kind": "tool",
+      "ref": "tdd.verify",
+      "action": "全量门禁",
+      "command": ".venv/Scripts/python.exe -m pytest -q && .venv/Scripts/python.exe -m ruff check . && npx pyright --pythonpath .venv/Scripts/python.exe && pnpm contracts:check",
+      "command_type": "command",
+      "exit_criteria": "pytest / ruff / pyright / contracts 全绿",
+      "exit_check": {
+        "kind": "command_exit",
+        "expect": "0",
+        "evidence": "四条门禁 rc=0"
+      },
+      "on_fail": "ask",
+      "route_ref": "tdd/EVIDENCE",
+      "label": "全量门禁"
+    },
+    {
+      "id": "n_done",
+      "kind": "gate",
+      "ref": "done",
+      "action": "收尾核对：24 条探针实测数字 + 门禁证据 + 工作记忆",
+      "command": "echo S3-STEP1-DONE",
+      "command_type": "command",
+      "exit_criteria": "产物与证据齐全",
+      "exit_check": {
+        "kind": "file_content",
+        "expect": "S3-STEP1-DONE",
+        "evidence": "收尾命令输出"
+      },
+      "on_fail": "ask",
+      "label": "收尾：实测数字与门禁证据"
+    }
+  ],
+  "edges": [
+    {
+      "from": "n_red_interpreter",
+      "to": "n_green_interpreter",
+      "type": "seq"
+    },
+    {
+      "from": "n_green_interpreter",
+      "to": "n_green_wiring",
+      "type": "seq"
+    },
+    {
+      "from": "n_green_wiring",
+      "to": "n_gate",
+      "type": "seq"
+    },
+    {
+      "from": "n_gate",
+      "to": "n_review-DISPATCH-DISPATCH",
+      "type": "seq"
+    },
+    {
+      "from": "n_review-DISPATCH-DISPATCH",
+      "to": "n_done",
+      "type": "seq"
+    }
+  ],
+  "paths": [
+    {
+      "id": "P1",
+      "label": "n_red_interpreter / n_green_interpreter / n_green_wiring / n_gate",
+      "guard": "默认路线（无分支条件）",
+      "steps": [
+        "n_red_interpreter",
+        "n_green_interpreter",
+        "n_green_wiring",
+        "n_gate",
+        "n_review-DISPATCH-DISPATCH",
+        "n_done"
+      ],
+      "terminal": "n_done",
+      "is_happy": true
+    }
+  ],
+  "budget": {
+    "max_steps": 24,
+    "max_retries": 2,
+    "noop_limit": 3
+  },
+  "meta": {
+    "created": "2026-11-25",
+    "context_refs": [
+      "ADR-016",
+      "f76a7264-本地小模型兜底解释器v3.spec.md",
+      ".workbuddy/memory/2026-11-25.md"
+    ],
+    "tier": "full",
+    "expanded": true
+  }
+}
