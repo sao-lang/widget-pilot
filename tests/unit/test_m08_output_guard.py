@@ -203,3 +203,31 @@ def test_i5_no_eval_exec_or_subprocess_in_guard_path(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(builtins, "exec", forbidden)
     report, _ = _guard(_VALID_TSX)
     assert report.passed is True
+
+
+def test_a10_unknown_device_api_blocked_in_output_guard() -> None:
+    """ADR-010 §3.2：出护栏拦截白名单外设备 API（进护栏只扫描述，这里扫模型源码）。"""
+    source = _VALID_TSX + 'window.widgetDevice.getRootAccess();\n'
+    report, _ = _guard(source)
+    assert report.passed is False
+    assert report.reason_code == ReasonCode.GUARD_OUTPUT_HIT
+    rules = " ".join(v.rule for v in report.violations)
+    assert "dangerous_api:device.getRootAccess" in rules
+    assert all(len(v.snippet_hash) == 64 for v in report.violations)
+    assert "window.widgetDevice.getRootAccess()" not in repr(report)  # 完整源码片段不进证据
+
+
+def test_a11_dynamic_device_api_construction_blocked_in_output_guard() -> None:
+    """ADR-010 §3.2：动态构造 API 名 device[name]() 在出护栏被形状层拦截。"""
+    source = _VALID_TSX + 'const n = "getLocation"; device[n]();\n'
+    report, _ = _guard(source)
+    assert report.passed is False
+    rules = " ".join(v.rule for v in report.violations)
+    assert "dynamic_api:constructed-name" in rules
+
+
+def test_a12_legit_device_api_passes_output_guard() -> None:
+    """白名单内设备 API 不误伤（零回归）。"""
+    source = _VALID_TSX + 'window.widgetDevice.getBattery();\n'
+    report, _ = _guard(source)
+    assert report.passed is True

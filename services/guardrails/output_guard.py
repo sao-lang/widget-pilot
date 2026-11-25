@@ -17,6 +17,7 @@ from jsonschema import Draft202012Validator
 from packages.contracts.enums import GridSpec, ReasonCode, WidgetType
 from packages.contracts.types import JsonValue
 from services.guardrails.capability import declared_capabilities, invalid_capabilities
+from services.guardrails.dangerous_call import detect_dangerous_calls
 from services.guardrails.output_ports import (
     GuardJudge,
     OutputGuardHit,
@@ -84,6 +85,20 @@ def check_output_guard(
     forbidden = scan_forbidden(ast)
     if forbidden:
         return _fail(GuardJudge.FORBIDDEN_CONTENT, ReasonCode.GUARD_OUTPUT_HIT, source_ref, spec, list(forbidden))
+
+    # ADR-010 §3.2：危险接口检测在出护栏（模型输出后、沙箱执行前）再跑一遍。
+    # 进护栏只扫用户描述，此处扫模型生成的源码（含动态构造 API 名 / 白名单外接口）。
+    # 与进护栏同源词表 + device-apis.json 白名单，不做语义放行、不调模型。
+    danger = detect_dangerous_calls(source, source_kind="code")
+    if danger.hit:
+        danger_violations = [
+            Violation("DangerousCall", "0:0", sha256_hex(rule.encode()), rule)
+            for rule in danger.violations
+        ]
+        return _fail(
+            GuardJudge.FORBIDDEN_CONTENT, ReasonCode.GUARD_OUTPUT_HIT,
+            source_ref, spec, danger_violations,
+        )
 
     pii = _pii_violations(spec, source)
     if pii:

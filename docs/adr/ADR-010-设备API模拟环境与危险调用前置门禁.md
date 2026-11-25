@@ -116,7 +116,7 @@
 
 - S0 契约 ✅：`device-apis.json` + ADR 本稿（不进四生成物 drift 链，作为独立数据文件）。
 - S1 ✅：沙箱 `window.widgetDevice` mock（限流/Doze/配额）+ `device_calls` 上报 + Python 五类违规检测 + `DEVICE_API_ASSERT` 门禁；真容器验证通过。
-- S2 ✅：`dangerous_call.py` 词表+形状层 + `check_input` 集成；模型兜底刻意不实现（无端点 fail-fast、不得单独放行）。
+- S2 ✅：`dangerous_call.py` 词表+形状层 + `check_input` 集成；模型兜底刻意不实现（无端点 fail-fast、不得单独放行）。2026-11-25 补 §3.2 遗漏的出护栏一侧：`output_guard.check_output_guard` 在沙箱执行前对模型源码再跑一遍 `detect_dangerous_calls(source_kind="code")`，命中按 `FORBIDDEN_CONTENT`/`GUARD_OUTPUT_HIT` 短路，复用 `dangerous_api:device.*` 与 `dynamic_api:constructed-name` 规则标签（片断只留 hash、不存原文）；3 单测（白名单外 API/动态构造/合法 API 零回归）。
 - S3 ✅：`revision.py` 撤销合并 + 改需求 interrupt/重跑；18 单测。
 - S4 待续：真模型端点下的调用序列/影子期阈值校准（依赖 M20）。
 
@@ -125,4 +125,6 @@
 | 版本 | 日期 | 变更 |
 |---|---|---|
 | v0.1 草案 | 2026-11-22 | 首次提出，待用户确认落地顺序与 API 清单 |
-| v1.0（本轮） | 2026-11-22 | S0–S3 全落地：device-apis.json、沙箱设备 mock+检测、危险调用前置门禁、两类会话修正；全量 673 passed，ruff/pyright 全绿；commit 4250377(a 快照)/S1/4f32c89(S2)/6388597(S3) |
+| v1.0 | 2026-11-22 | S0–S3 全落地：device-apis.json、沙箱设备 mock+检测、危险调用前置门禁、两类会话修正；全量 673 passed，ruff/pyright 全绿；commit 4250377(a 快照)/S1/4f32c89(S2)/6388597(S3) |
+| v1.1 | 2026-11-24 | 补浏览器侧运行时 `packages/device_sim`（window.widgetDevice）+ iframe bridge 通道 `device-channel.ts`（宿主 handler/widget 代理/一键装配/端到端测试） |
+| v1.2（本轮） | 2026-11-25 | 补 §3.2 遗漏的出护栏危险检测（output_guard 串 detect_dangerous_calls，3 单测）；全量 704 passed 10 skipped |
